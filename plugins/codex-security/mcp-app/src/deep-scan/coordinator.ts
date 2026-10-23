@@ -800,7 +800,12 @@ export class DeepScanCoordinator {
     let reducerFailures = persistedReducerFailureStreak(
       this.state.persistedWorkers ?? [],
     );
-    if (this.state.consecutiveErrors >= errorLimit) {
+    // Saturation already accepted the report despite surplus discovery failures.
+    // Evidence-only repair must not reopen that discovery stopping decision.
+    if (
+      selectedReason !== "saturated" &&
+      this.state.consecutiveErrors >= errorLimit
+    ) {
       const failure = latestPersistedReplaceableFailure(
         this.state.persistedWorkers ?? [],
       );

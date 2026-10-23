@@ -102,14 +102,15 @@ const {
     "recordCodexSecurityScanDraftViaWorkbench"
   >;
 
-for (const { route, saturated } of [
-  { route: "plugin", saturated: false },
-  { route: "cli", saturated: false },
-  { route: "headless continuation", saturated: false },
-  { route: "plugin", saturated: true },
+for (const { route, saturated, lateFailure } of [
+  { route: "plugin", saturated: false, lateFailure: false },
+  { route: "cli", saturated: false, lateFailure: false },
+  { route: "headless continuation", saturated: false, lateFailure: false },
+  { route: "plugin", saturated: true, lateFailure: false },
+  { route: "plugin", saturated: true, lateFailure: true },
 ] as const) {
   test(
-    `${route} repairs a selected unsealed aggregate before completion${saturated ? " with saturation omissions" : ""}`,
+    `${route} repairs a selected unsealed aggregate before completion${saturated ? (lateFailure ? " with a late saturation failure" : " with saturation omissions") : ""}`,
     { timeout: 45_000 },
     async (t) => {
       const root = await mkdtemp(path.join(tmpdir(), "selected-evidence-"));
@@ -139,7 +140,7 @@ for (const { route, saturated } of [
       await writeFile(
         path.join(env.CODEX_HOME, "codex-security", "config.toml"),
         saturated
-          ? "[deep_scan]\nworkers = 2\nmax_discovery_runs = 4\nstop_after_no_new = 1\n"
+          ? "[deep_scan]\nworkers = 2\nmax_discovery_runs = 4\nstop_after_no_new = 1\nstop_after_consecutive_errors = 1\n"
           : "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
       );
       const runWorkbench = async (args: string[], input?: string | Buffer) => {
@@ -161,8 +162,8 @@ for (const { route, saturated } of [
         threadId: owner,
       });
       const releaseLateWorker = Promise.withResolvers<void>();
-      const lateAccepted = Promise.withResolvers<void>();
-      const releaseAcceptance = Promise.withResolvers<void>();
+      const lateSettled = Promise.withResolvers<void>();
+      const releaseSettlement = Promise.withResolvers<void>();
       const seedExecutor = new FakeExecutor({
         discoveryCandidateId: "accepted-finding",
         ...(saturated
@@ -178,23 +179,32 @@ for (const { route, saturated } of [
           const result = await updateWorker(update);
           if (
             update.kind === "discovery" &&
-            update.status === "succeeded" &&
+            (update.status === "succeeded" ||
+              (lateFailure && update.status === "canceled")) &&
             path.basename(path.dirname(update.promptPath)) === "discovery-0004"
           ) {
-            lateAccepted.resolve();
-            await releaseAcceptance.promise;
+            lateSettled.resolve();
+            await releaseSettlement.promise;
           }
           return result;
         };
         const execute = seedExecutor.run.bind(seedExecutor);
         let reducers = 0;
         seedExecutor.run = async (request) => {
+          if (
+            lateFailure &&
+            request.kind === "discovery" &&
+            path.basename(path.dirname(request.promptPath)) === "discovery-0004"
+          ) {
+            await releaseLateWorker.promise;
+            throw new Error("fixture late transient discovery failure");
+          }
           if (request.kind === "dedup" && ++reducers === 2) {
             releaseLateWorker.resolve();
-            await lateAccepted.promise;
+            await lateSettled.promise;
             request.signal.addEventListener(
               "abort",
-              () => releaseAcceptance.resolve(),
+              () => releaseSettlement.resolve(),
               { once: true },
             );
           }
@@ -207,6 +217,7 @@ for (const { route, saturated } of [
         pluginRoot,
         threadId: owner,
         executor: seedExecutor,
+        retryDelaysMs: [],
         onComplete: async (draft, signal, publication) => {
           const context = await createScanArtifactContext(
             run.scanId,
@@ -235,12 +246,18 @@ for (const { route, saturated } of [
         .filter((worker) => worker.mergeState === "buffered")
         .map((worker) => worker.id);
       assert.equal(accepted.terminalReason, saturated ? "saturated" : "capped");
-      assert.equal(omittedIds.length, saturated ? 1 : 0);
+      assert.equal(omittedIds.length, saturated && !lateFailure ? 1 : 0);
+      assert.equal(accepted.consecutiveErrors, lateFailure ? 1 : 0);
+      if (lateFailure)
+        assert.equal(
+          accepted.consecutiveErrors,
+          accepted.config.stopAfterConsecutiveErrors,
+        );
       const originalCoverage = await readJson(run.scanDir, "coverage.json");
       const originalFindings = (await readJson(run.scanDir, "findings.json"))
         .findings;
-      const acceptedPaths = accepted.persistedWorkers.map(
-        (worker) => worker.resultManifestPath!,
+      const acceptedPaths = accepted.persistedWorkers.flatMap((worker) =>
+        worker.resultManifestPath ? [worker.resultManifestPath] : [],
       );
       // Simulate artifacts accepted before the update, without resetting the
       // persisted terminal status, selected manifest, budget or coordinator lease.
@@ -338,6 +355,7 @@ for (const { route, saturated } of [
       assert.equal(repaired.status, "succeeded");
       assert.equal(repaired.evidenceRepairRequired, undefined);
       assert.equal(repaired.terminalReason, before.terminalReason);
+      assert.equal(repaired.consecutiveErrors, before.consecutiveErrors);
       assert.deepEqual(
         repaired.persistedWorkers
           ?.filter((worker) => worker.mergeState === "buffered")
