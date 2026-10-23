@@ -1,31 +1,32 @@
+import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
+import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type { JsonObject } from "../src/types.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
   CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
+  CodexWorkerRequest,
+  CodexWorkerResult,
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import {
-  lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import {
   testDeepScanLifecycle,
-  testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -52,6 +53,7 @@ import {
   createCoordinator,
   runCoordinator,
   recordingClock,
+  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
@@ -1152,7 +1154,7 @@ async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() 
   assert.equal(store.run.noNewStreak, 2);
 }
 
-async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
+async function testLongWorkerErrorIsPreservedAtPersistenceBoundary() {
   const { fixture, store } = await coordinatorFixture();
   const fullError = `fixture long validator error: ${"x".repeat(5_000)}`;
   const terminal = await runCoordinator(
@@ -1162,13 +1164,13 @@ async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
     { retryDelaysMs: [1, 3, 9], random: () => 0 },
   );
   assert.equal(terminal?.status, "failed");
-  assert.equal(store.failureMessages[0].length <= 2_400, true);
-  assert.match(store.failureMessages[0], /truncated; sha256:/);
+  assert.ok(store.failureMessages[0].includes(fullError));
+  assert.equal(terminal.error, store.failureMessages[0]);
   assert.equal(terminal.manifestPath, undefined);
   const [worker] = [...store.workers.values()];
   assert.equal(worker.status, "canceled");
   assert.equal(worker.attempt, 4);
-  assert.match(worker.error!, /truncated; sha256:/);
+  assert.equal(worker.error, `transient_error: ${fullError}`);
 }
 
 async function testDiscoveryPhasePersistenceFailureStopsDispatch() {
@@ -1262,7 +1264,6 @@ async function testGenericDiagnosticsPreserveMissingResultRetries() {
 async function testMissingDiscoveryResultResumesExistingThread(
   withToolFailure = false,
 ) {
-  const specialFiles = withToolFailure && process.platform !== "win32";
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({
     invalidDiscoveryAttempts: 1,
@@ -1279,30 +1280,6 @@ async function testMissingDiscoveryResultResumesExistingThread(
       : {}),
   });
   const sleeps: number[] = [];
-  const execute = executor.run.bind(executor);
-  executor.run = async (request) => {
-    if (request.kind === "discovery") {
-      const note = path.join(request.workingDirectory, "saved-analysis.txt");
-      if (request.resumeThreadId) {
-        assert.equal(
-          await readFile(note, "utf8"),
-          "Synthetic saved analysis.\n",
-        );
-      } else {
-        await writeFile(note, "Synthetic saved analysis.\n");
-        if (specialFiles) {
-          execFileSync("mkfifo", [
-            path.join(request.workingDirectory, "worker.pipe"),
-          ]);
-          await symlink(
-            note,
-            path.join(request.workingDirectory, "analysis-link"),
-          );
-        }
-      }
-    }
-    return execute(request);
-  };
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
@@ -1330,42 +1307,14 @@ async function testMissingDiscoveryResultResumesExistingThread(
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
-  const workspace = [...executor.discoveryWorkingDirectories][0];
+  const workspace = [...executor.discoveryWorkingDirectories][0]!;
   const attempt = path.join(path.dirname(workspace), "attempts", "attempt-01");
   assert.equal(await realpath(workspace), workspace);
   assert.equal(await realpath(attempt), attempt);
-  if (specialFiles) {
-    assert.ok((await lstat(path.join(workspace, "worker.pipe"))).isFIFO());
-    await assert.rejects(lstat(path.join(attempt, "worker.pipe")), {
-      code: "ENOENT",
-    });
-    assert.ok(
-      (await lstat(path.join(attempt, "analysis-link"))).isSymbolicLink(),
-    );
-    assert.equal(
-      await readFile(path.join(attempt, "analysis-link"), "utf8"),
-      "Synthetic saved analysis.\n",
-    );
-  }
-  assert.equal(
-    await readFile(path.join(workspace, "saved-analysis.txt"), "utf8"),
-    "Synthetic saved analysis.\n",
-  );
-  assert.equal(
-    await readFile(path.join(attempt, "saved-analysis.txt"), "utf8"),
-    "Synthetic saved analysis.\n",
-  );
   assert.equal(
     executor.discoveryWorkingDirectories.size,
     1,
-    "same-thread completion keeps its original Standard scan workspace",
-  );
-  await assert.rejects(readFile(path.join(attempt, "result.json")), {
-    code: "ENOENT",
-  });
-  assert.equal(
-    (await readJson(path.join(workspace, "result.json"))).coverage.completeness,
-    undefined,
+    "same-thread completion preserves its live workspace beside the retry snapshot",
   );
 }
 
@@ -2231,7 +2180,8 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
     /Saved result publication failed: fixture retained result publication failure/,
   );
   assert.match(terminal?.error ?? "", /Original Deep Scan failure:/);
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
+  assert.ok(terminal?.error?.includes("y".repeat(2_350)));
+  assert.ok(terminal?.error?.includes("x".repeat(2_350)));
   assert.equal(
     (await store.get(fixture.run.scanId, "checkpoint-owner")).error,
     terminal?.error,
@@ -2245,7 +2195,7 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
   );
 }
 
-async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
+async function testStoppedPublicationFailurePreservesPrefixedDiagnostic() {
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const coordinator = createCoordinator(fixture, store, executor, {
@@ -2262,9 +2212,11 @@ async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
   const terminal = await coordinator.wait(undefined, 5_000);
 
   assert.equal(terminal?.status, "canceled");
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
-  assert.equal(store.publicationFailureMessages.length, 1);
-  assert.equal(store.publicationFailureMessages[0].length <= 2_400, true);
+  assert.equal(
+    terminal?.error,
+    `Saved result publication failed: fixture publication failure ${"z".repeat(2_400)}`,
+  );
+  assert.deepEqual(store.publicationFailureMessages, [terminal.error]);
   assert.match(
     store.publicationFailureMessages[0],
     /^Saved result publication failed: fixture publication failure/,
@@ -3807,8 +3759,6 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 6,
   });
-  Object.assign(fixture.run, { workflowVersion: "deep-security-scan/v2" });
-  Object.assign(store.run, { workflowVersion: "deep-security-scan/v2" });
   const executor = new FakeExecutor({
     blockDiscoveryAfterCalls: 2,
   });
@@ -3909,7 +3859,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   );
   const { coverage, ...publishedReduction } = completed[0];
   assert.deepEqual(
-    { ...publishedReduction, sourceCoverage: coverage },
+    publishedReduction,
     await readJson(acceptedReducer!.resultManifestPath!),
     "the accepted aggregate still reaches publication when redundant cancellation writes fail",
   );
@@ -4332,13 +4282,14 @@ try {
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
-  await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
+  await testLongWorkerErrorIsPreservedAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
   await testCancellationClearsRetryWait();
   await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
   await testInvalidArtifactsRetry();
+  await testSharedReceiptSurvivesWorkerRetry();
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);
   await testMissingReducerResultResumesExistingThread();
@@ -4369,7 +4320,7 @@ try {
   await testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess();
   await testRegistryEvictionAndExternalFailure();
   await testStoppedPublicationFailurePreservesOriginalDiagnostic();
-  await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
+  await testStoppedPublicationFailurePreservesPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
   await testStoreConfirmedReplacementSurvivesReadFailure();

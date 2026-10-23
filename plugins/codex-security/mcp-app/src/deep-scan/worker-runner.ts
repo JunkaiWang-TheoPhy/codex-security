@@ -14,7 +14,7 @@ import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
@@ -36,10 +36,10 @@ import type {
 
 export interface AcceptedDiscovery {
   id: string;
-  attempt?: number;
   resultPath: string;
   result: ScanDraftInput;
   completionSequence: number;
+  attempt?: number;
 }
 
 export type DiscoveryOutcome =
@@ -161,6 +161,7 @@ export class DeepScanWorkerRunner {
           artifacts,
           resultPath,
           run.scanId,
+          run,
         );
       },
     });
@@ -264,16 +265,16 @@ export class DeepScanWorkerRunner {
       count: consumed.length,
     });
 
-    const persistSourceCoverage =
-      run.workflowVersion === "deep-security-scan/v2";
     const artifactContext = {
       root: artifactDir,
       repoRoot: run.targetPath,
       scanId: run.scanId,
       layout: "reducer" as const,
+      scope: run.scope,
+      includePaths: run.includePaths,
+      filePaths: run.filePaths,
       deepReducer: {
         scanRoot: artifacts.scanDir,
-        persistSourceCoverage,
         claimedWorkers: consumed.map((worker) => ({
           id: worker.id,
           resultPath: worker.resultPath,
@@ -306,7 +307,6 @@ export class DeepScanWorkerRunner {
             reducerId,
             previousReducerResultPath,
             sources,
-            persistSourceCoverage,
           },
           run.scanId,
         );
@@ -482,7 +482,7 @@ export class DeepScanWorkerRunner {
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
             status: replaceableFailureKind ? "canceled" : "failed",
-            error: boundedDeepScanErrorMessage(
+            error: deepScanErrorMessage(
               replaceableFailureKind
                 ? new Error(
                     `${replaceableFailureKind}: ${normalized.message}`,
@@ -505,7 +505,7 @@ export class DeepScanWorkerRunner {
         }
         await this.options.store.updateWorker({
           ...baseMutation,
-          error: boundedDeepScanErrorMessage(normalized),
+          error: deepScanErrorMessage(normalized),
         });
         if (
           validationStarted &&
@@ -724,12 +724,7 @@ async function writeValidationRetryPrompt(input: {
   failedAttempt: number;
   error: Error;
 }): Promise<string> {
-  const maximumLength = 4_000;
-  const trimmed = input.error.message.trim();
-  const detail =
-    trimmed.length <= maximumLength
-      ? trimmed
-      : `${trimmed.slice(0, maximumLength)}...[truncated]`;
+  const detail = input.error.message.trim();
   const basePrompt = await fs.readFile(input.basePromptPath, "utf8");
   const errorData = validationErrorData(input.error, detail);
   const instructions =

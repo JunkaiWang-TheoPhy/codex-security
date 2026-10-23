@@ -7,7 +7,6 @@ import json
 import math
 import re
 import sqlite3
-import stat
 import sys
 import uuid
 from datetime import datetime
@@ -26,26 +25,13 @@ from workbench_scan_usage import _timestamp as usage_timestamp
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
-def _children(scan_dir: Path, relative: str) -> list[str]:
-    cursor = scan_dir
-    for part in Path(relative).parts:
-        if part in {"..", "."}:
-            return []
-        cursor = cursor / part
-        try:
-            if not stat.S_ISDIR(cursor.lstat().st_mode):
-                return []
-        except FileNotFoundError:
-            return []
-    return sorted(child.name for child in cursor.iterdir())
-
-
-def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
-    return [
-        f"{directory}/{name}"
-        for name in _children(scan_dir, directory)
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
-    ]
+def javascript_utf8(value: str) -> bytes:
+    """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
+    return (
+        value.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .encode("utf-8")
+    )
 
 
 def timestamp_key(value: str) -> datetime:
@@ -212,8 +198,6 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     try:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:

@@ -825,7 +825,7 @@ describe("patch risk assessment contract", () => {
             if (input === "missing") await rm(file);
             const result = await launcher.run(
               powershell,
-              "skills/assess-patch-risk/SKILL.md",
+              "skills/assess-patch-risk/references/windows-validation.md",
               {
                 "<plugin-root>": argument(launcher.plugin),
                 "<assessment.json>":
@@ -904,27 +904,3 @@ describe("patch risk assessment contract", () => {
     expect(validateText("", PLUGIN_ROOT, ["--", "-h"]).status).toBe(1);
   });
 });
-
-for (const [label, search, replacement] of [
-  [
-    "top-level",
-    '"recommendation":"merge"',
-    '"recommendation":"block","recommendation":"merge"',
-  ],
-  [
-    "escaped key",
-    '"recommendation":"merge"',
-    '"recommendation":"block","recommendati\\u006fn":"merge"',
-  ],
-  [
-    "nested",
-    '"impact":{"rating":"moderate"',
-    '"impact":{"rating":"low","rating":"moderate"',
-  ],
-] as const) {
-  test(`assessment retains the last duplicate key: ${label}`, () => {
-    const text = JSON.stringify(assessment()).replace(search, replacement);
-    const result = validateText(text);
-    expect(result.status, result.stderr).toBe(0);
-  });
-}
