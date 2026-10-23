@@ -152,7 +152,7 @@ describe("TypeScript package skeleton", () => {
     const selected = selectChecks([], { event: "push" });
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
-      shard: [1, 2, 3],
+      shard: [1, 2, 3, 4, 5, 6],
     });
     expect(jobs["compatibility"]?.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}",
@@ -165,7 +165,7 @@ describe("TypeScript package skeleton", () => {
       { os: "macos-latest", node: "22.13.0" },
     ]);
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
-      shard: [1, 2, 3, 4, 5, 6, 7],
+      shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
     expect(jobs["windows-verify"]?.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}",
@@ -323,7 +323,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7 --parallel=2 --seed=${{ github.run_number }}",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}",
       }),
     );
   });
@@ -491,7 +491,7 @@ describe("TypeScript package skeleton", () => {
     expect(restricted).not.toHaveProperty("continue-on-error");
   });
 
-  test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
+  test("keeps machine-wide policy changes out of shared and diagnostic shards", async () => {
     const ci = await workflow("node-ci.yml");
     const windows = ci.jobs["windows-test"]!.steps!;
     expect(
@@ -521,7 +521,7 @@ describe("TypeScript package skeleton", () => {
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
   });
 
-  test("keeps runner modes reproducible and report uploads rerunnable", async () => {
+  test("keeps shard layouts reproducible and report uploads rerunnable", async () => {
     const ci = await workflow("node-ci.yml");
     const quality = await workflow("test-quality.yml");
     const runner = quality.jobs["runner"]!;
@@ -540,35 +540,46 @@ describe("TypeScript package skeleton", () => {
     >;
     const windowsShards = windowsMatrix["shard"] as number[];
     expect(runner.strategy?.matrix).toEqual({
-      target: [
-        ...(unixMatrix["os"] as string[]).flatMap((os) =>
-          unixShards.map((shard) => ({ os, shard, count: unixShards.length })),
+      target: ["baseline", "expanded"].flatMap((mode) => [
+        ...(unixMatrix["os"] as string[]).flatMap((os) => {
+          const count = mode === "baseline" ? 3 : unixShards.length;
+          return Array.from({ length: count }, (_, index) => ({
+            os,
+            shard: index + 1,
+            count,
+            mode,
+          }));
+        }),
+        ...Array.from(
+          { length: mode === "baseline" ? 7 : windowsShards.length },
+          (_, index) => ({
+            os: "windows-latest",
+            shard: index + 1,
+            count: mode === "baseline" ? 7 : windowsShards.length,
+            mode,
+          }),
         ),
-        ...windowsShards.map((shard) => ({
-          os: "windows-latest",
-          shard,
-          count: windowsShards.length,
-        })),
-      ],
-      mode: [
-        { name: "baseline", args: "" },
-        { name: "parallel", args: "--parallel=2" },
-      ],
+      ]),
     });
-    for (const [job, version] of [
-      [runner, "1.4.3"],
-      [ci.jobs["test"]!, "1.4.3"],
-      [ci.jobs["windows-test"]!, "1.4.3"],
-      [quality.jobs["mutation"]!, "1.3.14"],
-    ] as const) {
+    for (const job of [
+      runner,
+      ci.jobs["test"]!,
+      ci.jobs["windows-test"]!,
+      quality.jobs["mutation"]!,
+    ]) {
       expect(
         job
           .steps!.filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
           .map((step) => step.with?.["bun-version"]),
-      ).toEqual([version]);
+      ).toEqual(["1.3.14"]);
+      for (const step of job.steps!) {
+        expect(step.run ?? "").not.toMatch(
+          /--(?:parallel|isolate)(?:[=\s]|$)/u,
+        );
+      }
     }
     const execution = runner.steps!.find(
-      (step) => step.name === "Test runner mode",
+      (step) => step.name === "Test shard layout",
     );
     const ripgrep = runner.steps!.find(
       (step) => step.name === "Install ripgrep",
@@ -586,7 +597,7 @@ describe("TypeScript package skeleton", () => {
       "working-directory": "sdk/typescript",
     });
     expect(execution?.run).toContain(
-      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }} ${{ matrix.mode.args }}",
+      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }}",
     );
     expect(execution?.run).toContain(
       "--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}",
@@ -606,7 +617,7 @@ describe("TypeScript package skeleton", () => {
     );
     expect(runnerUpload).not.toHaveProperty("continue-on-error");
     expect(runnerUpload?.with?.["name"]).toBe(
-      "runner-${{ matrix.target.os }}-${{ matrix.mode.name }}-${{ matrix.target.shard }}",
+      "runner-${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
     );
     expect(
       quality.jobs["mutation"]?.steps!.find(
