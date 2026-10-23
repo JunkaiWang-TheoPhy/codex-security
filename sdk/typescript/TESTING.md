@@ -175,10 +175,11 @@ Coverage is diagnostic and split across shards, not a combined percentage.
 Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
-The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow, setup tools, Bun configuration,
-shard runner, timing metadata, report comparator, or Windows test-root helper.
-It compares a serial baseline with `--parallel=2` on Linux, macOS, and Windows.
+The separate `test-quality` workflow runs weekly and can be dispatched manually.
+Ordinary source pull requests run focused contracts for the shard runner, timing
+metadata, report comparator, and Windows test-root helper in the required SDK suite.
+The diagnostic workflow compares a serial baseline with `--parallel=2` on Linux,
+macOS, and Windows.
 Each mode uses the same duration-based file assignment and production shard count:
 three on Linux/macOS and seven on Windows, for 26 sharded runner jobs.
 It measures the production partition rather than cross-file interactions across
@@ -187,9 +188,9 @@ full-suite runs still cover that ordering. More jobs add setup overhead, so comp
 workflow wall time and runner minutes, alongside shard test timings, before
 adopting a runner change.
 
-Every mode uses the same seed for property cases and test ordering: pull requests
-replay seed 1; scheduled and manual runs use the workflow run number. Reports have
-unique OS/mode/shard names. The workflow requires every expected shard report
+Scheduled and manual diagnostics use the workflow run number as the same seed for
+property cases and test ordering in every mode. Reports have unique OS/mode/shard
+names. The workflow requires every expected shard report
 before accepting comparisons, then compares complete shard groups by test
 identity, outcome, and occurrence count, retaining legitimate repeated names from
 parameterized tests while detecting missing or extra instances. It records every
