@@ -10669,9 +10669,10 @@ function printScanReference(
       : []),
     ...(typeof scan["startedAt"] === "string"
       ? [`started ${diagnosticValue(scan["startedAt"])}`]
-      : typeof scan["updatedAt"] === "string"
-        ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
-        : []),
+      : []),
+    ...(typeof scan["updatedAt"] === "string"
+      ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
+      : []),
   ];
   const argument = quoteCliPath(diagnosticValue(scanId));
   output.write(
