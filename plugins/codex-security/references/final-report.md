@@ -54,7 +54,7 @@ Canonical report semantics live in these fields:
 
 For a whole-repository Deep scan, the workbench derives `coverage.inventoryStrategy: "repository"` in the stored coverage document; repeated discovery is workflow metadata, not a different inventory strategy. Do not include `inventoryStrategy` in `record_codex_security_scan_draft`.
 
-Historical sealed v1 reports may omit evidence fields. Reading or exporting them uses explicit JSON-derived fallback text without changing their saved bytes; it never reads a pre-existing report to fill gaps. New successful scans must meet the evidence-completeness requirements before sealing. Partial checkpoints and stopped scans retain their existing contracts.
+Historical sealed v1 reports may omit evidence fields. Reading or exporting them uses explicit JSON-derived fallback text without changing their saved bytes; it never reads a pre-existing report to fill gaps. New successful scans must meet the evidence-completeness requirements before sealing. Partial checkpoints, stopped scans, and source-report imports retain their existing contracts. Imports preserve the supplied evidence without inventing source analysis.
 
 When `scan.hardening.portfolioPath` is present, include a short `## Structural Hardening` section linking the portfolio. Keep individual proposal links and the full option analysis in `hardening/hardening.md` rather than copying them into the primary scan report. The portfolio is design guidance, not evidence that any finding has been remediated.
 

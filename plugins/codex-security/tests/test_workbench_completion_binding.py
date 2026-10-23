@@ -1190,6 +1190,49 @@ def test_completion_requires_evidence_and_keeps_the_scan_repairable(
     assert result["scan"]["findingCount"] == 1
 
 
+@pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath"])
+def test_custom_discovery_handoff_requires_source_evidence_before_validation(
+    tmp_path: Path, field: str
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    documents = {
+        key: json.loads((scan_dir / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    scan = documents["manifest"]["scan"]
+    scan["scope"]["validationMode"] = "custom_pending"
+    scan["complete"] = False
+    finding = documents["findings"]["findings"][0]
+    finding.pop("validation")  # Independent validation has not happened yet.
+    saved = finding.pop(field)
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    args = ("write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    assert run_workbench(state_dir, *args)["status"] == "draft_written"
+    names = ("scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json")
+    before = {name: (scan_dir / name).read_bytes() for name in names}
+
+    scan["complete"] = True
+    staged.write_text(json.dumps(documents))
+    rejected = run_workbench(state_dir, *args, check=False)
+    assert rejected["returncode"] != 0
+    assert field in rejected["stderr"]
+    assert {name: (scan_dir / name).read_bytes() for name in names} == before
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+
+    finding[field] = saved
+    staged.write_text(json.dumps(documents))
+    assert run_workbench(state_dir, *args)["status"] == "draft_written"
+    assert "validation" not in json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    assert "sealedAt" not in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+
+
 def test_stopped_scan_preserves_findings_with_incomplete_evidence(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     path = scan_dir / "findings.json"

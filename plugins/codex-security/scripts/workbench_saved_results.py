@@ -34,6 +34,7 @@ from finalize_scan_contract import (
     _require_portable_relative_path,
     _require_str,
     _validate_completion_binding,
+    _validate_finding_source_evidence,
     _validate_resolved_deferred,
     _validate_schema_node,
     _write_prepared_scan_finalization,
@@ -2489,6 +2490,8 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=binding,
                 recover_unsealed=True,
+                # This output is an unfinished checkpoint, not a successful seal.
+                require_complete_evidence=False,
                 draft_documents=documents,
             )
             warnings.extend(prepared.warnings)
@@ -2918,6 +2921,13 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
         checkpoint = manifest["scan"]
+        if (
+            checkpoint.get("complete") is True
+            and checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
+        ):
+            # Return repair feedback while the discovery agent still owns its turn.
+            for index, finding in enumerate(findings["findings"]):
+                _validate_finding_source_evidence(finding, f"findings.findings[{index}]")
         checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:

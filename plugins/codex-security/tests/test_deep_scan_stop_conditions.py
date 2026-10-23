@@ -225,10 +225,17 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
 
 
+@pytest.mark.parametrize("sparse_finding", [False, True])
 def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
-    workbench_api, workbench_db, publication_scan
+    workbench_api, workbench_db, publication_scan, sparse_finding
 ):
     scan = publication_scan()
+    findings = json.loads(json.dumps(scan.findings)) if sparse_finding else []
+    for finding in findings:
+        for field in ("codeEvidence", "rootCause", "validation", "attackPath"):
+            finding.pop(field, None)
+    # Only worker checkpoints contribute to this unfinished parent.
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     workers = {}
     originals = {}
     for name in ("first", "second"):
@@ -252,6 +259,7 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
             saved_draft(
                 scan.scan_id,
                 complete=False,
+                findings=findings if name == "first" else [],
                 surfaces=[
                     {
                         "id": "api",
@@ -292,3 +300,13 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
         assert task["id"] == f"{worker_id}/review"
         assert task["surfaceIds"] == [surface["id"]]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+    retained = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == len(findings)
+    if sparse_finding:
+        assert all(
+            field not in retained[0]
+            for field in ("codeEvidence", "rootCause", "validation", "attackPath")
+        )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "sealedAt" not in manifest
