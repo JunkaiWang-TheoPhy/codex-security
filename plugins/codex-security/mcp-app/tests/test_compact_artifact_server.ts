@@ -41,6 +41,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
   writeFile,
@@ -419,12 +420,13 @@ async function testCustomDiscoveryHandoff(
         }),
         `${label}: retain incomplete source discovery`,
       );
-      const before = await snapshotScanDraft(scanDir);
-      const checkpoint = await readFile(
-        path.join(scanDir, "checkpoint-head.json"),
-        "utf8",
-      );
       for (const completion of [{ complete: true }, {}]) {
+        const before = await snapshotScanDraft(scanDir);
+        const checkpoint = await readFile(
+          path.join(scanDir, "checkpoint-head.json"),
+          "utf8",
+        );
+        const checkpoints = await readdir(path.join(scanDir, "checkpoints"));
         requireToolError(
           await call("record_codex_security_scan_draft", {
             ...draft,
@@ -437,6 +439,22 @@ async function testCustomDiscoveryHandoff(
         assert.equal(
           await readFile(path.join(scanDir, "checkpoint-head.json"), "utf8"),
           checkpoint,
+        );
+        assert.deepEqual(
+          await readdir(path.join(scanDir, "checkpoints")),
+          checkpoints,
+          `${label}: a rejected final draft must not publish a recovery checkpoint`,
+        );
+        requireSuccessfulTool(
+          await call("record_codex_security_scan_draft", {
+            ...draft,
+            complete: false,
+          }),
+          `${label}: continue incomplete discovery after a rejected final draft`,
+        );
+        assert.equal(
+          (await readJson(scanDir, "scan-manifest.json")).scan.complete,
+          false,
         );
         assert.equal((await progress()).status, "running");
       }
