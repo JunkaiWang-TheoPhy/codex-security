@@ -42,7 +42,7 @@ An MCP `-32602` input rejection or an `isError: true` result reporting `Input va
 
 For any other required scan phase, canonical-artifact write, or on-disk existence check that fails before completion, stop the current response and surface the exact workflow blocker. Do not call completion with missing artifacts, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because canonical assembly is blocked.
 
-If `complete_codex_security_scan` fails, stop the current response and surface the exact MCP or finalizer error. Do not retry completion in the same response, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because completion failed.
+If `complete_codex_security_scan` reports repairable findings or an incomplete draft, follow its repair guidance on the same scan. Preserve valid findings, evidence, and deferred work; correct the named gaps using actual evidence, save the corrected canonical draft, then retry completion. Never invent evidence or drop a finding to satisfy the gate. For any other completion failure, stop the current response and surface the exact MCP or finalizer error without retrying. Do not return a final report or no-findings result, or satisfy a structured output schema, until completion succeeds. Leave the durable scan available instead of canceling or failing it solely because completion failed.
 
 Canonical report semantics live in these fields:
 

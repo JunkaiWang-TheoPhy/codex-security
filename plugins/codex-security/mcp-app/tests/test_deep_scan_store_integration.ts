@@ -1324,9 +1324,15 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
       beforeReplay,
     );
-    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
-    const sealed = await readJson(run.scanDir, "scan-manifest.json");
-    assert.equal(typeof sealed.scan.sealedAt, "string");
+    // Preserving unfinished worker evidence must not claim a successful audit.
+    await assert.rejects(
+      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
+      /repair the finding records.*codeEvidence/,
+    );
+    assert.equal(
+      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      beforeReplay,
+    );
     assert.deepEqual(
       (await readJson(run.scanDir, "findings.json")).findings,
       recovered.findings,

@@ -445,6 +445,16 @@ async function testSemanticScanDraftCompletion(
         summary: "The query is not parameterized before SQL execution.",
         evidenceRefs: [codeEvidence.id],
       },
+      attackPath: {
+        dataflow:
+          "The execute(query) argument flows directly into connection.execute(query).",
+      },
+      validation: {
+        method: "Static source inspection",
+        summary:
+          "The fixture passes the query argument to SQL execution without parameter binding.",
+        evidenceRefs: [codeEvidence.id],
+      },
       remediation: "Use a parameterized SQL statement.",
       remediationTests: [
         "Verify an attacker-controlled query remains a bound parameter.",
@@ -760,9 +770,60 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
+    // A valid draft can still lack completion evidence. Reject without losing it,
+    // then let the same owner repair and complete the same scan.
+    const { validation: _validation, ...incompleteFinding } = finding;
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [incompleteFinding],
+        coverage,
+      }),
+    );
+    const incompleteDraft = await snapshotScanDraft(scanDirectory);
+    const incomplete = await call("complete_codex_security_scan", {
+      scanId,
+      handoffClaimToken,
+    });
+    requireToolError(
+      incomplete,
+      /validation/,
+      `${runtimeLabel}: require validation proof`,
+    );
+    const diagnostic = (incomplete.content as TextContent[])[0].text;
+    assert.match(
+      diagnostic,
+      /retry completion after saving the corrected draft/,
+    );
+    assert.doesNotMatch(
+      diagnostic,
+      /Stop the current response|Do not retry completion/,
+    );
+    assert.deepEqual(await snapshotScanDraft(scanDirectory), incompleteDraft);
+    assert.equal((await progress()).status, "running");
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [finding],
+        coverage,
+      }),
+    );
+
+    const correctedDraft = await readJson(scanDirectory, "findings.json");
+    assert.equal(
+      correctedDraft.findings[0].provenance.source,
+      finding.provenance.source,
+    );
+    assert.equal(
+      correctedDraft.findings[0].provenance.candidateId,
+      candidate.candidate_id,
+    );
+    assert.deepEqual(correctedDraft.findings[0].validation, finding.validation);
     const completed = requireSuccessfulTool<ScanResult>(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
-      `${runtimeLabel}: finalize the accepted draft exactly once`,
+      `${runtimeLabel}: finalize the corrected draft exactly once`,
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
@@ -783,7 +844,7 @@ async function testSemanticScanDraftCompletion(
     assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
     assert.deepEqual(
       results.findings.findings[0].provenance,
-      finding.provenance,
+      correctedDraft.findings[0].provenance,
     );
     assert.equal(results.findings.findings[0].remediation, finding.remediation);
     assert.deepEqual(
