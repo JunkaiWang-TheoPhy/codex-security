@@ -14,7 +14,7 @@ import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
@@ -480,7 +480,7 @@ export class DeepScanWorkerRunner {
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
             status: replaceableFailureKind ? "canceled" : "failed",
-            error: boundedDeepScanErrorMessage(
+            error: deepScanErrorMessage(
               replaceableFailureKind
                 ? new Error(
                     `${replaceableFailureKind}: ${normalized.message}`,
@@ -503,7 +503,7 @@ export class DeepScanWorkerRunner {
         }
         await this.options.store.updateWorker({
           ...baseMutation,
-          error: boundedDeepScanErrorMessage(normalized),
+          error: deepScanErrorMessage(normalized),
         });
         if (
           validationStarted &&
@@ -704,12 +704,7 @@ async function writeValidationRetryPrompt(input: {
   failedAttempt: number;
   error: Error;
 }): Promise<string> {
-  const maximumLength = 4_000;
-  const trimmed = input.error.message.trim();
-  const detail =
-    trimmed.length <= maximumLength
-      ? trimmed
-      : `${trimmed.slice(0, maximumLength)}...[truncated]`;
+  const detail = input.error.message.trim();
   const basePrompt = await fs.readFile(input.basePromptPath, "utf8");
   const errorData = validationErrorData(input.error, detail);
   const instructions =
