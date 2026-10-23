@@ -1192,8 +1192,9 @@ def test_completion_requires_evidence_and_keeps_the_scan_repairable(
 
 @pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath"])
 @pytest.mark.parametrize("explicit_complete", [False, True])
-def test_custom_discovery_handoff_requires_source_evidence_before_validation(
-    tmp_path: Path, field: str, explicit_complete: bool
+@pytest.mark.parametrize("custom_validation", [False, True])
+def test_discovery_handoff_requires_evidence_before_acceptance(
+    tmp_path: Path, field: str, explicit_complete: bool, custom_validation: bool
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     documents = {
@@ -1205,10 +1206,12 @@ def test_custom_discovery_handoff_requires_source_evidence_before_validation(
         )
     }
     scan = documents["manifest"]["scan"]
-    scan["scope"]["validationMode"] = "custom_pending"
+    if custom_validation:
+        scan["scope"]["validationMode"] = "custom_pending"
     scan["complete"] = False
     finding = documents["findings"]["findings"][0]
-    finding.pop("validation")  # Independent validation has not happened yet.
+    if custom_validation:
+        finding.pop("validation")  # Independent validation has not happened yet.
     saved = finding.pop(field)
     drafts = scan_dir / "drafts"
     drafts.mkdir(exist_ok=True)
@@ -1233,7 +1236,9 @@ def test_custom_discovery_handoff_requires_source_evidence_before_validation(
     finding[field] = saved
     staged.write_text(json.dumps(documents))
     assert run_workbench(state_dir, *args)["status"] == "draft_written"
-    assert "validation" not in json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    assert (
+        "validation" not in json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    ) is custom_validation
     assert "sealedAt" not in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
 
 

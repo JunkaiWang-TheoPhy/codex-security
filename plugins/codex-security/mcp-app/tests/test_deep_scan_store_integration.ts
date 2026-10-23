@@ -1,5 +1,8 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  finding as checkpointFinding,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -1190,7 +1193,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [finding("saved", "fixture.py")],
+        findings: [checkpointFinding("saved", "fixture.py")],
       },
     );
     await store.updateWorker({ ...worker, status: "canceled" });

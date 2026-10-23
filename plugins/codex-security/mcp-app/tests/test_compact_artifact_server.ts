@@ -948,37 +948,24 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
-    // A valid draft can still lack completion evidence. Reject without losing it,
-    // then let the same owner repair and complete the same scan.
+    // Reject missing evidence before the SDK-owned agent turn ends.
     const { validation: _validation, ...incompleteFinding } = finding;
-    requireSuccessfulTool(
+    const beforeRejectedDraft = await snapshotScanDraft(scanDirectory);
+    requireToolError(
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
+        complete: true,
         findings: [incompleteFinding],
         coverage,
       }),
-    );
-    const incompleteDraft = await snapshotScanDraft(scanDirectory);
-    const incomplete = await call("complete_codex_security_scan", {
-      scanId,
-      handoffClaimToken,
-    });
-    requireToolError(
-      incomplete,
       /validation/,
-      `${runtimeLabel}: require validation proof`,
+      `${runtimeLabel}: require validation proof before accepting a final draft`,
     );
-    const diagnostic = (incomplete.content as TextContent[])[0].text;
-    assert.match(
-      diagnostic,
-      /retry completion after saving the corrected draft/,
+    assert.deepEqual(
+      await snapshotScanDraft(scanDirectory),
+      beforeRejectedDraft,
     );
-    assert.doesNotMatch(
-      diagnostic,
-      /Stop the current response|Do not retry completion/,
-    );
-    assert.deepEqual(await snapshotScanDraft(scanDirectory), incompleteDraft);
     assert.equal((await progress()).status, "running");
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", {

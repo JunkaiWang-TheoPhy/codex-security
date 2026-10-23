@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { dirname, relative, sep } from "node:path";
 import type { JsonObject } from "../types.js";
+import { asRecord, isNonEmptyString } from "../record.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath } from "../artifact-io.js";
 import {
@@ -129,6 +130,7 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  validateCompletedFindingEvidence(result.findings);
   validateRetainedCoverage(result.coverage);
   const root = dirname(resultPath);
   const receiptPaths = new Map<string, string>();
@@ -202,6 +204,7 @@ export async function validateReducerArtifacts(
       input.sources.discoveries,
       input.sources.previous,
     );
+    validateCompletedFindingEvidence(result.findings);
     await saveScanDraftCheckpoint(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
       result,
@@ -209,6 +212,7 @@ export async function validateReducerArtifacts(
     await writeJsonAtomic(resultPath, result);
   } else {
     validateRetainedFindings(result, [], previous);
+    validateCompletedFindingEvidence(result.findings);
   }
   const previousFindingIds = new Set(
     input.sources
@@ -225,6 +229,51 @@ export async function validateReducerArtifacts(
         : !previousFindingIds.has(scanFindingIdentity(finding)),
     ).length,
   };
+}
+
+/** Match the finalizer's evidence gate while worker validation can still retry. */
+function validateCompletedFindingEvidence(findings: JsonObject[]): void {
+  for (const [index, finding] of findings.entries()) {
+    const requireText = (value: unknown, field: string) => {
+      if (!isNonEmptyString(value))
+        throw new Error(
+          `findings[${index}].${field}: include the supporting analysis before completing the worker.`,
+        );
+    };
+    if (
+      !Array.isArray(finding.codeEvidence) ||
+      finding.codeEvidence.length === 0
+    )
+      throw new Error(
+        `findings[${index}].codeEvidence: include the source snippets used as proof.`,
+      );
+    requireText(
+      asRecord(finding.rootCause)?.summary ?? finding.rootCause,
+      "rootCause",
+    );
+    const dataflow = asRecord(finding.attackPath)?.dataflow;
+    const flow = asRecord(dataflow);
+    if (flow) {
+      if (!flow.summary) {
+        requireText(flow.source, "attackPath.dataflow.source");
+        requireText(flow.sink, "attackPath.dataflow.sink");
+      }
+    } else {
+      requireText(dataflow, "attackPath.dataflow");
+    }
+    const validation = asRecord(finding.validation);
+    requireText(validation?.method, "validation.method");
+    if (!validation?.result)
+      requireText(validation?.summary, "validation.summary");
+    const hasEvidence = [validation?.evidence, validation?.evidenceRefs].some(
+      (value) =>
+        Array.isArray(value) ? value.length > 0 : isNonEmptyString(value),
+    );
+    if (!hasEvidence)
+      throw new Error(
+        `findings[${index}].validation: include observed evidence or evidenceRefs to the source proof.`,
+      );
+  }
 }
 
 /** Reconcile a reducer output against the immutable inputs captured before dispatch. */

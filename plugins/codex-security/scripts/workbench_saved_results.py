@@ -33,6 +33,7 @@ from finalize_scan_contract import (
     _remove_scan_local_file_if_exists,
     _require_portable_relative_path,
     _require_str,
+    _validate_completed_finding_evidence,
     _validate_completion_binding,
     _validate_finding_source_evidence,
     _validate_resolved_deferred,
@@ -2922,13 +2923,13 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _validate_completion_binding(manifest, findings, coverage, binding)
         checkpoint = manifest["scan"]
         # Completed semantic drafts omit complete; only false marks a checkpoint.
-        if (
-            checkpoint.get("complete") is not False
-            and checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
-        ):
+        if checkpoint.get("complete") is not False and not binding.get("imported"):
             # Return repair feedback while the discovery agent still owns its turn.
-            for index, finding in enumerate(findings["findings"]):
-                _validate_finding_source_evidence(finding, f"findings.findings[{index}]")
+            if checkpoint.get("scope", {}).get("validationMode") == "custom_pending":
+                for index, finding in enumerate(findings["findings"]):
+                    _validate_finding_source_evidence(finding, f"findings.findings[{index}]")
+            else:
+                _validate_completed_finding_evidence(findings)
         checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
