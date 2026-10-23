@@ -5062,6 +5062,7 @@ if __name__ == "__main__":
         "prepare-scan-completion",
         "complete-scan",
         "list-global-findings",
+        "get-scan",
       ]);
       await client.close();
     },
@@ -5865,6 +5866,7 @@ if __name__ == "__main__":
       "prepare-scan-completion",
       "complete-scan",
       "list-global-findings",
+      "get-scan",
     ]);
     expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
     await client.close();
