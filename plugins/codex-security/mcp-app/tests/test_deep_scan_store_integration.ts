@@ -818,6 +818,12 @@ connection.rollback()`,
         );
       }
     }
+    const empty = await createWorkerFixture(run, "empty-reducer", "dedup");
+    await assert.rejects(
+      store.claimDedup({ ...empty, workerIds: [] }),
+      /first Deep Scan dedup requires two/,
+      "an empty reduction requires a previously accepted aggregate",
+    );
     const reducer = await createWorkerFixture(run, "dedup-0001", "dedup");
     await writeJsonLine(reducer.resultPath, {
       schemaVersion: 1,
@@ -867,6 +873,44 @@ connection.rollback()`,
     assert.equal(
       await readFile(stagedCandidateLedgerPath, "utf8"),
       '{"candidate_id":"replacement"}\n',
+    );
+
+    // An older accepted aggregate can be repaired without spending discovery
+    // budget or claiming the discoveries that already belong to that aggregate.
+    const priorBytes = await readFile(reducer.resultPath, "utf8");
+    const failedRepair = await createWorkerFixture(run, "dedup-0002", "dedup");
+    await store.claimDedup({ ...failedRepair, workerIds: [] });
+    await store.updateWorker({ ...failedRepair, status: "running" });
+    await store.updateWorker({
+      ...failedRepair,
+      status: "failed",
+      error: "Repair attempt did not complete.",
+    });
+    const repair = await createWorkerFixture(run, "dedup-0003", "dedup");
+    await writeFile(repair.resultPath, priorBytes);
+    await store.claimDedup({ ...repair, workerIds: [] });
+    await store.updateWorker({ ...repair, status: "running" });
+    const afterRepair = await store.commitDedup({
+      id: repair.id,
+      scanId: run.scanId,
+      newFindings: 0,
+      resultManifestPath: repair.resultPath,
+    });
+    assert.equal(afterRepair.dispatchedCount, afterCommit.dispatchedCount);
+    assert.equal(afterRepair.noNewStreak, afterCommit.noNewStreak);
+    assert.equal(await readFile(reducer.resultPath, "utf8"), priorBytes);
+    for (const workerId of [first.id, second.id])
+      assert.equal(
+        afterRepair.persistedWorkers.find(
+          (worker: { id: string }) => worker.id === workerId,
+        )?.mergeState,
+        "merged",
+      );
+    assert.equal(
+      afterRepair.persistedDedupInputs.some(
+        (input: { dedupWorkerId: string }) => input.dedupWorkerId === repair.id,
+      ),
+      false,
     );
 
     const acceptedLate = await store.updateWorker({

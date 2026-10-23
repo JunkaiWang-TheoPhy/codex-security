@@ -9,6 +9,7 @@ import {
 } from "./artifacts.js";
 import {
   aggregateDiscoveryCoverage,
+  validateCompletedFindingEvidence,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -747,6 +748,7 @@ export class DeepScanCoordinator {
     const omittedWorkerIds: string[] = [];
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
+    let repairPending = needsEvidenceRepair(latestResult);
     let buffer: AcceptedDiscovery[] = recovered.filter(
       (worker) => !mergedIds.has(worker.id),
     );
@@ -810,6 +812,7 @@ export class DeepScanCoordinator {
       );
     }
     if (
+      !repairPending &&
       !this.discoveryDeadlineReached &&
       previousReducerResultPath &&
       this.state.noNewStreak >= config.stopAfterNoNew &&
@@ -916,6 +919,7 @@ export class DeepScanCoordinator {
       if (settlements.length === 0) {
         while (
           !reducer &&
+          !repairPending &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&
@@ -936,12 +940,13 @@ export class DeepScanCoordinator {
 
         if (
           !reducer &&
-          this.reducerReady(
-            buffer,
-            previousReducerResultPath,
-            active.size,
-            dispatched,
-          )
+          (repairPending ||
+            this.reducerReady(
+              buffer,
+              previousReducerResultPath,
+              active.size,
+              dispatched,
+            ))
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
           reducerInputs = consumed;
@@ -953,6 +958,9 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              repairEvidence:
+                repairPending ||
+                consumed.some((worker) => needsEvidenceRepair(worker.result)),
             }),
           );
           observe(reducer);
@@ -1052,6 +1060,7 @@ export class DeepScanCoordinator {
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
+      repairPending = false;
       if (
         !this.discoveryDeadlineReached &&
         outcome.run.noNewStreak >= config.stopAfterNoNew &&
@@ -1102,6 +1111,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        false, // Already accepted by the previous coordinator; repair before publication.
       );
       recovered.push({
         id: worker.id,
@@ -1148,7 +1158,10 @@ export class DeepScanCoordinator {
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
         .map((input) => discoveryIds.has(input.discoveryWorkerId));
-      if (consumed.length === 0 || consumed.some((value) => !value)) {
+      if (
+        (!resultPath && consumed.length === 0) ||
+        consumed.some((value) => !value)
+      ) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
         );
@@ -1160,6 +1173,7 @@ export class DeepScanCoordinator {
           resultPath: worker.resultManifestPath,
           reducerId: worker.id,
           previousReducerResultPath: resultPath,
+          requireCompleteEvidence: false,
         },
         this.state.scanId,
       );
@@ -1205,6 +1219,16 @@ export class DeepScanCoordinator {
       count,
       completed: count,
     });
+  }
+}
+
+function needsEvidenceRepair(result: DeepReductionInput | undefined): boolean {
+  if (!result) return false;
+  try {
+    validateCompletedFindingEvidence(result.findings);
+    return false;
+  } catch {
+    return true;
   }
 }
 

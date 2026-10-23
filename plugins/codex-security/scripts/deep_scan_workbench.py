@@ -87,7 +87,7 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     claim_deep_dedup.add_argument("--worker-id", required=True)
     claim_deep_dedup.add_argument("--prompt-path", required=True)
     claim_deep_dedup.add_argument("--artifact-dir", required=True)
-    claim_deep_dedup.add_argument("--input-worker-id", action="append", required=True)
+    claim_deep_dedup.add_argument("--input-worker-id", action="append", default=[])
     claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
 
     commit_deep_dedup = subparsers.add_parser("commit-deep-scan-dedup")
@@ -227,9 +227,18 @@ def require_deep_scan_workers_finished(
             AND (? != 'saturated' OR failed.kind != 'discovery')
             AND (
                 failed.kind != 'dedup'
-                OR NOT EXISTS (
-                    SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
-                    WHERE failed_inputs.dedup_worker_id = failed.id
+                OR (
+                    NOT EXISTS (
+                        SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
+                        WHERE failed_inputs.dedup_worker_id = failed.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM deep_scan_workers AS replacement
+                        WHERE replacement.scan_id = failed.scan_id
+                            AND replacement.kind = 'dedup'
+                            AND replacement.status = 'succeeded'
+                            AND replacement.rowid > failed.rowid
+                    )
                 )
                 OR EXISTS (
                     SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
@@ -1484,7 +1493,7 @@ def claim_deep_scan_dedup(
             """,
             (scan_id,),
         ).fetchone()
-        minimum_inputs = 1 if successful_reducer is not None or capped_singleton else 2
+        minimum_inputs = 0 if successful_reducer is not None else (1 if capped_singleton else 2)
         if len(input_ids) < minimum_inputs:
             raise SystemExit(
                 "The first Deep Scan dedup requires two buffered discovery results."
@@ -1601,7 +1610,14 @@ def commit_deep_scan_dedup_locked(
                 (worker_id,),
             )
         )
-        if not inputs or any(row["merge_state"] != "merging" for row in inputs):
+        previous_reducer = connection.execute(
+            "SELECT 1 FROM deep_scan_workers WHERE scan_id = ? AND kind = 'dedup' "
+            "AND status = 'succeeded' LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+        if (not inputs and previous_reducer is None) or any(
+            row["merge_state"] != "merging" for row in inputs
+        ):
             raise SystemExit("Dedup inputs are not in the claimed merging state.")
         if candidate_ledger_path and canonical_candidate_ledger_path:
             canonical_path = Path(canonical_candidate_ledger_path)

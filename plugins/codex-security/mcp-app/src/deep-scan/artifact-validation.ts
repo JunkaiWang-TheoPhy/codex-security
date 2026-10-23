@@ -118,6 +118,7 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  requireCompleteEvidence = true,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
@@ -130,7 +131,8 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  validateCompletedFindingEvidence(result.findings);
+  if (requireCompleteEvidence)
+    validateCompletedFindingEvidence(result.findings);
   validateRetainedCoverage(result.coverage);
   const root = dirname(resultPath);
   const receiptPaths = new Map<string, string>();
@@ -164,6 +166,7 @@ export async function validateReducerArtifacts(
     reducerId: string;
     previousReducerResultPath?: string;
     sources?: DeepReductionSources;
+    requireCompleteEvidence?: boolean;
   },
   expectedScanId?: string,
 ): Promise<ReducerArtifactValidation> {
@@ -204,7 +207,8 @@ export async function validateReducerArtifacts(
       input.sources.discoveries,
       input.sources.previous,
     );
-    validateCompletedFindingEvidence(result.findings);
+    if (input.requireCompleteEvidence !== false)
+      validateCompletedFindingEvidence(result.findings);
     await saveScanDraftCheckpoint(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
       result,
@@ -212,7 +216,8 @@ export async function validateReducerArtifacts(
     await writeJsonAtomic(resultPath, result);
   } else {
     validateRetainedFindings(result, [], previous);
-    validateCompletedFindingEvidence(result.findings);
+    if (input.requireCompleteEvidence !== false)
+      validateCompletedFindingEvidence(result.findings);
   }
   const previousFindingIds = new Set(
     input.sources
@@ -232,7 +237,7 @@ export async function validateReducerArtifacts(
 }
 
 /** Match the finalizer's evidence gate while worker validation can still retry. */
-function validateCompletedFindingEvidence(findings: JsonObject[]): void {
+export function validateCompletedFindingEvidence(findings: JsonObject[]): void {
   for (const [index, finding] of findings.entries()) {
     const requireText = (value: unknown, field: string) => {
       if (!isNonEmptyString(value))
