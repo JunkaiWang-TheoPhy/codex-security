@@ -1191,8 +1191,9 @@ def test_completion_requires_evidence_and_keeps_the_scan_repairable(
 
 
 @pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath"])
+@pytest.mark.parametrize("explicit_complete", [False, True])
 def test_custom_discovery_handoff_requires_source_evidence_before_validation(
-    tmp_path: Path, field: str
+    tmp_path: Path, field: str, explicit_complete: bool
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     documents = {
@@ -1218,7 +1219,10 @@ def test_custom_discovery_handoff_requires_source_evidence_before_validation(
     names = ("scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json")
     before = {name: (scan_dir / name).read_bytes() for name in names}
 
-    scan["complete"] = True
+    if explicit_complete:
+        scan["complete"] = True
+    else:
+        scan.pop("complete")
     staged.write_text(json.dumps(documents))
     rejected = run_workbench(state_dir, *args, check=False)
     assert rejected["returncode"] != 0

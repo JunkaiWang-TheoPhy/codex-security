@@ -2921,8 +2921,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
         checkpoint = manifest["scan"]
+        # Completed semantic drafts omit complete; only false marks a checkpoint.
         if (
-            checkpoint.get("complete") is True
+            checkpoint.get("complete") is not False
             and checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
         ):
             # Return repair feedback while the discovery agent still owns its turn.
