@@ -288,6 +288,25 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
 
     assert finished["status"] == "succeeded"
     assert finished["completionSequence"] == 0
+    assert "evidenceRepairRequired" not in finished
+    saved_paths = [
+        scan.scan_dir / name
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json")
+    ]
+    saved_bytes = [path.read_bytes() for path in saved_paths]
+    owner = "deadline-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    with pytest.raises(SystemExit, match="Only a running"):
+        workbench_api["deep_scan"].claim_deep_scan_coordinator(
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+            ),
+        )
+    assert [path.read_bytes() for path in saved_paths] == saved_bytes
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{worker_id}/api" for worker_id in workers

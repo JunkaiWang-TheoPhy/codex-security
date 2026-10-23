@@ -425,6 +425,11 @@ def selected_evidence_repair_required(scan: sqlite3.Row, run: sqlite3.Row) -> bo
         or scan["seal_manifest_digest"] is not None
         or run["status"] != "succeeded"
         or run["cancel_requested"]
+        or (
+            run["terminal_reason"] == "capped"
+            and run["completion_sequence"] == 0
+            and deep_scan_deadline_reached(run)
+        )
         or run["manifest_path"] != str(scan_dir / "scan-manifest.json")
     ):
         return False
@@ -1041,11 +1046,12 @@ def claim_deep_scan_coordinator_locked(
         if selected_evidence_repair_required(scan, run):
             if args.coordinator_generation is not None:
                 require_current_coordinator(run, args)
-            # Keep the selected artifacts and all discovery accounting. A new
-            # generation fences the previous publisher before repair can write.
+            # Keep the selected artifacts, stopping reason and discovery accounting.
+            # The reason preserves saturation omissions across repair and crashes.
+            # A new generation fences the previous publisher before repair can write.
             connection.execute(
                 "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
-                "terminal_reason = NULL, completed_at = NULL, "
+                "completed_at = NULL, "
                 "coordinator_generation = coordinator_generation + 1, updated_at = ? "
                 "WHERE scan_id = ?",
                 (timestamp, scan_id),

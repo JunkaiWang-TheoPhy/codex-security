@@ -734,7 +734,23 @@ export class DeepScanCoordinator {
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
-    const recovered = await this.recoverAcceptedDiscoveries();
+    // A selected report keeps its original cutoff while evidence is repaired,
+    // including if the coordinator restarts after committing the repair.
+    const selectedReason = this.state.manifestPath
+      ? this.state.terminalReason
+      : undefined;
+    const omittedWorkerIds =
+      selectedReason === "saturated"
+        ? (this.state.persistedWorkers ?? [])
+            .filter(
+              (worker) =>
+                worker.kind === "discovery" && worker.mergeState === "buffered",
+            )
+            .map((worker) => worker.id)
+        : [];
+    const recovered = await this.recoverAcceptedDiscoveries(
+      new Set(omittedWorkerIds),
+    );
     const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
     let reducerInputs: AcceptedDiscovery[] = [];
     const mergedIds = new Set(
@@ -745,7 +761,6 @@ export class DeepScanCoordinator {
         )
         .map((worker) => worker.id),
     );
-    const omittedWorkerIds: string[] = [];
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
     let repairPending = needsEvidenceRepair(latestResult);
@@ -782,7 +797,9 @@ export class DeepScanCoordinator {
           workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
         ),
     ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
-    let stopReason: DeepScanTerminalReason | undefined;
+    let stopReason: DeepScanTerminalReason | undefined = repairPending
+      ? undefined
+      : selectedReason;
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
 
@@ -812,6 +829,7 @@ export class DeepScanCoordinator {
       );
     }
     if (
+      !stopReason &&
       !repairPending &&
       !this.discoveryDeadlineReached &&
       previousReducerResultPath &&
@@ -1061,7 +1079,9 @@ export class DeepScanCoordinator {
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
       repairPending = false;
-      if (
+      if (selectedReason) {
+        stopReason = selectedReason;
+      } else if (
         !this.discoveryDeadlineReached &&
         outcome.run.noNewStreak >= config.stopAfterNoNew &&
         buffer.length === 0
@@ -1097,10 +1117,16 @@ export class DeepScanCoordinator {
     };
   }
 
-  private async recoverAcceptedDiscoveries(): Promise<AcceptedDiscovery[]> {
+  private async recoverAcceptedDiscoveries(
+    omitted: Set<string>,
+  ): Promise<AcceptedDiscovery[]> {
     const recovered: AcceptedDiscovery[] = [];
     for (const worker of this.state.persistedWorkers ?? []) {
-      if (worker.kind !== "discovery" || worker.status !== "succeeded")
+      if (
+        worker.kind !== "discovery" ||
+        worker.status !== "succeeded" ||
+        omitted.has(worker.id)
+      )
         continue;
       if (!worker.resultManifestPath || !worker.completionSequence) {
         throw new Error(

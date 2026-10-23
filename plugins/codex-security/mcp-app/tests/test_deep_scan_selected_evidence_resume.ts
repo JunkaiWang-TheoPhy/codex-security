@@ -102,9 +102,14 @@ const {
     "recordCodexSecurityScanDraftViaWorkbench"
   >;
 
-for (const route of ["plugin", "cli", "headless continuation"] as const) {
+for (const { route, saturated } of [
+  { route: "plugin", saturated: false },
+  { route: "cli", saturated: false },
+  { route: "headless continuation", saturated: false },
+  { route: "plugin", saturated: true },
+] as const) {
   test(
-    `${route} repairs a selected unsealed aggregate before completion`,
+    `${route} repairs a selected unsealed aggregate before completion${saturated ? " with saturation omissions" : ""}`,
     { timeout: 45_000 },
     async (t) => {
       const root = await mkdtemp(path.join(tmpdir(), "selected-evidence-"));
@@ -133,7 +138,9 @@ for (const route of ["plugin", "cli", "headless continuation"] as const) {
       });
       await writeFile(
         path.join(env.CODEX_HOME, "codex-security", "config.toml"),
-        "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
+        saturated
+          ? "[deep_scan]\nworkers = 2\nmax_discovery_runs = 4\nstop_after_no_new = 1\n"
+          : "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
       );
       const runWorkbench = async (args: string[], input?: string | Buffer) => {
         const child = execFileAsync(python, [workbenchPath, ...args], {
@@ -153,14 +160,53 @@ for (const route of ["plugin", "cli", "headless continuation"] as const) {
         scanId: run.scanId,
         threadId: owner,
       });
+      const releaseLateWorker = Promise.withResolvers<void>();
+      const lateAccepted = Promise.withResolvers<void>();
+      const releaseAcceptance = Promise.withResolvers<void>();
+      const seedExecutor = new FakeExecutor({
+        discoveryCandidateId: "accepted-finding",
+        ...(saturated
+          ? {
+              discoveryGates: { "discovery-0004": releaseLateWorker.promise },
+              discoveryCandidates: { "discovery-0004": "omitted-finding" },
+            }
+          : {}),
+      });
+      if (saturated) {
+        const updateWorker = store.updateWorker.bind(store);
+        store.updateWorker = async (update) => {
+          const result = await updateWorker(update);
+          if (
+            update.kind === "discovery" &&
+            update.status === "succeeded" &&
+            path.basename(path.dirname(update.promptPath)) === "discovery-0004"
+          ) {
+            lateAccepted.resolve();
+            await releaseAcceptance.promise;
+          }
+          return result;
+        };
+        const execute = seedExecutor.run.bind(seedExecutor);
+        let reducers = 0;
+        seedExecutor.run = async (request) => {
+          if (request.kind === "dedup" && ++reducers === 2) {
+            releaseLateWorker.resolve();
+            await lateAccepted.promise;
+            request.signal.addEventListener(
+              "abort",
+              () => releaseAcceptance.resolve(),
+              { once: true },
+            );
+          }
+          return execute(request);
+        };
+      }
       const coordinator = new DeepScanCoordinator({
         run: claim.run,
         store,
         pluginRoot,
         threadId: owner,
-        executor: new FakeExecutor({
-          discoveryCandidateId: "accepted-finding",
-        }),
+        executor: seedExecutor,
         onComplete: async (draft, signal, publication) => {
           const context = await createScanArtifactContext(
             run.scanId,
@@ -185,6 +231,14 @@ for (const route of ["plugin", "cli", "headless continuation"] as const) {
       );
       const accepted = await store.get(run.scanId, owner);
       assert.ok(accepted.persistedWorkers);
+      const omittedIds = accepted.persistedWorkers
+        .filter((worker) => worker.mergeState === "buffered")
+        .map((worker) => worker.id);
+      assert.equal(accepted.terminalReason, saturated ? "saturated" : "capped");
+      assert.equal(omittedIds.length, saturated ? 1 : 0);
+      const originalCoverage = await readJson(run.scanDir, "coverage.json");
+      const originalFindings = (await readJson(run.scanDir, "findings.json"))
+        .findings;
       const acceptedPaths = accepted.persistedWorkers.map(
         (worker) => worker.resultManifestPath!,
       );
@@ -283,6 +337,23 @@ for (const route of ["plugin", "cli", "headless continuation"] as const) {
       );
       assert.equal(repaired.status, "succeeded");
       assert.equal(repaired.evidenceRepairRequired, undefined);
+      assert.equal(repaired.terminalReason, before.terminalReason);
+      assert.deepEqual(
+        repaired.persistedWorkers
+          ?.filter((worker) => worker.mergeState === "buffered")
+          .map((worker) => worker.id),
+        omittedIds,
+      );
+      assert.deepEqual(
+        await readJson(run.scanDir, "coverage.json"),
+        originalCoverage,
+      );
+      assert.deepEqual(
+        (await readJson(run.scanDir, "findings.json")).findings.map(
+          (finding: { id: string }) => finding.id,
+        ),
+        originalFindings.map((finding: { id: string }) => finding.id),
+      );
       assert.equal(
         repaired.coordinatorGeneration,
         before.coordinatorGeneration! + 1,
