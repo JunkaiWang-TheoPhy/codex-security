@@ -2070,6 +2070,7 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
 }
 
 function deepScanTerminalResult(run: DeepScanRunState) {
+  if (run.evidenceRepairRequired) return undefined;
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
     const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error. Follow explicit repair guidance on the same scan before retrying; otherwise stop. Return no final, no-findings, structured, or benchmark response until completion succeeds.`;
