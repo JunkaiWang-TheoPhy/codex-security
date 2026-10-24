@@ -409,6 +409,41 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return prepared.coverage
 
 
+def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) -> None:
+    """Reuse complete proof only for the same worker's unchanged finding."""
+    missing = [
+        key
+        for key in ("codeEvidence", "rootCause", "attackPath", "validation")
+        if key not in finding
+    ]
+    history = finding["provenance"].get("previousFindings")
+    if not missing or not isinstance(history, list):
+        return
+    key = _finding_key(finding, worker_id)
+    candidate_id = finding_candidate_id(finding)
+    content = _finding_content(finding)
+    for previous in reversed(history):
+        if not isinstance(previous, dict) or not all(field in previous for field in missing):
+            continue
+        provenance = previous.get("provenance", {})
+        if not isinstance(provenance, dict) or provenance.get("workerId", worker_id) != worker_id:
+            continue
+        if (
+            _finding_key(previous, worker_id) != key
+            or finding_candidate_id(previous) != candidate_id
+        ):
+            continue
+        proof = {field: previous[field] for field in missing}
+        if content | proof != _finding_content(previous):
+            continue
+        try:
+            _validate_completed_finding_evidence({"findings": [previous]})
+        except ContractError:
+            return
+        finding.update(proof)
+        return
+
+
 def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warnings):
     """Defer selected worker findings only after their revisions and receipts are reconciled."""
     retained = []
@@ -416,6 +451,7 @@ def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warni
     for finding in findings["findings"]:
         worker_id = finding["provenance"].get("workerId")
         if isinstance(worker_id, str) and finding["findingId"] not in canonical_ids:
+            _restore_omitted_worker_evidence(finding, worker_id)
             try:
                 _validate_completed_finding_evidence({"findings": [finding]})
             except ContractError as exc:

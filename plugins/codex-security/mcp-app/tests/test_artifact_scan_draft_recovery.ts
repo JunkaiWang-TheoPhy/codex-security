@@ -1,3 +1,4 @@
+import { completedFindingEvidence } from "./scan-draft-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -2516,9 +2517,12 @@ for (const additional of ["none", "surface", "task", "completed-surface"]) {
       ],
     });
     await f.write(progress);
+    const finding = findingFor("candidate-review");
     await f.write({
       ...f.draft({}, true),
-      findings: [findingFor("candidate-review")],
+      findings: [
+        { ...finding, ...completedFindingEvidence(finding.locations[0]!.path) },
+      ],
     });
     const { importSource } = await import("./import-module.ts");
     const { validateDiscoveryArtifacts } = await importSource(

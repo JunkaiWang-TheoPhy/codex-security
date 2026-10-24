@@ -37,6 +37,12 @@ export function finding(id: string, repositoryPath: string) {
 export function completedFinding(id: string, repositoryPath: string) {
   return {
     ...finding(id, repositoryPath),
+    ...completedFindingEvidence(repositoryPath),
+  };
+}
+
+export function completedFindingEvidence(repositoryPath: string) {
+  return {
     codeEvidence: [
       {
         id: "request-output",

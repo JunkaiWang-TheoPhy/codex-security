@@ -214,6 +214,18 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     assert checkpoint.read_bytes() == original
 
 
+def write_worker_revisions(scan, output, earlier, latest):
+    previous = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
+    )
+    current = write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id, findings=[latest]))
+    os.utime(previous, ns=(100, 100))
+    os.utime(current, ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": current.name}))
+    return {path: path.read_bytes() for path in (previous, current, head)}
+
+
 def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
     workbench_api, workbench_db, deadline_scan
 ):
@@ -226,15 +238,7 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
     latest.pop("identity")
     latest["summary"] = "The later revision supplies validation."
     earlier.pop("validation")
-    previous = write_checkpoint(
-        output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
-    )
-    current = write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id, findings=[latest]))
-    os.utime(previous, ns=(100, 100))
-    os.utime(current, ns=(200, 200))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": current.name}))
-    originals = {path: path.read_bytes() for path in (previous, current, head)}
+    originals = write_worker_revisions(scan, output, earlier, latest)
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
@@ -249,6 +253,43 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
     assert history["summary"] == earlier["summary"]
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert not any(row.get("workerId") == worker_id for row in coverage["deferred"])
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [{}, {"summary": "The updated finding describes a different exposure."}, {"validation": {}}],
+    ids=["omitted-proof", "changed-claim", "explicit-invalid-proof"],
+)
+def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
+    workbench_api, workbench_db, deadline_scan, revision
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    earlier = worker_finding(scan, "checkpoint-proof")
+    earlier["ruleId"] = "checkpoint-revision"
+    earlier["provenance"]["candidateId"] = "worker-candidate"
+    latest = copy.deepcopy(earlier)
+    latest.pop("identity")
+    latest.pop("validation")
+    latest.update(revision)
+    originals = write_worker_revisions(scan, output, earlier, latest)
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    deferred = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
+    if revision:
+        assert not retained
+        assert len(deferred) == 1
+    else:
+        (finding,) = retained
+        assert finding["identity"] == earlier["identity"]
+        assert finding["validation"] == earlier["validation"]
+        assert not deferred
     assert {path: path.read_bytes() for path in originals} == originals
 
 
