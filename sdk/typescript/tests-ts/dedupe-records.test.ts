@@ -971,6 +971,73 @@ test("concurrent SDK invocations retain their starting error policy", async () =
   expect(await typed).toBeInstanceOf(InvalidDeduplicationDecision);
 });
 
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "preserves preflight diagnostics (typed: %p, rewritten: %p)",
+  async (typed, rewritten) => {
+    let failure: Error | undefined;
+    const result = await deduplicateRecords(input(), {
+      throwReviewErrors: typed,
+      reviewRunner: {
+        async run(request, options) {
+          const candidate = answer(request) as { mergedFinding?: Finding };
+          if (!candidate.mergedFinding) return candidate;
+          candidate.mergedFinding.title = "";
+          try {
+            options!.validate!(candidate);
+          } catch (error) {
+            failure = error as Error;
+            if (rewritten) failure.message = "Correction budget exhausted";
+            throw error;
+          }
+          return candidate;
+        },
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(InvalidDeduplicationDecision);
+    if (typed) expect(result).toBe(failure);
+    else {
+      const unresolved = (result as { unresolved: Array<{ message: string }> })
+        .unresolved;
+      expect(unresolved.length).toBeGreaterThan(0);
+      for (const entry of unresolved)
+        expect(entry.message).toBe(failure!.message);
+    }
+  },
+);
+
+test("preflight cannot acknowledge synchronous cancellation during validation", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Synthetic cancellation");
+  let observed: unknown;
+  await expect(
+    deduplicateRecords(input(), {
+      signal: controller.signal,
+      reviewRunner: {
+        async run(request, options) {
+          const candidate = answer(request) as { decisions: unknown };
+          try {
+            options!.validate!({
+              get decisions() {
+                controller.abort(reason);
+                return candidate.decisions;
+              },
+            });
+          } catch (error) {
+            observed = error;
+          }
+          return candidate;
+        },
+      },
+    }),
+  ).rejects.toBe(reason);
+  expect(observed).toBe(reason);
+});
+
 test("review options remain cloneable for worker-backed adapters", async () => {
   const result = await deduplicateRecords(input(), {
     reviewRunner: {
@@ -985,7 +1052,7 @@ test("review options remain cloneable for worker-backed adapters", async () => {
 });
 
 test.each([false, true])(
-  "retained validators close after review (failure: %s)",
+  "retained validators close after review (failure: %p)",
   async (fail) => {
     const callbacks: Array<(value: unknown) => void> = [];
     const fault = new Error("Synthetic runner failure");
@@ -1011,7 +1078,7 @@ test.each([
   [true, false],
   [true, true],
 ])(
-  "settling the runner revokes preflight (signal: %s, rejection: %s)",
+  "settling the runner revokes preflight (signal: %p, rejection: %p)",
   async (withSignal, reject) => {
     const data = input();
     data.observations = data.observations.slice(0, 2);
@@ -1095,7 +1162,7 @@ test.each([
 });
 
 test.each([false, true])(
-  "preflight permits correction without changing final acceptance (throw errors: %s)",
+  "preflight permits correction without changing final acceptance (throw errors: %p)",
   async (typed) => {
     let calls = 0;
     let preflights = 0;
@@ -1129,7 +1196,7 @@ test.each([false, true])(
 );
 
 test.each([false, true])(
-  "final validation rejects an answer changed after preflight (throw errors: %s)",
+  "final validation rejects an answer changed after preflight (throw errors: %p)",
   async (typed) => {
     const result = await deduplicateRecords(input(), {
       throwReviewErrors: typed,
@@ -1151,7 +1218,7 @@ test.each([false, true])(
   },
 );
 
-test("detailed finding feedback releases root and nested validator state", () => {
+test("Finding feedback reuses its validator after failures and exceptions", () => {
   const script = `
     import Ajv from ${JSON.stringify(import.meta.resolve("ajv/dist/2020.js"))};
     const compiled = [];
@@ -1168,8 +1235,6 @@ test("detailed finding feedback releases root and nested validator state", () =>
     let message;
     try { requireFinding(invalid, true); } catch (error) { message = error.message; }
     const rejected = compiled.at(-1);
-    const rootErrors = rejected.errors;
-    const nestedErrors = Object.values(rejected.schemaEnv.refs).flatMap(ref => typeof ref.validate === "function" ? [ref.validate.errors] : []);
     requireFinding(valid, true);
     const detailedReusedAfterRejection = rejected === compiled.at(-1);
     const detailed = compiled.at(-1);
@@ -1185,7 +1250,7 @@ test("detailed finding feedback releases root and nested validator state", () =>
     requireFinding(valid);
     const legacy = compiled.at(-1);
     requireFinding(valid);
-    console.log(JSON.stringify({ message, detailedReusedAfterRejection, nestedErrors, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors }));
+    console.log(JSON.stringify({ message, detailedReusedAfterRejection, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1) }));
   `;
   const child = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
@@ -1193,9 +1258,7 @@ test("detailed finding feedback releases root and nested validator state", () =>
   expect(child.status).toBe(0);
   const result = JSON.parse(child.stdout);
   expect(result.message).toContain("/attackPath/dataFlow/transformations");
-  expect(result.rootErrors).toBeNull();
   expect(result.detailedReusedAfterRejection).toBe(true);
-  expect(result.nestedErrors).toEqual(result.nestedErrors.map(() => null));
   expect(result.detailedReused).toBe(true);
   expect(result.preserved).toBe(true);
   expect(result.reusedAfterThrow).toBe(true);

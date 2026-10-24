@@ -1,17 +1,12 @@
 import { hash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
-import { InvalidDeduplicationDecision } from "./decision-error.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
 import { FindingDeduplicator } from "./deduplication.js";
 import { CodexDeduplicationReviewer } from "./deduplication-reviewer.js";
-import {
-  findingSchema,
-  requireFinding,
-  InvalidFindingError,
-} from "./finding-schema.js";
+import { findingSchema, requireFinding } from "./finding-schema.js";
 import {
   sourceReviewInstructions,
   screeningInstructions,
@@ -42,7 +37,9 @@ function reviewValidation<T>(
     if (aborted) throw abortReason;
     signal?.throwIfAborted();
     if (!validator) throw new Error("The review has already ended.");
-    return validator(value, detailed);
+    const answer = validator(value, detailed);
+    signal?.throwIfAborted();
+    return answer;
   };
   return {
     result: (value: unknown): T => {
@@ -271,12 +268,7 @@ export async function deduplicateRecords(
       observationId: id,
       reason: "review_failed",
       message:
-        error instanceof InvalidDeduplicationDecision &&
-        error.cause instanceof InvalidFindingError
-          ? error.cause.legacyMessage
-          : error instanceof Error
-            ? error.message
-            : "Review did not complete.",
+        error instanceof Error ? error.message : "Review did not complete.",
     }));
     return result;
   }
