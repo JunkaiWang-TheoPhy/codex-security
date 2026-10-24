@@ -1,4 +1,6 @@
 name: node-ci
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('{0} · PR #{1} → {2}', github.event.action == 'edited' && github.event.changes.base == null && 'PR edit CI' || 'Source CI', github.event.number, github.base_ref) || '' }}
 
 on:
   push:
@@ -18,21 +20,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  metadata-edit:
-    name: Record pull request metadata edit
-    if: github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - run: echo 'Pull request metadata changed.'
-
   classify-changes:
     name: classify changes
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 40 || 10 }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
+      source-run: ${{ steps.proof.outputs.source-run }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      package-required: ${{ steps.scope.outputs.package-required }}
+      action-ci: ${{ steps.scope.outputs.action-ci }}
+      eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
       container-validate: ${{ steps.scope.outputs.container-validate }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
       compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
@@ -44,11 +45,18 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Verify pull request source
+        id: proof
+        if: &metadata-edit github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/verify-pr-source.mjs
       - name: Select required checks
         id: scope
+        if: steps.proof.outputs.source-run == ''
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_CHANGED: ${{ github.event.changes.base != null }}
+          BASE_CHANGED: ${{ github.event.action == 'edited' }}
         run: node .github/scripts/select-ci-checks.mjs
 
   workflow-quality:
@@ -56,8 +64,16 @@ jobs:
     if: needs.classify-changes.outputs.workflow-quality == 'true'
     uses: ./.github/workflows/workflow-quality.yml
 
+  action-ci:
+    needs: classify-changes
+    if: needs.classify-changes.outputs.action-ci == 'true'
+    uses: ./.github/workflows/action-ci.yml
+    with:
+      sdk-contracts: ${{ needs.classify-changes.outputs.source-required == 'false' }}
+
   static-checks:
     name: typecheck and formatting
+    if: needs.classify-changes.outputs.source-run == ''
     needs: classify-changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -87,7 +103,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
       - name: Test CI selection and result gating
-        run: node --test .github/scripts/test-ci-selection.mjs
+        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -98,7 +114,7 @@ jobs:
         run: pnpm --dir sdk/typescript run audit:prod
 
   native:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     needs: classify-changes
     uses: ./.github/workflows/native-artifacts.yml
     with:
@@ -110,7 +126,7 @@ jobs:
     uses: ./.github/workflows/container-validate.yml
 
   package:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     name: build and check package
     needs: [classify-changes, native]
     runs-on: ubuntu-latest
@@ -200,7 +216,7 @@ jobs:
           retention-days: 14
 
   compatibility:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     name: installed package / ${{ matrix.os }} / node-${{ matrix.node }}
     needs: [classify-changes, package]
     runs-on: ${{ matrix.os }}
@@ -380,7 +396,14 @@ jobs:
           python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        run: python -c "import pathlib, xml.etree.ElementTree as ET; assert not any(ET.parse(report).findall('.//testcase/skipped') for report in pathlib.Path('reports').glob('python*.xml')), 'Native platform tests must run without skips'"
+        shell: python
+        run: |
+          from xml.etree import ElementTree
+          report = ElementTree.parse("reports/python.xml")
+          if report.find(".//testcase") is None:
+              raise SystemExit("No native platform tests ran")
+          if report.find(".//testcase/skipped") is not None:
+              raise SystemExit("Native platform tests must run without skips")
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -391,39 +414,65 @@ jobs:
           path: reports/python*.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Set up Node.js for triage evals
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+
+  eval-contracts:
+    name: deterministic eval contracts
+    needs: classify-changes
+    if: needs.classify-changes.outputs.eval-contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - *checkout-repository
+      - *set-up-bun
+      - name: Check the Codex version across the SDK, MCP app and evals
+        run: bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: package.json
+      - name: Set up eval Node.js and pnpm cache
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.15.0"
-      - name: Set up triage eval dependencies and host runtime
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: pnpm --dir evals/triage-finding run setup
+          cache: pnpm
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+            evals/triage-finding/pnpm-lock.yaml
+      - &set-up-python
+        name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Set up eval dependencies and host runtime
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir evals/triage-finding run setup
       - name: Test deterministic triage eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         working-directory: evals/triage-finding
         run: node --run test:deterministic
       - name: Test secret discovery eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
       - name: Build host plugin for Standard eval integration
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: |
           node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
           ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
       - name: Test Standard time-budget eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   ci:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}ci
+    name: ci
     needs:
       [
         classify-changes,
         static-checks,
+        action-ci,
+        eval-contracts,
         native,
         package,
         test,
@@ -436,24 +485,35 @@ jobs:
         windows-test,
         windows-verify,
       ]
-    if: &source-aggregate always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
+    if: &source-aggregate always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     steps:
       - *checkout-repository
       - name: Require selected checks
         env:
           CI_RESULTS: ${{ toJSON(needs) }}
         run: node .github/scripts/check-ci-results.mjs
+      - name: Confirm pull request target
+        if: *metadata-edit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SOURCE_RUN: ${{ needs.classify-changes.outputs.source-run }}
+        run: node .github/scripts/verify-pr-source.mjs confirm-target
 
   # Retain required names until the repository ruleset has migrated to `ci`.
   required-test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}${{ matrix.os }} / node-22
+    name: ${{ matrix.os }} / node-22
     needs: [classify-changes, ci]
     if: *source-aggregate
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Require CI gate
         if: needs.ci.result != 'success'
@@ -471,11 +531,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     steps:
       - *checkout-repository
-      - &set-up-python
-        name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
+      - *set-up-python
       - *download-native
       - *set-up-typescript-tools
       - *set-up-bun
@@ -536,16 +592,3 @@ jobs:
         working-directory: sdk/typescript
         shell: bash
         run: node scripts/check-package.mjs ../../dist/*.tgz
-
-  windows:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
-    runs-on: ubuntu-latest
-    if: *source-aggregate
-    needs: [classify-changes, ci]
-    strategy:
-      matrix:
-        node: ["22.13.0", "24"]
-    steps:
-      - name: Require CI gate
-        if: needs.ci.result != 'success'
-        run: exit 1
