@@ -25,6 +25,15 @@ from workbench_scan_usage import _timestamp as usage_timestamp
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
+def javascript_utf8(value: str) -> bytes:
+    """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
+    return (
+        value.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .encode("utf-8")
+    )
+
+
 def timestamp_key(value: str) -> datetime:
     return finalizer.parse_timestamp(value)
 
@@ -218,8 +227,6 @@ def parse_scan_cost(value: str | None) -> str | None:
             and not _valid_legacy_scan_cost(cost["cost"])
         ):
             raise SystemExit("Scan cost includes invalid measured token usage.")
-    elif len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     elif not _valid_legacy_scan_cost(cost):
         raise SystemExit(
             "Scan cost must include a model, nonnegative token counts, and an estimated USD amount."

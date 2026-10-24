@@ -123,10 +123,13 @@ export class OperationTelemetry {
   }
 
   /** Callers establish repository and artifact protection before any writes. */
-  async activatePersistence(protectedRoots: readonly string[]): Promise<void> {
+  async activatePersistence(
+    protectedRoots: readonly string[],
+    savedOutput?: string,
+  ): Promise<void> {
     if (!this.#deferred || this.#finished) return;
     this.#deferred = false;
-    await this.#preparePersistence(protectedRoots);
+    await this.#preparePersistence(protectedRoots, savedOutput);
     if (this.#startedEvent !== undefined) {
       const event = {
         ...this.#startedEvent,
@@ -145,13 +148,13 @@ export class OperationTelemetry {
 
   async #preparePersistence(
     additionalRoots: readonly string[] = [],
+    savedOutput?: string,
   ): Promise<void> {
     try {
       const protectedRoots = [...additionalRoots];
-      if (this.#options.protectedOutput !== undefined) {
-        protectedRoots.push(
-          await canonicalConfigPath(this.#options.protectedOutput),
-        );
+      for (const output of [this.#options.protectedOutput, savedOutput]) {
+        if (output !== undefined)
+          protectedRoots.push(await canonicalConfigPath(output));
       }
       if (this.#options.protectedRepository !== undefined) {
         const repository = await canonicalConfigPath(

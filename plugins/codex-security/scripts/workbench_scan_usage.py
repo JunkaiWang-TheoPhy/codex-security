@@ -176,7 +176,7 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
     if rate_limits:
         merged["usage"] = {
             **merged["usage"],
-            "accountRateLimits": [rate_limits[key] for key in sorted(rate_limits)],
+            "accountRateLimits": list(rate_limits.values()),
         }
     return merged
 

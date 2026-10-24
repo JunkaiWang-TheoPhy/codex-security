@@ -1391,9 +1391,7 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
 
 
 @pytest.mark.parametrize("delayed_cache_counts", [False, True])
-def test_completion_preserves_explicit_legacy_cost(
-    tmp_path: Path, delayed_cache_counts: bool
-) -> None:
+def test_completion_preserves_large_legacy_cost(tmp_path: Path, delayed_cache_counts: bool) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
@@ -1429,7 +1427,7 @@ def test_completion_preserves_explicit_legacy_cost(
         "complete-scan",
         fixture.scan_id,
         "--cost-json",
-        json.dumps(cost),
+        json.dumps(cost) + " " * 8192,
         environment=fixture.environment,
     )["scan"]
     assert completed["cost"] == cost
@@ -2724,7 +2722,7 @@ def test_unscoped_complete_observation_keeps_known_gap_identity(workbench_api) -
     assert not resolved["usage"].get("missingThreadCount")
 
 
-def test_large_measured_scope_survives_saved_scan_round_trip(tmp_path: Path, workbench_api) -> None:
+def test_large_measured_scope_survives_saved_scan_round_trip(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     runtime = {
         "coverage": "partial",
@@ -2751,16 +2749,6 @@ def test_large_measured_scope_survives_saved_scan_round_trip(tmp_path: Path, wor
         )["scan"]["usage"]
         == runtime
     )
-    legacy_cost = {
-        "model": "fixture-model",
-        "inputTokens": 400,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 5,
-        "estimatedUsd": 0.01,
-    }
-    with pytest.raises(SystemExit, match="8 KiB"):
-        workbench_api["parse_scan_cost"](json.dumps(legacy_cost) + " " * 8192)
 
 
 def test_completed_scan_reconciles_late_runtime_usage_envelopes(
@@ -3410,6 +3398,81 @@ def test_completion_uses_latest_account_snapshot_across_owned_sessions(
         "secondary": None,
     }
     assert limits["another-limit"]["primary"]["usedPercent"] == 2
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == usage
+    )
+
+
+@pytest.mark.parametrize("terminal_status", ["complete", "failed"])
+def test_large_usage_persists_with_terminal_scan_state(
+    tmp_path: Path, terminal_status: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    usage = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        "threadCount": 1,
+        **_counts(120, 30, 15),
+        "accountRateLimits": [
+            {
+                "limitId": f"fixture-limit-{index}",
+                "observedAt": fixture.started_at.isoformat(),
+                "primary": {"usedPercent": 6, "windowMinutes": 10080, "resetsAt": 1800000000},
+                "secondary": None,
+            }
+            for index in range(60)
+        ],
+    }
+    cost_json = json.dumps({"usage": usage}, separators=(",", ":"))
+    assert len(cost_json.encode("utf-8")) > 8192
+
+    if terminal_status == "complete":
+        terminal = _complete_scan(fixture, "--cost-json", cost_json)["scan"]
+    else:
+        terminal = fail_scan(
+            fixture.state_dir,
+            fixture.scan_id,
+            "Fixture failure.",
+            "--cost-json",
+            cost_json,
+            environment=fixture.environment,
+        )["scan"]
+
+    assert terminal["progress"]["status"] == terminal_status
+    assert terminal["usage"] == usage
+    stored = scan_command(
+        fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+    )["scan"]
+    assert stored["progress"]["status"] == terminal_status
+    assert stored["usage"] == usage
+
+
+def test_completion_collects_large_usage_from_owned_rollouts(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    limit_ids = {f"fixture-limit-{index}" for index in range(60)}
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _token_event(counted, 120, 15, cached_input_tokens=30),
+            *[_allowance_event(counted, 6, limit_id) for limit_id in sorted(limit_ids)],
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    completed = _complete_scan(fixture)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    usage = completed["usage"]
+    assert len(json.dumps({"usage": usage}, separators=(",", ":")).encode("utf-8")) > 8192
+    assert usage["coverage"] == "complete"
+    assert usage["threadCount"] == 1
+    assert usage.items() >= _counts(120, 30, 15).items()
+    assert {limit["limitId"] for limit in usage["accountRateLimits"]} == limit_ids
     assert (
         scan_command(
             fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
