@@ -38,7 +38,8 @@ export function requireFinding(
       strict: false,
       allErrors: collectErrors,
     }).compile<Finding>(findingSchema());
-    validators.set(collectErrors, validator);
+    // Detailed validators also own nested $ref error arrays; do not retain them.
+    if (!collectErrors) validators.set(collectErrors, validator);
   }
   try {
     if (!validator(value)) {

@@ -1024,7 +1024,7 @@ test.each([false, true])(
   },
 );
 
-test("detailed finding feedback releases cached Ajv errors after formatting", () => {
+test("detailed finding feedback releases root and nested validator state", () => {
   const script = `
     import Ajv from ${JSON.stringify(import.meta.resolve("ajv/dist/2020.js"))};
     const compiled = [];
@@ -1035,17 +1035,28 @@ test("detailed finding feedback releases cached Ajv errors after formatting", ()
       return validate;
     };
     const { requireFinding } = await import(${JSON.stringify(new URL("../src/deduplication/finding-schema.ts", import.meta.url).href)});
-    try { requireFinding({}, true); } catch (error) {
-      console.log(JSON.stringify({ message: error.message, errors: compiled.at(-1).errors }));
-    }
+    const valid = ${JSON.stringify(document.findings[0])};
+    const invalid = structuredClone(valid);
+    invalid.attackPath = { dataFlow: { transformations: Array(100).fill(null) } };
+    let message;
+    try { requireFinding(invalid, true); } catch (error) { message = error.message; }
+    const rejected = compiled.at(-1);
+    requireFinding(valid, true);
+    const detailedWasReplaced = rejected !== compiled.at(-1);
+    requireFinding(valid);
+    const legacy = compiled.at(-1);
+    requireFinding(valid);
+    console.log(JSON.stringify({ message, detailedWasReplaced, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
   `;
   const child = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
   });
   expect(child.status).toBe(0);
   const result = JSON.parse(child.stdout);
-  expect(result.message).toContain("locations");
-  expect(result.errors).toBeNull();
+  expect(result.message).toContain("/attackPath/dataFlow/transformations");
+  expect(result.rootErrors).toBeNull();
+  expect(result.detailedWasReplaced).toBe(true);
+  expect(result.legacyReused).toBe(true);
 });
 
 test.each(["empty", "cancelled"])(
