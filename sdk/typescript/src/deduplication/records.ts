@@ -37,9 +37,12 @@ function reviewValidation<T>(
     if (aborted) throw abortReason;
     signal?.throwIfAborted();
     if (!validator) throw new Error("The review has already ended.");
-    const answer = validator(value, detailed);
-    signal?.throwIfAborted();
-    return answer;
+    try {
+      return validator(value, detailed);
+    } finally {
+      if (aborted) throw abortReason;
+      signal?.throwIfAborted();
+    }
   };
   return {
     result: (value: unknown): T => {

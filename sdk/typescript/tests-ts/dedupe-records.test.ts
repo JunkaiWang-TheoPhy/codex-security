@@ -1010,33 +1010,38 @@ test.each([
   },
 );
 
-test("preflight cannot acknowledge synchronous cancellation during validation", async () => {
-  const controller = new AbortController();
-  const reason = new Error("Synthetic cancellation");
-  let observed: unknown;
-  await expect(
-    deduplicateRecords(input(), {
-      signal: controller.signal,
-      reviewRunner: {
-        async run(request, options) {
-          const candidate = answer(request) as { decisions: unknown };
-          try {
-            options!.validate!({
-              get decisions() {
-                controller.abort(reason);
-                return candidate.decisions;
-              },
-            });
-          } catch (error) {
-            observed = error;
-          }
-          return candidate;
+test.each(["valid", "invalid", "adapter error"])(
+  "preflight preserves synchronous cancellation (%s)",
+  async (kind) => {
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    const adapterFault = new Error("Synthetic adapter failure");
+    let observed: unknown;
+    await expect(
+      deduplicateRecords(input(), {
+        signal: controller.signal,
+        reviewRunner: {
+          async run(request, options) {
+            const candidate = answer(request) as { decisions: unknown };
+            try {
+              options!.validate!({
+                get decisions() {
+                  controller.abort(reason);
+                  if (kind === "adapter error") throw adapterFault;
+                  return kind === "invalid" ? null : candidate.decisions;
+                },
+              });
+            } catch (error) {
+              observed = error;
+            }
+            return candidate;
+          },
         },
-      },
-    }),
-  ).rejects.toBe(reason);
-  expect(observed).toBe(reason);
-});
+      }),
+    ).rejects.toBe(reason);
+    expect(observed).toBe(reason);
+  },
+);
 
 test("review options remain cloneable for worker-backed adapters", async () => {
   const result = await deduplicateRecords(input(), {
