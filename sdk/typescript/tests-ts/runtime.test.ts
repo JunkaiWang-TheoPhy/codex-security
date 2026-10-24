@@ -43,7 +43,7 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -366,10 +366,20 @@ describe("plugin runtime preparation", () => {
       /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
         runtime,
       )?.[0];
+    const candidateSource =
+      /function findingIdentityCandidate\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    const identitySource =
+      /function scanFindingIdentity\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
     expect(source).toBeDefined();
+    expect(candidateSource).toBeDefined();
+    expect(identitySource).toBeDefined();
     const buildFindings = new Function(
       "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
+      `${candidateSource}\n${identitySource}\n${source}\nreturn buildFindings;`,
     )((value: string, fallback: string) => value || fallback) as (
       findings: Array<{
         title: string;
@@ -3323,9 +3333,88 @@ describe("runtime directories and plugin Python boundary", () => {
         new URL("../src/runtime.ts", import.meta.url).href,
         join(root, "state"),
       ],
-      { timeout: 25_000, windowsHide: true },
+      { timeout: 120_000, windowsHide: true },
     );
-  });
+  }, 125_000);
+
+  test("credential-lock fixture tolerates slow holder and legacy startup", async () => {
+    const root = await temporaryDirectory();
+    const runtime = join(root, "delayed-runtime.mjs");
+    await writeFile(
+      runtime,
+      `export * from ${JSON.stringify(new URL("../src/runtime.ts", import.meta.url).href)};
+       // Exceed the old holder lifetime and allow a heartbeat during legacy startup.
+       const mode = process.argv[4];
+       if (mode === "hold" || mode === "legacy") {
+         await new Promise(resolve => setTimeout(resolve, mode === "hold" ? 21_000 : 6_000));
+       }
+      `,
+    );
+    await promisify(execFile)(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+        ),
+        pathToFileURL(runtime).href,
+        join(root, "state"),
+      ],
+      { timeout: 120_000, windowsHide: true },
+    );
+  }, 125_000);
+
+  test("credential-lock fixture diagnoses an owner exit during legacy startup", async () => {
+    const root = await temporaryDirectory();
+    const runtime = join(root, "exiting-runtime.mjs");
+    const runtimeUrl = JSON.stringify(
+      new URL("../src/runtime.ts", import.meta.url).href,
+    );
+    await writeFile(
+      runtime,
+      `export * from ${runtimeUrl};
+       import { acquireCodexSecurityCredentialHomeLock as acquire } from ${runtimeUrl};
+       import { existsSync } from "node:fs";
+       import { writeFile } from "node:fs/promises";
+       import { join } from "node:path";
+       import { once } from "node:events";
+       const exitMarker = join(process.argv[3], "exit-holder");
+       export async function acquireCodexSecurityCredentialHomeLock(...args) {
+         const release = await acquire(...args);
+         if (process.argv[4] === "hold") {
+           setInterval(() => {
+             if (existsSync(exitMarker)) process.exit(23);
+           }, 25);
+         }
+         return release;
+       }
+       if (process.argv[4] === "legacy") {
+         // Coordinate an explicit exit: Windows reports external termination as
+         // an exit code instead of a Unix signal.
+         await writeFile(exitMarker, "exit");
+         // Stay in startup until the parent notices the owner exit and cleans up.
+         process.stdin.resume();
+         await once(process.stdin, "end");
+       }
+      `,
+    );
+    await expect(
+      promisify(execFile)(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+          ),
+          pathToFileURL(runtime).href,
+          join(root, "state"),
+        ],
+        { timeout: 120_000, windowsHide: true },
+      ),
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(
+        /Credential-lock holder exited during legacy contender startup.*code=23, signal=null, watchdog=false/,
+      ),
+    });
+  }, 125_000);
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
     const root = await temporaryDirectory();
@@ -4107,17 +4196,22 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test("preserves Windows credential ACL subprocess failures while streaming", async () => {
+  test("preserves complete Windows credential ACL subprocess failures while streaming", async () => {
+    const prefixLength = 70 * 1024;
+    const failure = "\nsynthetic ACL inspection failure at end";
     await expect(
       streamWindowsCredentialAclDescriptors(
         process.execPath,
         [
           "--eval",
-          'process.stderr.write("synthetic ACL inspection failure"); process.exitCode = 1',
+          `process.stderr.write("x".repeat(${prefixLength}) + ${JSON.stringify(failure)}); process.exitCode = 1`,
         ],
         async () => {},
       ),
-    ).rejects.toMatchObject({ stderr: "synthetic ACL inspection failure" });
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: "x".repeat(prefixLength) + failure,
+    });
   });
 
   test("accepts managed Windows ACLs with trusted system principals", () => {
@@ -5177,15 +5271,16 @@ describe("runtime directories and plugin Python boundary", () => {
     [
       ["test-command"],
       ["test-command", "--message=出力\0literal\nsecond line"],
+      ["test-command", `--message=${"detail ".repeat(20_000)}final cause`],
       [
         "test-command",
         "--message=\0high\ud800.low\udfff.pair😀",
         "path-\udcff",
       ],
       ["finding-issues"],
-    ].map((args) => ({ args })),
+    ].map((args, index) => ({ args, index })),
   )(
-    "runs custom workbench $args without output limits, credentials, or generated bytecode",
+    "runs custom workbench case $index without argument/output limits, credentials, or generated bytecode",
     async ({ args }) => {
       const root = await temporaryDirectory();
       const pluginRoot = join(root, "plugin");

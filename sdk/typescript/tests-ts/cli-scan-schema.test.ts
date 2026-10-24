@@ -78,16 +78,13 @@ describe("scan output schema", () => {
       for (const format of ["json", "jsonl"]) {
         for (const filter of [undefined, "warnings", "findings"]) {
           const stdout = capture();
-          const deps = dependencies();
-          deps.createSecurity = () => ({
-            run: async (_repository, options) => {
-              options?.onWarning?.("Synthetic target changed.", {
+          const deps = dependencies({
+            onTurn: (_repository, options) => {
+              options.onWarning?.("Synthetic target changed.", {
                 kind: "target_changed",
               });
-              return fakeResult(["high"], completeness);
             },
-            close: async () => {},
-            preflight: async () => fakePreflight(),
+            result: fakeResult(["high"], completeness),
           });
           expect(
             await main(

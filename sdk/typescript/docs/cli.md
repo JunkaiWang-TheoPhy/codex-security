@@ -435,18 +435,26 @@ Standard mode runs discovery and validation for the selected scope. Deep mode
 uses repeated discovery workers, then combines and validates their findings.
 Deep scans support repository and path targets.
 
+The scan summary and saved scan details show requested paths and exclusions.
+`coverage.deferred` records unfinished
+requested work separately from optional `coverage.openQuestions` follow-up.
+Human-readable output quotes ambiguous paths, while JSON retains their original strings.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
-`--path` scopes a scan to one or more repository-relative paths, `--diff REF`
+`--path` scopes a scan to one or more repository-relative files or directories, `--diff REF`
 scans committed changes from `REF` to `--head` (default: `HEAD`), and
 `--working-tree` scans staged, unstaged, and untracked changes against `--base`
-(default: `HEAD`). The two change selectors require Git. All three scope selectors are mutually exclusive; `--path`
-cannot filter a diff. Committed-diff scans require a clean, nonsparse checkout,
-including no untracked files, and `--head` must resolve to the checked-out commit.
+(default: `HEAD`). The two change selectors require Git. All three scope selectors
+are mutually exclusive.
 
 Working-tree snapshots include untracked nested Git repositories. Initialized
 submodules must be clean and at the commit recorded by the parent.
+
+Committed-diff scans, including those using `--validate`, require a clean,
+nonsparse checkout at the requested head revision. Commit or stash local changes,
+including untracked files, before scanning.
 
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
@@ -539,6 +547,38 @@ available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an importe
 scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
 stderr-only failures, including when `--full-output` is selected.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
+
+### Follow-up finding validation
+
+Scans already validate findings against local source. Add `--validate` to run
+the existing standalone validation workflow for each reported finding after
+the scan, using the same selected Cyber access program. Validation has read-only
+filesystem access with network and web search disabled. Each assessment uses a
+separate evidence directory; the combined report is saved as
+`<scan-dir>/validation.md`, or a uniquely suffixed report
+if that path already exists. Each completed assessment is saved immediately;
+failed or interrupted runs retain the partial report. JSON scan output includes
+the execution status, completed assessment count, and report path. Completion means the assessments finished,
+not that every finding was confirmed. A scan with no findings needs no second
+pass.
+
+With `--workflow-id`, retries reuse completed assessments for unchanged findings,
+source, validation settings, and saved evidence. Missing or changed evidence
+causes validation to run again, as do older assessments without recorded evidence
+fingerprints. By default, regeneration uses a new evidence directory. An explicit
+SDK validation `outputDir` reuses an assessment only when it points to the same
+evidence directory. A different destination starts a new assessment. The requested
+directory must be empty when regenerating; existing files are never overwritten.
+When `--knowledge-base` is supplied, the scan and all follow-up assessments use
+one captured copy of those documents. A workflow retry must use the same document
+contents. Use a new workflow ID if they changed or if the workflow was created
+before document snapshots were bound to follow-up validation.
+
+The report is supplemental: its assessments are not applied to the saved
+findings or the `--fail-on-severity` decision. Validation failures exit with
+`2` while retaining the completed scan. The additional model calls are not
+cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
+configured scan cost limit), `--dry-run`, or `--mock`.
 
 ### Understand scan scope and follow-up work
 
@@ -2774,6 +2814,11 @@ for `patch`. Omit it or use `--verification-mode standard` for the default check
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
+Authentication and execution failures print diagnostics on stderr and return
+`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message` with `--json`
+or `--format jsonl`. With JSON/JSONL `--full-output`, failures use an `ok: false`
+error envelope. Other formats retain stderr-only failures. Interruptions retain
+exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 
