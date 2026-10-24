@@ -270,8 +270,6 @@ try {
   });
   await assert.rejects(checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:''}, probeEnv),
     error => error instanceof Error && !(error instanceof SandboxUnavailableError) && /model/i.test(error.message));
-  await assert.rejects(checkSandbox(process.execPath, cli, {repository, provider:'openai', model:''}, {...probeEnv, CODEX_CLI_PATH:'/bin/false'}),
-    SandboxUnavailableError);
   await assert.rejects(readFile(join(shadowBin, 'bwrap.ran')), {code:'ENOENT'});
   await rm(shadowBin, {recursive:true});
   // Use the published MCP launcher and its actual allowlist without a model turn.
@@ -309,6 +307,16 @@ try {
   assert.equal(selected.prefix, venv);
   assert.equal(selected.loader, libraryPath);
   assert.equal(selected.tracking, 'synthetic-cli-job');
+
+  const nativeProbe = join(root, 'native-probe');
+  const nativeEnv = {...probeEnv, CODEX_CLI_PATH:nativeProbe, PROBE_CODEX:selected.codex};
+  const probe = (nodePath = process.execPath) => checkSandbox(nodePath, cli, {repository, provider:'openai', model:''}, nativeEnv);
+  await writeFile(nativeProbe, `#!/bin/sh\nexec "$PROBE_CODEX" -c 'model_provider="synthetic-undefined"' "$@"\n`, {mode:0o755});
+  await assert.rejects(probe, error => error instanceof Error && !(error instanceof SandboxUnavailableError) && error.message.includes('synthetic-undefined'));
+  await writeFile(nativeProbe, '#!/bin/sh\n[ "$1" != sandbox ] && exec "$PROBE_CODEX" "$@"\n');
+  await assert.rejects(probe, SandboxUnavailableError);
+  await writeFile(nativeProbe, `#!${process.execPath}\nprocess.on('SIGTERM', () => process.exit(0)); process.kill(process.ppid, 'SIGINT'); setInterval(() => {}, 1000);\n`);
+  await assert.rejects(probe(nativeProbe), /sandbox preflight was interrupted/);
 
   // Exercise filesystem enforcement with the scan and network-disabled Deep
   // worker profiles, using the same pinned Codex and child PATH as the Action.

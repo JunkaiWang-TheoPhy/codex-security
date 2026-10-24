@@ -145,8 +145,10 @@ export async function ensureSandbox(options: {
       try { options.log?.(line); }
       catch { /* Optional diagnostics must not interrupt sandbox preparation. */ }
     }
-    if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
-      throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(' ')} (exit ${result.exitCode}). ${result.stderr || result.stdout}`);
+    if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut) {
+      const details = safeLogLines([result.stderr, result.stdout].join('\n')).join('\n');
+      throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(' ')} (exit ${result.exitCode}).\n${details}`);
+    }
   }
   await probe();
 }
@@ -170,7 +172,10 @@ export async function checkSandbox(nodePath: string, cliPath: string, options: P
       const { SandboxUnavailableError } = await fromCli('errors.js');
       if (!(error instanceof SandboxUnavailableError)) throw error;
       console.error(error);
-      process.exitCode = ${SANDBOX_UNAVAILABLE_EXIT};
+      // The feature list loads the native configuration without starting Bubblewrap.
+      const config = await runtime.runCodexCommand(command, ['features', 'list'], process.env,
+        undefined, AbortSignal.timeout(10_000));
+      process.exitCode = config.success ? ${SANDBOX_UNAVAILABLE_EXIT} : 1;
     }
   `, cliPath, options.provider, options.model], {cwd: options.repository, env});
   const detail = result.stderr || result.stdout;

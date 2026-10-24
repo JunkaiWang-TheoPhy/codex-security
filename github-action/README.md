@@ -67,8 +67,9 @@ also fail the job. Intentional exclusions and investigation notes do not.
 ### Ubuntu sandbox setup
 
 The Action checks that Codex can start its sandbox before using the scan
-credential. If the check fails on a GitHub-hosted Ubuntu 24.04 VM, the Action
-installs `bubblewrap` and `apparmor-profiles`, loads the supplied
+credential. If sandbox startup fails on a GitHub-hosted Ubuntu 24.04 VM and Codex
+can load its configuration, the Action installs `bubblewrap` and
+`apparmor-profiles`, loads the supplied
 `bwrap-userns-restrict` AppArmor profile, and checks startup again.
 
 Self-hosted runners and job containers must provide a working Codex sandbox.

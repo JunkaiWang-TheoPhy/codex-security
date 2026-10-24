@@ -172,9 +172,9 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
     assert.equal(call.env.PATH, env.PATH);
   }
   assert.equal(fs.existsSync(join(root, 'checkout-command-ran')), false);
-  await writeFile(sudo, `#!${process.execPath}\nconsole.error('synthetic apt diagnostic'); process.exit(17);\n`, {mode:0o755});
+  await writeFile(sudo, `#!${process.execPath}\nconsole.error('synthetic apt diagnostic'); console.log('dpkg: synthetic package configuration failed'); process.exitCode = 17;\n`, {mode:0o755});
   await assert.rejects(ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new SandboxUnavailableError('Sandbox unavailable'); }, execute),
-    /Ubuntu sandbox setup failed: sudo -n \/usr\/bin\/apt-get update \(exit 17\).*synthetic apt diagnostic/s);
+    /Ubuntu sandbox setup failed: sudo -n \/usr\/bin\/apt-get update \(exit 17\)\.\n\[codex-security\] synthetic apt diagnostic\n\[codex-security\] dpkg: synthetic package configuration failed/);
 });
 
 test('sandbox setup leaves self-hosted runners and other images unchanged', async t => {
@@ -192,7 +192,7 @@ test('sandbox setup skips Docker job containers with inherited hosted Ubuntu lab
   assert.equal(execute.mock.callCount(), 0);
 });
 
-test('hosted setup propagates cancellations and provider errors without provisioning', async t => {
+test('hosted setup propagates provider errors without provisioning', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-sandbox-failure-')));
   t.after(() => rm(root, {recursive:true,force:true}));
   const existsSync = fs.existsSync;
@@ -203,8 +203,6 @@ test('hosted setup propagates cancellations and provider errors without provisio
   const host = {cwd:root, env:{}, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'};
   await writeFile(probe, `#!${process.execPath}\nconsole.error('synthetic provider diagnostic'); process.exitCode = 1;\n`, {mode:0o755});
   await assert.rejects(ensureSandbox(host, check, execute), /Codex Security sandbox preflight failed.*synthetic provider diagnostic/s);
-  await writeFile(probe, `#!${process.execPath}\nprocess.on('SIGTERM', () => process.exit(0)); process.kill(process.ppid, 'SIGINT'); setInterval(() => {}, 1000);\n`);
-  await assert.rejects(ensureSandbox(host, check, execute), /sandbox preflight was interrupted/);
   assert.equal(execute.mock.callCount(), 0);
 });
 
