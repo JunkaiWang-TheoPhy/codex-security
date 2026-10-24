@@ -3876,7 +3876,13 @@ describe("GitHub release workflow safeguards", () => {
     }
     for (const [name, job] of Object.entries(workflow.jobs)) {
       if (
-        ["classify-changes", "ci", "required-test", "windows"].includes(name)
+        [
+          "classify-changes",
+          "metadata-edit",
+          "ci",
+          "required-test",
+          "windows",
+        ].includes(name)
       ) {
         continue;
       }

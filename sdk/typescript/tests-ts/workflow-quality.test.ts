@@ -89,6 +89,9 @@ test.each([
     const context = eventContext(action, changes);
     const classifier = ci.jobs["classify-changes"]!;
     expect(expression(classifier.if!, context)).toBe(sourceEvent);
+    expect(expression(ci.jobs["metadata-edit"]!.if!, context)).toBe(
+      !sourceEvent,
+    );
     for (const [id, matrix, name] of aggregates) {
       const aggregate = ci.jobs[id]!;
       expect(expression(aggregate.if!, context)).toBe(sourceEvent);
@@ -123,7 +126,7 @@ test("all source jobs depend on classification and titles cannot block source ch
     "synchronize",
   ]);
   for (const [id, job] of Object.entries(ci.jobs)) {
-    if (id !== "classify-changes") {
+    if (id !== "classify-changes" && id !== "metadata-edit") {
       const dependencies = Array.isArray(job.needs) ? job.needs : [job.needs];
       expect(dependencies, id).toContain("classify-changes");
     }

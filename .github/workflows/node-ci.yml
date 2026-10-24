@@ -18,6 +18,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  metadata-edit:
+    name: Record pull request metadata edit
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo 'Pull request metadata changed.'
+
   classify-changes:
     name: classify changes
     if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
