@@ -368,10 +368,17 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
     [
         {},
         {"summary": "The updated finding describes a different exposure."},
+        {"extensions": {"observedRuntimeInput": {"mode": 1}}},
         {"validation": {}},
         {"provenance": {"source": "independent_scanner", "candidateId": "worker-candidate"}},
     ],
-    ids=["omitted-proof", "changed-claim", "explicit-invalid-proof", "different-producer"],
+    ids=[
+        "omitted-proof",
+        "changed-claim",
+        "number-for-boolean",
+        "explicit-invalid-proof",
+        "different-producer",
+    ],
 )
 def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
     workbench_api, workbench_db, deadline_scan, revision
@@ -381,6 +388,7 @@ def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
     earlier = worker_finding(scan, "checkpoint-proof")
     earlier["ruleId"] = "checkpoint-revision"
     earlier["provenance"]["candidateId"] = "worker-candidate"
+    earlier["extensions"] = {"observedRuntimeInput": {"mode": True}}
     latest = copy.deepcopy(earlier)
     latest.pop("identity")
     latest.pop("validation")

@@ -54,11 +54,16 @@ await buildServer(serverPath, {
               assert.match(await readFile(request.promptPath, "utf8"), /missing evidence/i);
               const source = request.artifactContext.deepReducer.previousReducerResultPath;
               const draft = JSON.parse(await readFile(source, "utf8"));
-              for (const finding of draft.findings) finding.validation = {
-                method: "Static source inspection",
-                summary: "The retained source demonstrates the reported query sink.",
-                evidenceRefs: finding.codeEvidence.map(item => item.id),
-              };
+              for (const [index, finding] of draft.findings.entries()) {
+                if (!finding.provenance.sourceFindings?.length) {
+                  finding.provenance.sourceFindingIds = ["previous:" + index];
+                }
+                finding.validation = {
+                  method: "Static source inspection",
+                  summary: "The retained source demonstrates the reported query sink.",
+                  evidenceRefs: finding.codeEvidence.map(item => item.id),
+                };
+              }
               await writeFile(join(request.artifactContext.root, "result.json"), JSON.stringify(draft));
               return { threadId: "fixture-evidence-repair" };
             }
@@ -258,11 +263,27 @@ for (const { route, saturated, lateFailure } of [
       const acceptedPaths = accepted.persistedWorkers.flatMap((worker) =>
         worker.resultManifestPath ? [worker.resultManifestPath] : [],
       );
+      const legacyReducer =
+        route !== "cli" && !saturated
+          ? accepted.persistedWorkers.find((worker) => worker.kind === "dedup")
+              ?.resultManifestPath
+          : undefined;
       // Simulate artifacts accepted before the update, without resetting the
       // persisted terminal status, selected manifest, budget or coordinator lease.
       for (const file of [...acceptedPaths, parentFindingsPath]) {
         const draft = await readJson(file);
-        for (const finding of draft.findings) delete finding.validation;
+        for (const finding of draft.findings) {
+          delete finding.validation;
+          if (
+            legacyReducer &&
+            (file === legacyReducer || file === parentFindingsPath)
+          ) {
+            assert.equal(finding.provenance.sourceFindingIds.length, 1);
+            delete finding.provenance.sourceFindings;
+            if (route === "headless continuation")
+              delete finding.provenance.sourceFindingIds;
+          }
+        }
         if (file === parentFindingsPath && route === "plugin" && !saturated) {
           // Older parents derived anchors from titles and scoped coverage by worker.
           draft.findings[0].identity = { anchor: "unsafe-fixture-query" };

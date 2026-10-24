@@ -71,7 +71,7 @@ from workbench.retained_coverage import (
 from workbench.retained_coverage import (
     _inherit_coverage_sources as _inherit_coverage_sources,
 )
-from workbench.retained_coverage import _projected_candidate_id
+from workbench.retained_coverage import _projected_candidate_id, _same_json_value
 from workbench.retained_coverage import (
     _retained_findings as _retained_findings,
 )
@@ -440,7 +440,7 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
         ):
             continue
         proof = {field: previous[field] for field in missing}
-        if content | proof == _finding_content(previous):
+        if _same_json_value(content | proof, _finding_content(previous)):
             matches.append(previous)
     if not matches:
         return
@@ -1052,25 +1052,63 @@ def _repair_selected_finding_evidence(
 ) -> None:
     evidence = ("codeEvidence", "rootCause", "attackPath", "validation")
 
-    def by_source(findings: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
-        indexed = {}
-        for finding in findings:
-            provenance = finding.get("provenance")
-            provenance = provenance if isinstance(provenance, dict) else {}
-            originals = sorted(provenance.get("sourceFindings", []), key=_encoded)
-            if originals:
-                # The same worker/index may have different original content after a retry.
-                source_ids = provenance.get("sourceFindingIds") or [row["id"] for row in originals]
-                source = [finding.get("ruleId"), sorted(source_ids), originals]
-            else:
-                content = {k: v for k, v in _finding_content(finding).items() if k not in evidence}
-                source = [_finding_key(finding), content, provenance]
-            key = _digest(source)
-            indexed[key] = finding if key not in indexed else None
-        return indexed
+    def source_key(finding: dict[str, Any]) -> str:
+        provenance = finding.get("provenance")
+        provenance = provenance if isinstance(provenance, dict) else {}
+        originals = sorted(provenance.get("sourceFindings", []), key=_encoded)
+        if originals:
+            # The same worker/index may have different original content after a retry.
+            source_ids = provenance.get("sourceFindingIds") or [row["id"] for row in originals]
+            return _digest([finding.get("ruleId"), sorted(source_ids), originals])
+        content = {k: v for k, v in _finding_content(finding).items() if k not in evidence}
+        return _digest([_finding_key(finding), content, provenance])
 
-    repairs = by_source(proposed)
-    for key, finding in by_source(selected).items():
+    def add_unique(index, key, finding):
+        index[key] = finding if key not in index else None
+
+    saved = {}
+    legacy = {}
+    for row in selected:
+        key = source_key(row)
+        add_unique(saved, key, row)
+        provenance = row.get("provenance")
+        if isinstance(provenance, dict) and not provenance.get("sourceFindings"):
+            legacy.setdefault(row.get("ruleId"), []).append((key, row))
+
+    repairs = {}
+    for repair in proposed:
+        add_unique(repairs, source_key(repair), repair)
+        provenance = repair.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        originals = provenance.get("sourceFindings") or []
+        if len(originals) != 1:
+            continue
+        source = originals[0]
+        reference = source.get("id", "")
+        if provenance.get("sourceFindingIds") != [reference] or not re.fullmatch(
+            r"previous:[0-9]+", reference
+        ):
+            continue
+        previous = source.get("finding")
+        if not isinstance(previous, dict):
+            continue
+        # With no original source bodies the reducer returns the prior finding as
+        # previous:N. Only the parent may have added an identity at publication.
+        matches = [
+            key
+            for key, row in legacy.get(repair.get("ruleId"), ())
+            if _same_json_value(previous.get("provenance"), row.get("provenance"))
+            and _same_json_value(_finding_content(previous), _finding_content(row))
+            and (
+                "identity" not in previous
+                or _same_json_value(previous["identity"], row.get("identity"))
+            )
+        ]
+        if len(matches) == 1:
+            add_unique(repairs, matches[0], repair)
+
+    for key, finding in saved.items():
         repair = repairs.get(key)
         if finding is None or repair is None:
             continue

@@ -129,6 +129,23 @@ def _worker_candidate_key(
     return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
 
 
+def _same_json_value(left: Any, right: Any) -> bool:
+    if isinstance(left, dict):
+        return (
+            isinstance(right, dict)
+            and left.keys() == right.keys()
+            and all(_same_json_value(value, right[key]) for key, value in left.items())
+        )
+    if isinstance(left, list):
+        return (
+            isinstance(right, list)
+            and len(left) == len(right)
+            and all(_same_json_value(a, b) for a, b in zip(left, right, strict=True))
+        )
+    # JSON numbers compare by value, but booleans are a distinct scalar type.
+    return isinstance(left, bool) == isinstance(right, bool) and left == right
+
+
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     """Return substantive finding content without generated identity or provenance."""
     return {
@@ -1937,22 +1954,6 @@ def merge_saved_results(
                 return False
         return True
 
-    def same_raw_value(left: Any, right: Any) -> bool:
-        if isinstance(left, dict):
-            return (
-                isinstance(right, dict)
-                and left.keys() == right.keys()
-                and all(same_raw_value(value, right[key]) for key, value in left.items())
-            )
-        if isinstance(left, list):
-            return (
-                isinstance(right, list)
-                and len(left) == len(right)
-                and all(same_raw_value(a, b) for a, b in zip(left, right, strict=True))
-            )
-        # JSON numbers compare by value, but booleans are a distinct scalar type.
-        return isinstance(left, bool) == isinstance(right, bool) and left == right
-
     def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
         def content(value: dict[str, Any]) -> dict[str, Any]:
             result = _finding_content(value)
@@ -1966,7 +1967,7 @@ def merge_saved_results(
                     result.pop("extensions")
             return result
 
-        return same_raw_value(content(left), content(right))
+        return _same_json_value(content(left), content(right))
 
     def contains_raw_value(current: Any, previous: Any) -> bool:
         if isinstance(previous, dict):
@@ -2016,12 +2017,12 @@ def merge_saved_results(
         if not valid_finding(left) or not valid_finding(right):
             return False
         return (
-            same_raw_value(_finding_content(left), _finding_content(right))
+            _same_json_value(_finding_content(left), _finding_content(right))
             and (
                 "identity" not in left
-                or same_raw_value(_finding_identity(left), _finding_identity(right))
+                or _same_json_value(_finding_identity(left), _finding_identity(right))
             )
-            and same_raw_value(
+            and _same_json_value(
                 {
                     key: value
                     for key, value in left.get("provenance", {}).items()
@@ -2278,7 +2279,7 @@ def merge_saved_results(
                 if (
                     group["key"] not in claimed
                     and owner == group["owner"]
-                    and same_raw_value(value, group["latest"])
+                    and _same_json_value(value, group["latest"])
                 ):
                     assigned[index] = group
                     claimed.add(group["key"])
@@ -2330,7 +2331,7 @@ def merge_saved_results(
                 logical_rows.setdefault(saved_scope, {})[match["key"]] = match
             if match["owner"] is None:
                 match["owner"] = owner
-            if not any(same_raw_value(value, previous) for previous in match["rows"]):
+            if not any(_same_json_value(value, previous) for previous in match["rows"]):
                 match["rows"].append(value)
             observations = match.setdefault("observations", {})
             previous = observations.get(source_owner)
