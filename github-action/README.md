@@ -174,11 +174,6 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -388,6 +383,11 @@ The Action writes a job summary and source annotations. Set
 Reports are retained for seven days by default; use `retention-days` to change
 this. Reports can contain source code and vulnerability details.
 
+The job summary includes the configured provider, reported input/cached/output
+token usage, and estimated USD cost, including a range when supplied by the CLI.
+Missing measurements or pricing appear as `unavailable`; measured zeros remain
+zero. Cost estimates are not billing totals.
+
 The Action uses the normal Actions job check. Its summary and final log message
 distinguish findings above the failure threshold from a scan that could not
 complete or a required reporting failure. With `fail-on-severity: none`, findings
@@ -524,7 +524,7 @@ npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run docs
 npm --prefix github-action run build
 npm --prefix github-action run validate
-# Test the published CLI with synthetic scans; no model calls:
+# Test the published CLI with synthetic scans and a local request fixture:
 npm --prefix github-action/runtime ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run test:cli
 # Linux x64 with Node 24; no model calls:
@@ -537,8 +537,10 @@ files and run `npm run docs` to keep the examples synchronized.
 Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
-SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
-audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
+SARIF exporter using synthetic scans. A local inference fixture checks request
+attribution and the analytics opt-out with synthetic credentials; it makes no
+external model calls. CI also runs the packaged Linux smoke test and audits the
+Action and CLI dependency locks. The `@openai/codex-security` dependency in
 `runtime/package.json` is the installed CLI version source. Main keeps an already
 published CLI baseline so its checks remain runnable while a release PR prepares
 the next product version. This development pin does not necessarily track the
