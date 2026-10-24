@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
@@ -1003,66 +1002,6 @@ def require_current_coordinator(run: sqlite3.Row, args: argparse.Namespace) -> N
         raise SystemExit("Deep Scan coordinator lease belongs to a newer generation.")
 
 
-def require_current_publication(
-    connection: sqlite3.Connection, scan: sqlite3.Row, draft: dict[str, Any]
-) -> None:
-    scan_id = scan["id"]
-    run = connection.execute(
-        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-    ).fetchone()
-    publication = draft.get("deepScanPublication")
-    if (
-        publication is None
-        and draft["manifest"]["scan"].get("complete") is False
-        and (run is None or run["status"] == "running")
-    ):
-        return
-    if run is None:
-        run = require_deep_scan_run(connection, scan_id)
-    # Finished discovery-only runs hand remaining publication back to the parent.
-    if (
-        publication is None
-        and run["status"] != "running"
-        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
-    ):
-        return
-    require_current_coordinator(
-        run,
-        argparse.Namespace(
-            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
-        ),
-    )
-    # Once finish selects the canonical parent, only completion may replay it.
-    if publication is None:
-        if run["status"] != "running" and run["manifest_path"] == str(
-            Path(scan["scan_dir"]) / "scan-manifest.json"
-        ):
-            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
-        return
-
-    # Match the durable reducer sequence used by coordinator recovery.
-    def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
-        return (int(match[1]) if match else 0, worker["id"])
-
-    reducer = max(
-        (
-            worker
-            for worker in connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
-            )
-            if worker["kind"] == "dedup"
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"]
-        ),
-        key=reducer_order,
-        default=None,
-    )
-    selected_result = reducer["result_manifest_path"] if reducer is not None else None
-    if publication["resultPath"] != selected_result:
-        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
-
-
 def claim_deep_scan_coordinator(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
@@ -1894,9 +1833,9 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
+        discovery_deadline = args.terminal_reason == "capped" and deep_scan_deadline_reached(run)
         zero_discovery_deadline = (
-            args.terminal_reason == "capped"
-            and deep_scan_deadline_reached(run)
+            discovery_deadline
             and run["completion_sequence"] == 0
             and (
                 standard_scan_manifest
@@ -1928,9 +1867,13 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        if zero_discovery_deadline:
+        if zero_discovery_deadline or (discovery_deadline and standard_scan_manifest):
             deadline_publication = saved_results.preserve_deep_deadline_draft(
-                dependencies(), connection, scan, allow_empty=not standard_scan_manifest
+                dependencies(),
+                connection,
+                scan,
+                preserve_reduction=not zero_discovery_deadline,
+                allow_empty=not standard_scan_manifest,
             )
         timestamp = dependencies().now()
         connection.execute(
