@@ -52,6 +52,22 @@ async function fixture() {
   return { options, prepare, finding, stateDirectory };
 }
 
+test.skipIf(process.platform === "win32")(
+  "uses the configured state path when resolution exposes a trailing filename space",
+  async () => {
+    const { options, prepare, stateDirectory } = await fixture();
+    const selected = `${stateDirectory} `;
+    const local = new LocalDeduplication(
+      { ...options.environment, CODEX_SECURITY_STATE_DIR: `${selected}/.` },
+      { repositoryId: prepare.repositoryId },
+      prepare.repositoryPath,
+    );
+    await local.prepare([], prepare.repositoryId);
+    expect(existsSync(join(selected, "workbench.sqlite3"))).toBe(true);
+    expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(false);
+  },
+);
+
 test("bundled local dedupe retains raw integer bytes and SDK number values without Python", async () => {
   const { options, prepare, finding } = await fixture();
   finding.extensions = {

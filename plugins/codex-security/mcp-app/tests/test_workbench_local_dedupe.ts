@@ -27,10 +27,14 @@ after(() => temporary.cleanup());
 const timestamp = "2026-01-01T00:00:00Z";
 const space = "synthetic-space";
 
-async function fixture(t: TestContext) {
+async function fixture(
+  t: TestContext,
+  encoding: "UTF-8" | "UTF-16le" | "UTF-16be" = "UTF-8",
+) {
   const root = await temporary.create("local-dedupe-");
   const database = new DatabaseSync(":memory:");
   t.after(() => database.close());
+  database.exec(`PRAGMA encoding = '${encoding}'`);
   database.exec("PRAGMA foreign_keys = ON");
   applyMigrations(database);
   const targetId = `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`;
@@ -152,6 +156,43 @@ test("preparation retains current body bytes, large integers and independent ser
   );
   assert.notEqual(changedSpace.cacheKeys[original.findingId], cacheKey(body));
   assert.deepEqual(changedSpace.findingsToEmbed, first.findingsToEmbed);
+});
+
+for (const encoding of ["UTF-16le", "UTF-16be"] as const) {
+  test(`${encoding} databases reuse the same text and cache keys across preparation and embedding`, async (t) => {
+    const { database, prepare, embed } = await fixture(t, encoding);
+    assert.equal(database.prepare("PRAGMA encoding").get()!.encoding, encoding);
+    const original = finding("synthetic");
+    const first = prepared(prepare([original]));
+    assert.deepEqual(first.findingsToEmbed, [original]);
+    const body = database.prepare("SELECT details_json FROM findings").get()!
+      .details_json;
+    assert.equal(first.cacheKeys.synthetic, cacheKey(String(body)));
+    assert.deepEqual(embed([entry(first, "synthetic")]), {});
+    assert.deepEqual(prepare([original]), {
+      cacheKeys: first.cacheKeys,
+      findingsToEmbed: [],
+    });
+  });
+}
+
+test("a missing embedding space rolls back when deriving a cache key", async (t) => {
+  const { database, prepare } = await fixture(t);
+  const before = snapshot(database);
+  assert.deepEqual(prepare([], { space: undefined }), {
+    cacheKeys: {},
+    findingsToEmbed: [],
+  });
+  assert.throws(
+    () => prepare([finding("synthetic")], { space: undefined }),
+    /embedding space/i,
+  );
+  assert.deepEqual(snapshot(database), before);
+  assert.equal(
+    prepared(prepare([finding("synthetic")], { space: "undefined" }))
+      .findingsToEmbed.length,
+    1,
+  );
 });
 
 for (const [encoding, expectedKey] of [

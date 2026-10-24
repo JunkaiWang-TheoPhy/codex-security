@@ -42,22 +42,34 @@ export type LocalDedupeRequest = Preparation | EmbeddingBatch;
 class LocalDedupeError extends Error {}
 
 // Historical SQLite rows can contain BLOBs despite their TEXT affinity. Decode
-// TEXT explicitly so SQLite's invalid UTF-8 is not silently replaced by Node.
+// TEXT explicitly so Node does not silently replace invalid text.
 function column(expression: string, name: string): string {
   return `CASE WHEN typeof(${expression}) = 'text' THEN CAST(${expression} AS BLOB)
     ELSE ${expression} END AS ${name}, typeof(${expression}) AS ${name}_type`;
 }
 
-function value(
-  row: Record<string, SQLOutputValue>,
-  name: string,
-): SQLOutputValue {
-  return row[`${name}_type`] === "text"
-    ? decodeUtf8(Buffer.from(row[name] as Uint8Array))
-    : row[name]!;
+function columnReader(database: DatabaseSync) {
+  // CAST(TEXT AS BLOB) returns bytes in SQLite's database encoding.
+  const encoding = database.prepare("PRAGMA encoding").get()!
+    .encoding as string;
+  const decoder =
+    encoding === "UTF-8"
+      ? undefined
+      : new TextDecoder(encoding, { fatal: true, ignoreBOM: true });
+  return (
+    row: Record<string, SQLOutputValue>,
+    name: string,
+  ): SQLOutputValue => {
+    const stored = row[name]!;
+    if (row[`${name}_type`] !== "text") return stored;
+    const bytes = stored as Uint8Array;
+    return decoder ? decoder.decode(bytes) : decodeUtf8(Buffer.from(bytes));
+  };
 }
 
 function cacheKey(space: string, document: SQLOutputValue): string {
+  if (space === undefined)
+    throw new TypeError("Local deduplication requires an embedding space.");
   let text: string;
   if (document instanceof Uint8Array) {
     // Existing BLOB cache keys hash the bytes representation, not decoded JSON.
@@ -135,6 +147,7 @@ function prepare(
   payload: Preparation,
   timestamp: string,
 ) {
+  const value = columnReader(database);
   // A sealed scan selects finding IDs, not permission to select another corpus.
   const target = resolvedPathText(payload.repositoryPath, false);
   requireSqliteText([target]);
@@ -285,6 +298,7 @@ function validVector(
 }
 
 function embed(database: DatabaseSync, payload: EmbeddingBatch) {
+  const value = columnReader(database);
   const current = database.prepare(
     `SELECT ${column("details_json", "details")} FROM findings WHERE id = ?`,
   );

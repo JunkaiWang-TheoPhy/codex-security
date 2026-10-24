@@ -139,6 +139,7 @@ export class LocalDeduplication {
       const environment = workbenchEnvironment(this.environment);
       return {
         pluginRoot: await bundledPluginRoot(),
+        stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
         environment,
         signal: this.signal,
         protectedRoot: [
