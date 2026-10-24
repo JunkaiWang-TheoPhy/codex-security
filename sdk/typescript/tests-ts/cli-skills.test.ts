@@ -1871,6 +1871,11 @@ process.stdout.write(JSON.stringify({
       ].map((detail) => [detail, null] as const),
     ]),
     ["database responseStatus=401", null],
+    [
+      JSON.stringify({ error: { message: "Invalid API key." } }),
+      "Authentication failed",
+    ],
+    ["ENOENT: could not open /synthetic/timed.out/result.json", null],
     ["sqlite3 response_status=403", null],
     ["workbench responseStatus=429", null],
     ["permission denied opening /synthetic/response_status=403/cache", null],
@@ -1919,6 +1924,7 @@ process.stdout.write(JSON.stringify({
       expect(message).not.toContain("Authentication failed");
       expect(message).not.toContain("selected model is unavailable");
       expect(message).not.toContain("rate limited");
+      expect(message).not.toContain("could not connect");
     } else {
       expect(message).toContain(advice);
     }

@@ -438,6 +438,7 @@ describe("CodexSecurity orchestration", () => {
       "Could not save the Codex Security scan: database connection failed",
       "Codex Security workbench: permission denied",
       "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      "ENOENT: could not open /synthetic/timed.out/result.json",
     ]) {
       expect(classifyConnectionFailure(message)).toBe("unknown");
     }
@@ -464,6 +465,7 @@ describe("CodexSecurity orchestration", () => {
         `${code}: synthetic provider detail`,
         `error: '${code}'`,
         `${code}.`,
+        JSON.stringify({ error: { message: `${code}.` } }),
         `error=${code}`,
         `error sending request for url (https://example.test/v1) ${code}`,
       ])

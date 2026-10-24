@@ -5769,14 +5769,14 @@ export function classifyConnectionFailure(
     return "rate_limited";
   }
   if (
-    /\b401\b|\bunauthori[sz]ed\b|(?<![\w./\\-])(?:invalid[._ -](?:api[._ -]?key|authentication|token|credentials?)|(?:expired|revoked)[._ -](?:api[._ -]?key|token|credentials?)|(?:api[._ -]?key|token|credentials?)(?:[._ -]has)?[._ -](?:expired|been[._ -]revoked))(?![\w/\\-]|\.(?=\S))/iu.test(
+    /\b401\b|\bunauthori[sz]ed\b|(?<![\w./\\-])(?:invalid[._ -](?:api[._ -]?key|authentication|token|credentials?)|(?:expired|revoked)[._ -](?:api[._ -]?key|token|credentials?)|(?:api[._ -]?key|token|credentials?)(?:[._ -]has)?[._ -](?:expired|been[._ -]revoked))(?!\.?[\w/\\-])/iu.test(
       message,
     )
   ) {
     return "unauthorized";
   }
   if (
-    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|(?<![\w./\\-])model(?:[._ -]?not[._ -]?found|[._ -]access)(?![\w/\\-]|\.(?=\S))/iu.test(
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|(?<![\w./\\-])model(?:[._ -]?not[._ -]?found|[._ -]access)(?!\.?[\w/\\-])/iu.test(
       message,
     )
   ) {
@@ -5789,7 +5789,10 @@ export function classifyConnectionFailure(
   ) {
     return "network_error";
   }
-  if (/\b(?:timed?[._ -]out|timeout)\b/iu.test(message)) return "timeout";
+  if (
+    /(?<![\w./\\-])(?:timed?[._ -]out|timeout)(?!\.?[\w/\\-])/iu.test(message)
+  )
+    return "timeout";
   return "unknown";
 }
 

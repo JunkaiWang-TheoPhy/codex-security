@@ -9088,10 +9088,10 @@ export function skillCommandFailure(
   } else if (
     /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?![\w/\\-]|\.(?=\S))/iu.test(
+      /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?!\.?[\w/\\-])/iu.test(
         adviceDetail,
       )) ||
-    /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?![\w/\\-]|\.(?=\S))/iu.test(
+    /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?!\.?[\w/\\-])/iu.test(
       adviceDetail,
     ) ||
     (classification === "forbidden" &&
@@ -9118,7 +9118,7 @@ export function skillCommandFailure(
     classification === "network_error" ||
     classification === "timeout" ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+      /\b(?:ECONNABORTED|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
         adviceDetail,
       ))
   ) {
