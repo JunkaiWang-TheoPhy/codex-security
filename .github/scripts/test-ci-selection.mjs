@@ -5,11 +5,12 @@ import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
 
 test(
-  "metadata edits preserve a failed source check on the canary branch",
+  "metadata edits preserve a failed source check on the diagnostic pull request",
   {
     skip:
       process.env.GITHUB_ACTIONS !== "true" ||
-      !process.env.GITHUB_HEAD_REF?.endsWith("/ci-metadata-negative-control"),
+      process.env.GITHUB_REPOSITORY !== "openai/codex-security" ||
+      process.env.GITHUB_REF !== "refs/pull/1945/merge",
   },
   () => assert.fail("Intentional source failure for the metadata canary."),
 );
