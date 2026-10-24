@@ -3197,9 +3197,10 @@ def merge_saved_results(
             surface_ids.setdefault(relative, set()).update(targets)
         for position, group in retained_groups.items():
             owner = group["owner"]
-            if owner is None:
+            observation = group["observations"].get(owner)
+            if owner not in workers_by_id or observation is None:
                 continue
-            source, value = group["observations"][owner]
+            source, value = observation
             if (index := source_indexes.get(id(value))) is not None:
                 relative = source[0]
                 _, attempt = worker_attempts.get(

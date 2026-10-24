@@ -270,6 +270,9 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     scan = deadline_scan
     local_id = "input"
     accepted_owner = scan.completed_worker_id
+    selected = copy.deepcopy(scan.findings)
+    selected[0]["provenance"].update(workerId=accepted_owner, candidateId=local_id)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": selected}))
     accepted = {
         "id": "accepted",
         "label": "Accepted",
@@ -304,6 +307,10 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert coverage["resolvedDeferred"] == [closure]
     assert accepted in coverage["surfaces"]
+    (retained,) = json.loads((scan.scan_dir / "findings.json").read_bytes())["findings"]
+    assert retained["identity"] == selected[0]["identity"]
+    assert retained["provenance"]["workerId"] == accepted_owner
+    assert retained["validation"] == selected[0]["validation"]
     unfinished = next(row for row in coverage["surfaces"] if row.get("workerId") == owner)
     assert unfinished["disposition"] == "needs_follow_up"
     (task,) = [row for row in coverage["deferred"] if row.get("workerId") == owner]
