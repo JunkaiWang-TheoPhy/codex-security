@@ -645,15 +645,15 @@ describe("SCA comparison", () => {
     ],
     [
       "C:\\work tree\\base",
-      "C:\\work tree\\base\\nested\\package-lock.json",
+      "C:\\work tree\\base\\Nested\\Package-Lock.json",
       "D:\\head checkout",
       "D:\\head checkout\\nested\\package-lock.json",
     ],
     [
       "C:\\base",
-      "nested\\package-lock.json",
+      "Nested\\package-lock.json",
       "/head",
-      "nested/package-lock.json",
+      "Nested/package-lock.json",
     ],
   ])(
     "correlates source identities between %s and another checkout",
@@ -672,23 +672,57 @@ describe("SCA comparison", () => {
     },
   );
 
-  test("does not conflate literal POSIX backslashes with directory separators", () => {
-    const base = fixture();
-    const head = fixture();
-    base.components[0]!.sourcePath = "nested\\folder/package-lock.json";
-    base.coverage.inputs[0]!.path = base.components[0]!.sourcePath;
-    head.components[0]!.sourcePath = "nested/folder/package-lock.json";
-    head.coverage.inputs[0]!.path = head.components[0]!.sourcePath;
-    head.matches[0]!.id = "head-match";
-    const comparison = compareScaResults(base, head);
-    expect(comparison.persisting).toEqual([]);
-    expect(comparison.newlyObserved).toEqual(["head-match"]);
-    expect(comparison.introduced).toEqual([]);
-    expect(comparison.noLongerObserved).toEqual([
-      { matchId: "match-1", resolved: false },
-    ]);
-    expect(comparison.comparable).toBe(false);
+  test("keeps advisory occurrences in case-distinct lockfiles separate in saved Windows inventories", async () => {
+    const paths = ["Lib/package-lock.json", "lib/package-lock.json"] as const;
+    async function savedOccurrence(sourcePath: string, matchId: string) {
+      const result = fixture();
+      result.repository.path = "C:\\workspace";
+      result.coverage.inputs = paths.map((path) => ({
+        ...result.coverage.inputs[0]!,
+        path,
+      }));
+      result.components[0]!.sourcePath = sourcePath;
+      result.matches[0]!.id = matchId;
+      result.outputDir = await temporaryDirectory("sca-windows-inventory-");
+      await saveDependencyScan(result);
+      return JSON.parse(
+        await readFile(join(result.outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+    }
+
+    const base = await savedOccurrence(paths[0], "base-match");
+    const head = await savedOccurrence(paths[1], "head-match");
+    expect(compareScaResults(base, head)).toMatchObject({
+      comparable: true,
+      persisting: [],
+      introduced: ["head-match"],
+      noLongerObserved: [{ matchId: "base-match", resolved: true }],
+    });
   });
+
+  test.each([
+    ["nested\\folder/package-lock.json", "nested/folder/package-lock.json"],
+    ["Nested/Package-Lock.json", "nested/package-lock.json"],
+  ])(
+    "preserves distinct POSIX source identities %s and %s",
+    (basePath, headPath) => {
+      const base = fixture();
+      const head = fixture();
+      base.components[0]!.sourcePath = basePath;
+      base.coverage.inputs[0]!.path = base.components[0]!.sourcePath;
+      head.components[0]!.sourcePath = headPath;
+      head.coverage.inputs[0]!.path = head.components[0]!.sourcePath;
+      head.matches[0]!.id = "head-match";
+      const comparison = compareScaResults(base, head);
+      expect(comparison.persisting).toEqual([]);
+      expect(comparison.newlyObserved).toEqual(["head-match"]);
+      expect(comparison.introduced).toEqual([]);
+      expect(comparison.noLongerObserved).toEqual([
+        { matchId: "match-1", resolved: false },
+      ]);
+      expect(comparison.comparable).toBe(false);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "preserves distinct drive-like POSIX inventory paths in saved comparisons",
