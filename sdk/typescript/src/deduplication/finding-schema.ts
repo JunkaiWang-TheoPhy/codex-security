@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
+export class InvalidFindingError extends Error {
+  readonly legacyMessage =
+    "Record must satisfy the Finding schema, including provenance.";
+}
 
 let schema: object | undefined;
-let validator: ValidateFunction<Finding> | undefined;
+const validators = new Map<boolean, ValidateFunction<Finding>>();
 
 export function findingSchema(): object {
   if (schema) return schema;
@@ -22,13 +26,27 @@ export function findingSchema(): object {
   });
 }
 
-export function requireFinding(value: unknown): Finding {
-  validator ??= new Ajv2020({ strict: false }).compile<Finding>(
-    findingSchema(),
-  );
+export function requireFinding(value: unknown, collectErrors = false): Finding {
+  let validator = validators.get(collectErrors);
+  if (!validator) {
+    validator = new Ajv2020({
+      strict: false,
+      allErrors: collectErrors,
+    }).compile<Finding>(findingSchema());
+    validators.set(collectErrors, validator);
+  }
   if (!validator(value))
-    throw new Error(
-      "Record must satisfy the Finding schema, including provenance.",
+    throw new InvalidFindingError(
+      "Record must satisfy the Finding schema, including provenance." +
+        (collectErrors
+          ? " " +
+            (validator.errors ?? [])
+              .map(
+                ({ instancePath, message }) =>
+                  `${instancePath || "/"}: ${message ?? "invalid value"}`,
+              )
+              .join("; ")
+          : ""),
     );
   return value;
 }

@@ -176,6 +176,25 @@ a complete merged finding.
 Codex Security validates these contracts and all assigned ID references after
 receiving the answer. A completed remote model turn alone is insufficient.
 
+### SDK validation feedback
+
+Custom `reviewRunner.run(request, options)` implementations receive an optional
+`options.validate(candidate)` callback using the same dedupe validators as the final
+answer, with detailed finding-field errors. It returns void on success and throws
+`InvalidDeduplicationDecision` for a rejected decision. Other exceptions propagate.
+Access it on the original options object; the callback is non-enumerable and omitted
+when options are cloned or spread.
+
+Set `throwReviewErrors: true` on `deduplicateRecords` to receive typed decision
+failures and preserve other review errors instead of returning an unresolved batch.
+This changes failure reporting, not the existing validation and normalization rules.
+For example, pair review still strips extra fields. Final answers are always validated.
+
+The callback performs no inference or retries. Runners own correction limits and
+existing deadline/cost budgets. Validation checks an already-aborted signal; a
+synchronous check cannot be interrupted by a pending cancellation timer. Validation
+does not guarantee semantic model correctness. The hosted CLI protocol is unchanged.
+
 For failure or an inconclusive review, send an explicit error:
 
 ```json

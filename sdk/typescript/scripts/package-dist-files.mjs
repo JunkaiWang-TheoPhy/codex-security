@@ -120,6 +120,7 @@ const distModules = [
   "deduplication/deduplication-prompts",
   "deduplication/deduplication-reviewer",
   "deduplication/diagnostics",
+  "deduplication/decision-error",
   "deduplication/scan",
   "deduplication/local",
   "deduplication/finding-schema",

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { InvalidDeduplicationDecision } from "./decision-error.js";
 import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
@@ -8,6 +9,18 @@ import {
   screeningPrompt,
 } from "./deduplication-prompts.js";
 import { scanModelConfiguration, type JsonObject } from "../config.js";
+
+function parseDecision<T extends z.ZodType>(
+  schema: T,
+  value: unknown,
+): z.output<T> {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success)
+    throw new InvalidDeduplicationDecision(parsed.error.message, {
+      cause: parsed.error,
+    });
+  return parsed.data;
+}
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
 const sameSchema = z.object({
@@ -55,18 +68,19 @@ export function screeningPairSlot(index: number): string {
 export function validateReview(
   value: unknown,
   findings: readonly Finding[],
+  detailedErrors = false,
 ): DuplicateDecision {
-  const result = reviewSchema.parse(value);
+  const result = parseDecision(reviewSchema, value);
   if (result.decision !== "SAME") return result;
-  const finding = requireFinding(result.mergedFinding);
+  const finding = requireFinding(result.mergedFinding, detailedErrors);
   if (finding.findingId !== result.canonicalFindingId)
-    throw new Error(
+    throw new InvalidDeduplicationDecision(
       "Every SAME decision requires the canonical finding's identity.",
     );
   if (
     !findings.some((finding) => finding.findingId === result.canonicalFindingId)
   ) {
-    throw new Error(
+    throw new InvalidDeduplicationDecision(
       "The canonical finding must belong to the assigned findings.",
     );
   }
@@ -77,7 +91,7 @@ export function validateScreening(
   value: unknown,
   findings: readonly Finding[],
 ): ScreeningResult {
-  const result = screeningSchema.parse(value);
+  const result = parseDecision(screeningSchema, value);
   const required = findings
     .slice(1)
     .map((_finding, index) => screeningPairSlot(index));
@@ -86,7 +100,9 @@ export function validateScreening(
     submitted.length !== required.length ||
     required.some((slot) => !Object.hasOwn(result.decisions, slot))
   ) {
-    throw new Error("Submit exactly the assigned screening pair slots.");
+    throw new InvalidDeduplicationDecision(
+      "Submit exactly the assigned screening pair slots.",
+    );
   }
   return result;
 }
@@ -150,7 +166,8 @@ export class CodexDeduplicationReviewer
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
       },
-      validate: (value) => validateReview(value, findings),
+      validate: (value, detailedErrors) =>
+        validateReview(value, findings, detailedErrors),
     });
   }
 }

@@ -181,6 +181,7 @@ export type {
   DeduplicateRecordsOptions,
   DeduplicateRecordsResult,
 } from "./deduplication/records.js";
+export { InvalidDeduplicationDecision } from "./deduplication/decision-error.js";
 export type {
   DeduplicationReviewRequest,
   DeduplicationReviewAttribution,

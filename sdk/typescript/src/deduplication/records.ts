@@ -1,12 +1,17 @@
 import { hash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
+import { InvalidDeduplicationDecision } from "./decision-error.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
 import { FindingDeduplicator } from "./deduplication.js";
 import { CodexDeduplicationReviewer } from "./deduplication-reviewer.js";
-import { findingSchema, requireFinding } from "./finding-schema.js";
+import {
+  findingSchema,
+  requireFinding,
+  InvalidFindingError,
+} from "./finding-schema.js";
 import {
   sourceReviewInstructions,
   screeningInstructions,
@@ -18,6 +23,12 @@ import type {
   DeduplicationReviewAttribution,
   DeduplicationReviewRunner,
 } from "./review.js";
+
+class RecordsReviewRefusal extends Error {
+  constructor(readonly refusal: DeduplicationReviewError) {
+    super(refusal.message, { cause: refusal });
+  }
+}
 
 export function recordsReviewAttribution(
   findingIds: readonly string[] | undefined,
@@ -69,6 +80,8 @@ export interface DeduplicateRecordsInput extends z.infer<
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
+  /** Opt in to typed failures instead of the legacy unresolved result. */
+  throwReviewErrors?: boolean;
 }
 export interface DeduplicateRecordsResult {
   version: 1;
@@ -89,7 +102,8 @@ export async function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
 ): Promise<DeduplicateRecordsResult> {
-  options.signal?.throwIfAborted();
+  const { signal, reviewRunner, throwReviewErrors } = options;
+  signal?.throwIfAborted();
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -138,11 +152,26 @@ export async function deduplicateRecords(
       findingIds,
       ...review
     }: CodexReview<T>): Promise<T> {
+      const validateDecision = (
+        value: unknown,
+        detailedErrors = throwReviewErrors,
+      ): T => {
+        signal?.throwIfAborted();
+        try {
+          return validate(value, detailedErrors);
+        } catch (error) {
+          if (error instanceof InvalidFindingError)
+            throw new InvalidDeduplicationDecision(error.message, {
+              cause: error,
+            });
+          throw error;
+        }
+      };
       try {
         return await abortable(async () => {
-          options.signal?.throwIfAborted();
-          return validate(
-            await options.reviewRunner.run(
+          signal?.throwIfAborted();
+          return validateDecision(
+            await reviewRunner.run(
               {
                 ...review,
                 requestId: randomUUID(),
@@ -162,17 +191,23 @@ export async function deduplicateRecords(
                 ].join("\n\n"),
                 findingSchema: structuredClone(findingSchema()),
               },
-              { signal: options.signal },
+              Object.defineProperty({ signal }, "validate", {
+                value: (value: unknown) => {
+                  validateDecision(value, true);
+                },
+                writable: true,
+                configurable: true,
+              }),
             ),
           );
-        }, options.signal);
+        }, signal);
       } catch (error) {
         // Records mode discards the batch after any failed review.
         if (
           error instanceof DeduplicationReviewError &&
           error.metadata.category === "refusal"
         )
-          throw new Error(error.message, { cause: error });
+          throw new RecordsReviewRefusal(error);
         throw error;
       }
     },
@@ -190,22 +225,29 @@ export async function deduplicateRecords(
       },
     },
     reviewer,
-    options.signal,
+    signal,
     1,
   );
   let groups: string[][];
   try {
     const decisions = await algorithm.run(sourceFindingIds);
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
+    if (throwReviewErrors)
+      throw error instanceof RecordsReviewRefusal ? error.refusal : error;
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,
       reason: "review_failed",
       message:
-        error instanceof Error ? error.message : "Review did not complete.",
+        error instanceof InvalidDeduplicationDecision &&
+        error.cause instanceof InvalidFindingError
+          ? error.cause.legacyMessage
+          : error instanceof Error
+            ? error.message
+            : "Review did not complete.",
     }));
     return result;
   }
