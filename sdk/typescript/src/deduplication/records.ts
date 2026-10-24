@@ -30,6 +30,27 @@ class RecordsReviewRefusal extends Error {
   }
 }
 
+function reviewValidation<T>(
+  validator: CodexReview<T>["validate"] | undefined,
+  signal: AbortSignal | undefined,
+  detailedErrors: boolean | undefined,
+) {
+  const result = (value: unknown, detailed = detailedErrors): T => {
+    signal?.throwIfAborted();
+    if (!validator) throw new Error("The review has already ended.");
+    return validator(value, detailed);
+  };
+  return {
+    result,
+    preflight: (value: unknown): void => {
+      result(value, true);
+    },
+    close: () => {
+      validator = undefined;
+    },
+  };
+}
+
 export function recordsReviewAttribution(
   findingIds: readonly string[] | undefined,
   references: ReadonlyMap<string, string>,
@@ -153,17 +174,11 @@ export async function deduplicateRecords(
       findingIds,
       ...review
     }: CodexReview<T>): Promise<T> {
-      const validateDecision = (
-        value: unknown,
-        detailedErrors = throwReviewErrors,
-      ): T => {
-        signal?.throwIfAborted();
-        return validate(value, detailedErrors);
-      };
+      const validation = reviewValidation(validate, signal, throwReviewErrors);
       try {
         return await abortable(async () => {
           signal?.throwIfAborted();
-          return validateDecision(
+          return validation.result(
             await options.reviewRunner.run(
               {
                 ...review,
@@ -185,9 +200,7 @@ export async function deduplicateRecords(
                 findingSchema: structuredClone(findingSchema()),
               },
               Object.defineProperty({ signal }, "validate", {
-                value: (value: unknown) => {
-                  validateDecision(value, true);
-                },
+                value: validation.preflight,
                 writable: true,
                 configurable: true,
               }),
@@ -202,6 +215,8 @@ export async function deduplicateRecords(
         )
           throw new RecordsReviewRefusal(error);
         throw error;
+      } finally {
+        validation.close();
       }
     },
   });

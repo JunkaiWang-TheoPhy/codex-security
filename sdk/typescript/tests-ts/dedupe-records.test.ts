@@ -958,6 +958,27 @@ test("review options remain cloneable for worker-backed adapters", async () => {
   expect(result.status).toBe("completed");
 });
 
+test.each([false, true])(
+  "retained validators close after review (failure: %s)",
+  async (fail) => {
+    const callbacks: Array<(value: unknown) => void> = [];
+    const fault = new Error("Synthetic runner failure");
+    await deduplicateRecords(input(), {
+      reviewRunner: {
+        async run(request, options) {
+          callbacks.push(options!.validate!);
+          if (fail) throw fault;
+          return answer(request);
+        },
+      },
+    });
+    expect(callbacks.length).toBeGreaterThan(0);
+    for (const validate of callbacks) {
+      expect(() => validate({})).toThrow("The review has already ended.");
+    }
+  },
+);
+
 test.each([
   ["preflight", "Zod"],
   ["final", "Zod"],
@@ -1024,6 +1045,29 @@ test.each([false, true])(
   },
 );
 
+test.each([false, true])(
+  "final validation rejects an answer changed after preflight (throw errors: %s)",
+  async (typed) => {
+    const result = await deduplicateRecords(input(), {
+      throwReviewErrors: typed,
+      reviewRunner: {
+        async run(request, options) {
+          const candidate = answer(request) as { mergedFinding?: Finding };
+          options!.validate!(candidate);
+          if (candidate.mergedFinding) candidate.mergedFinding.title = "";
+          return candidate;
+        },
+      },
+    }).catch((error: unknown) => error);
+    if (typed) {
+      expect(result).toBeInstanceOf(InvalidDeduplicationDecision);
+      expect((result as Error).message).toContain("/title");
+    } else {
+      expect(result).toMatchObject({ status: "unresolved", groups: [] });
+    }
+  },
+);
+
 test("detailed finding feedback releases root and nested validator state", () => {
   const script = `
     import Ajv from ${JSON.stringify(import.meta.resolve("ajv/dist/2020.js"))};
@@ -1042,7 +1086,8 @@ test("detailed finding feedback releases root and nested validator state", () =>
     try { requireFinding(invalid, true); } catch (error) { message = error.message; }
     const rejected = compiled.at(-1);
     requireFinding(valid, true);
-    const detailedWasReplaced = rejected !== compiled.at(-1);
+    const detailedReusedAfterRejection = rejected === compiled.at(-1);
+    const nestedErrors = rejected.schemaEnv.refs["#/$defs/dataFlow"].validate.errors;
     const detailed = compiled.at(-1);
     requireFinding(valid, true);
     const detailedReused = detailed === compiled.at(-1);
@@ -1052,11 +1097,11 @@ test("detailed finding feedback releases root and nested validator state", () =>
     let preserved;
     try { requireFinding(throwing, true); } catch (error) { preserved = error === fault; }
     requireFinding(valid, true);
-    const replacedAfterThrow = detailed !== compiled.at(-1);
+    const reusedAfterThrow = detailed === compiled.at(-1);
     requireFinding(valid);
     const legacy = compiled.at(-1);
     requireFinding(valid);
-    console.log(JSON.stringify({ message, detailedWasReplaced, detailedReused, preserved, replacedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
+    console.log(JSON.stringify({ message, detailedReusedAfterRejection, nestedErrors, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
   `;
   const child = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
@@ -1065,10 +1110,11 @@ test("detailed finding feedback releases root and nested validator state", () =>
   const result = JSON.parse(child.stdout);
   expect(result.message).toContain("/attackPath/dataFlow/transformations");
   expect(result.rootErrors).toBeNull();
-  expect(result.detailedWasReplaced).toBe(true);
+  expect(result.detailedReusedAfterRejection).toBe(true);
+  expect(result.nestedErrors).toBeNull();
   expect(result.detailedReused).toBe(true);
   expect(result.preserved).toBe(true);
-  expect(result.replacedAfterThrow).toBe(true);
+  expect(result.reusedAfterThrow).toBe(true);
   expect(result.legacyReused).toBe(true);
 });
 

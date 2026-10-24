@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
+import { SchemaEnv } from "ajv/dist/compile/index.js";
 import type { Finding } from "../models.js";
 import { InvalidDeduplicationDecision } from "./decision-error.js";
 export class InvalidFindingError extends Error {
@@ -9,6 +10,21 @@ export class InvalidFindingError extends Error {
 
 let schema: object | undefined;
 const validators = new Map<boolean, ValidateFunction<Finding>>();
+
+function clearValidationErrors(validator: ValidateFunction): void {
+  const pending = [validator.schemaEnv];
+  const visited = new Set<SchemaEnv>();
+  while (pending.length) {
+    const env = pending.pop()!;
+    if (visited.has(env)) continue;
+    visited.add(env);
+    if (env.validate) env.validate.errors = null;
+    pending.push(env.root);
+    for (const ref of Object.values(env.refs)) {
+      if (ref instanceof SchemaEnv) pending.push(ref);
+    }
+  }
+}
 
 export function findingSchema(): object {
   if (schema) return schema;
@@ -40,7 +56,6 @@ export function requireFinding(
     }).compile<Finding>(findingSchema());
     validators.set(collectErrors, validator);
   }
-  let valid = false;
   try {
     if (!validator(value)) {
       const failure = new InvalidFindingError(
@@ -61,11 +76,9 @@ export function requireFinding(
         });
       throw failure;
     }
-    valid = true;
     return value;
   } finally {
-    validator.errors = null;
-    // Failed detailed checks can leave diagnostics on compiled $ref validators.
-    if (collectErrors && !valid) validators.delete(collectErrors);
+    // Compiled $ref validators retain their own error arrays.
+    clearValidationErrors(validator);
   }
 }

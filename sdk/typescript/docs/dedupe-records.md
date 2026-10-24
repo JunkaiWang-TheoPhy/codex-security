@@ -184,6 +184,8 @@ answer, with detailed finding-field errors. It returns void on success and throw
 `InvalidDeduplicationDecision` for a rejected decision. Other exceptions propagate.
 Access it on the original options object; the callback is non-enumerable and omitted
 when options are cloned or spread.
+The callback is valid only while that runner is active; retained callbacks reject
+after the review ends and release the review's findings.
 
 Set `throwReviewErrors: true` on `deduplicateRecords` to receive typed decision
 failures and preserve other review errors instead of returning an unresolved batch.
