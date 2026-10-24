@@ -214,6 +214,44 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     assert checkpoint.read_bytes() == original
 
 
+def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
+    workbench_api, workbench_db, deadline_scan
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    earlier = worker_finding(scan, "authored-anchor")
+    earlier["ruleId"] = "checkpoint-revision"
+    earlier["provenance"]["candidateId"] = "worker-candidate"
+    latest = copy.deepcopy(earlier)
+    latest.pop("identity")
+    latest["summary"] = "The later revision supplies validation."
+    earlier.pop("validation")
+    previous = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
+    )
+    current = write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id, findings=[latest]))
+    os.utime(previous, ns=(100, 100))
+    os.utime(current, ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": current.name}))
+    originals = {path: path.read_bytes() for path in (previous, current, head)}
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    (finding,) = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
+    assert finding["identity"] == earlier["identity"]
+    assert finding["summary"] == latest["summary"]
+    assert finding["validation"] == latest["validation"]
+    (history,) = finding["provenance"]["previousFindings"]
+    assert history["identity"] == earlier["identity"]
+    assert history["summary"] == earlier["summary"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert not any(row.get("workerId") == worker_id for row in coverage["deferred"])
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
 @pytest.mark.parametrize(
     "invalid_terminal", [False, True], ids=["valid-terminal", "invalid-terminal"]
 )

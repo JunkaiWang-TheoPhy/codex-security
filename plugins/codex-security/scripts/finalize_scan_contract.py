@@ -1267,7 +1267,6 @@ def _recover_unsealed_coverage(
     discarded_findings: list[str],
     *,
     worker_draft: bool = False,
-    discarded_candidates: set[str | None] | None = None,
 ) -> set[str]:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
@@ -1385,22 +1384,7 @@ def _recover_unsealed_coverage(
         coverage[field] = recovered
 
     if discarded_findings:
-        if discarded_candidates is not None:
-            # A finding without a matching surface can still explain an anonymous report.
-            linked = {
-                candidate
-                for surface in coverage["surfaces"]
-                if _has_identity_text(candidate := surface.get("candidateId"))
-            }
-            unlinked = bool(discarded_candidates - linked)
         for surface in coverage["surfaces"]:
-            if discarded_candidates is not None:
-                candidate = surface.get("candidateId")
-                if _has_identity_text(candidate):
-                    if candidate not in discarded_candidates:
-                        continue
-                elif not unlinked or surface["disposition"] != "reported":
-                    continue
             if (
                 worker_draft
                 and surface.get("candidateId")

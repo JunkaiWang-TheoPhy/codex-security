@@ -21,7 +21,6 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _require_safe_json_value,
-    _validate_completed_finding_evidence,
     _validate_current_findings,
     _validate_schema_node,
     finding_candidate_id,
@@ -308,7 +307,6 @@ def _recover_preserved_worker_source(
     scan_dir, relative, scan_id, binding, worker_id, worker, draft, warnings
 ):
     discarded_findings = []
-    discarded_candidates: set[str | None] | None = set()
     # Recover imported records without relaxing canonical parent validation.
     if "complete" in draft and not isinstance(draft["complete"], bool):
         draft["complete"] = False
@@ -346,12 +344,9 @@ def _recover_preserved_worker_source(
             scan_dir / directory,
             source_warnings,
         )
-        evidence_finding = None
         if recovered["findings"]:
             try:
                 _validate_current_findings(recovered, schema_dir)
-                evidence_finding = recovered["findings"][0]
-                _validate_completed_finding_evidence(recovered)
             except ContractError as exc:
                 warning = f"Skipped malformed finding: {exc}."
                 source_warnings.append(warning)
@@ -359,11 +354,6 @@ def _recover_preserved_worker_source(
                 recovered["findings"] = []
         if discarded:
             discarded_findings.extend(discarded)
-            if evidence_finding is None:
-                # A structurally invalid record retains the existing whole-checkpoint fallback.
-                discarded_candidates = None
-            elif discarded_candidates is not None:
-                discarded_candidates.add(finding_candidate_id(evidence_finding))
         for recovered_finding in recovered["findings"]:
             if needs_identity:
                 # Reconcile anonymous revisions before assigning sibling identities.
@@ -395,11 +385,11 @@ def _recover_preserved_worker_source(
                     worker,
                     relative,
                 )
-    return discarded_findings, discarded_candidates
+    return discarded_findings
 
 
 def _recover_preserved_worker_coverage(
-    scan_dir, relative, worker_id, draft, discarded_findings, discarded_candidates, warnings
+    scan_dir, relative, worker_id, draft, discarded_findings, warnings
 ):
     discarded_coverage = False
     for field in ("surfaces", "explicitExclusions", "deferred"):
@@ -418,7 +408,6 @@ def _recover_preserved_worker_coverage(
         discarded_findings,
         # Reconcile local IDs and valid outcomes against worker history below.
         worker_draft=True,
-        discarded_candidates=discarded_candidates,
     )
     if discarded_fields & {
         "surfaces",
@@ -636,7 +625,7 @@ def merge_saved_results(
         if latest_reducer not in frozen_source_digests:
             latest_reducer = None
 
-    discarded_by_source: dict[str, tuple[list[str], set[str | None] | None]] = {}
+    discarded_by_source: dict[str, list[str]] = {}
     pending = deque(paths.items())
     while pending:
         relative, worker_id = pending.popleft()
@@ -655,7 +644,7 @@ def merge_saved_results(
                     saved_inputs[relative] = draft["inputCheckpoint"]
                 continue
             if preserve_canonical_parent and worker_id is not None:
-                reasons, candidates = _recover_preserved_worker_source(
+                discarded = _recover_preserved_worker_source(
                     scan_dir,
                     relative,
                     scan_id,
@@ -665,8 +654,8 @@ def merge_saved_results(
                     draft,
                     warnings,
                 )
-                if reasons:
-                    discarded_by_source[relative] = reasons, candidates
+                if discarded:
+                    discarded_by_source[relative] = discarded
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
@@ -1137,7 +1126,7 @@ def merge_saved_results(
                 relative,
                 worker_id,
                 draft,
-                *discarded_by_source.get(relative, ([], None)),
+                discarded_by_source.get(relative, []),
                 warnings,
             ):
                 discarded_coverage_sources.add(relative)

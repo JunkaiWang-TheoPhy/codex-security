@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     ScanLocalIOError,
+    _has_identity_text,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
@@ -29,6 +30,7 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
+    _validate_completed_finding_evidence,
     _validate_completion_binding,
     _validate_draft_finding_evidence,
     _write_prepared_scan_finalization,
@@ -407,6 +409,61 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return prepared.coverage
 
 
+def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warnings):
+    """Defer selected worker findings only after their revisions and receipts are reconciled."""
+    retained = []
+    missing: dict[str, set[str | None]] = {}
+    for finding in findings["findings"]:
+        worker_id = finding["provenance"].get("workerId")
+        if isinstance(worker_id, str) and finding["findingId"] not in canonical_ids:
+            try:
+                _validate_completed_finding_evidence({"findings": [finding]})
+            except ContractError as exc:
+                candidate_id = finding_candidate_id(finding)
+                missing.setdefault(worker_id, set()).add(candidate_id)
+                reason = f"Skipped malformed finding {finding['findingId']}: {exc}."
+                item = {
+                    "id": f"{worker_id}/discarded-{finding['findingId']}",
+                    "reason": reason,
+                    "workerId": worker_id,
+                }
+                if candidate_id is not None:
+                    item["candidateId"] = candidate_id
+                if item not in coverage["deferred"]:
+                    coverage["deferred"].append(item)
+                warnings.append(reason)
+                continue
+        retained.append(finding)
+    if not missing:
+        return
+    findings["findings"] = retained
+
+    worker_surfaces = {}
+    for surface in coverage["surfaces"]:
+        source = surface.get("provenance")
+        if not isinstance(source, dict) or "workerId" not in source:
+            source = surface
+        owner = source.get("workerId")
+        if isinstance(owner, str) and owner in missing:
+            candidate = source.get("candidateId")
+            worker_surfaces.setdefault(owner, []).append(
+                (surface, candidate if _has_identity_text(candidate) else None)
+            )
+    for owner, surfaces in worker_surfaces.items():
+        failed = missing[owner]
+        unmatched = failed - {candidate for _, candidate in surfaces if candidate is not None}
+        for surface, candidate in surfaces:
+            if candidate is None:
+                if not unmatched or surface["disposition"] != "reported":
+                    continue
+            elif candidate not in failed or surface["disposition"] in {
+                "rejected",
+                "not_applicable",
+            }:
+                continue
+            surface["disposition"] = "needs_follow_up"
+
+
 def preserve_deep_deadline_draft(
     db: Any,
     connection: Any,
@@ -433,7 +490,7 @@ def preserve_deep_deadline_draft(
         ]
         if not workers:
             return None
-        _prepare_scan_finalization(
+        canonical = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             completion_binding=binding,
@@ -519,6 +576,9 @@ def preserve_deep_deadline_draft(
         )
         warnings.extend(prepared.warnings)
         manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
+        if preserve_reduction:
+            canonical_ids = {finding["findingId"] for finding in canonical.findings["findings"]}
+            _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warnings)
         manifest["scan"].pop("sealedAt", None)
         manifest["scan"].pop("artifacts", None)
         checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
