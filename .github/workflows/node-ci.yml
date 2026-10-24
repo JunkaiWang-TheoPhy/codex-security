@@ -450,6 +450,8 @@ jobs:
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
+      - name: Audit triage eval production dependencies
+        run: pnpm --dir evals/triage-finding audit --prod --audit-level high
 
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}ci
