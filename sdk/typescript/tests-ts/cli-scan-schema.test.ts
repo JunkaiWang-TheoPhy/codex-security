@@ -1,6 +1,7 @@
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ScanResult } from "../src/result.js";
 import type { ThreatModel } from "../src/models.js";
@@ -139,6 +140,30 @@ describe("scan output schema", () => {
       }
     },
   );
+
+  test("describes the follow-up validation returned by a completed scan", async () => {
+    const validate = new Ajv2020({ strict: false }).compile(
+      await scanOutputSchema(),
+    );
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--validate", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({ currentDirectory: tmpdir() }),
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.text());
+    expect(output.validation).toEqual({ status: "complete", findings: 0 });
+    expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+    expect(
+      validate({
+        ...output,
+        validation: { status: "complete", findings: "0" },
+      }),
+    ).toBe(false);
+  });
 
   test.each(["completed", "dry-run", "failed"] as const)(
     "accepts actual %s command output",

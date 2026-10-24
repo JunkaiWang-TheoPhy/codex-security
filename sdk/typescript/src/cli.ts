@@ -1125,6 +1125,24 @@ const completedScanOutputSchema = z.looseObject({
   warnings: z.array(z.string()).optional(),
   ownerSuggestionsPath: z.string().optional(),
   ownerSuggestionsError: z.string().optional(),
+  validation: z
+    .discriminatedUnion("status", [
+      z.looseObject({
+        status: z.literal("complete"),
+        findings: z.int().nonnegative(),
+        reportPath: z.string().optional(),
+      }),
+      z.looseObject({ status: z.literal("skipped"), reason: z.string() }),
+      z.looseObject({
+        status: z.literal("failed"),
+        findings: z.int().nonnegative().optional(),
+        reportPath: z.string().optional(),
+        message: z.string().optional(),
+        reason: z.string().optional(),
+        exitCode: z.int().optional(),
+      }),
+    ])
+    .optional(),
   patchSeverity: FailureSeveritySchema.optional(),
   patches: z.array(z.record(z.string(), z.unknown())).optional(),
   pullRequest: z.record(z.string(), z.unknown()).optional(),
