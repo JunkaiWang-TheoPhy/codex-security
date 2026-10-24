@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import {
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { TestClient } from "../support/api-client.js";
 import type { JsonObject } from "../../src/config.js";
 import { main } from "../../src/cli.js";
+import { runComponentScans } from "../../src/component-scan.js";
+import { runWorkbench } from "../../src/runtime.js";
+import { runArtifactExport } from "../../src/artifact-export.js";
+import { prepareNormalizedLocalImport } from "../../src/external-findings-local.js";
 import { dependencies, fakeResult } from "../cli-fixtures.js";
 import { createCliTest } from "../support/cli-run.js";
+import { copyCompletedScan } from "../plugin-root.js";
 
 const root = process.argv[2]!;
 const entry = join(root, "entry");
@@ -114,6 +130,29 @@ try {
           );
         }
       }
+      if (home === undefined) {
+        for (const requested of [
+          "~/physical/repository",
+          "~\\physical\\repository",
+        ]) {
+          const validated = createCliTest(main);
+          let selected;
+          assert.equal(
+            await validated.runCli(
+              ["scan", requested, "--validate", "--json"],
+              dependencies({
+                currentDirectory: root,
+                onTurn: (path) => {
+                  selected = path;
+                },
+              }),
+            ),
+            0,
+            validated.stderr.text(),
+          );
+          assert.equal(selected, repository);
+        }
+      }
       const cliEntry = relative(home || profile, entry);
       const windowsEntry = cliEntry.replaceAll("/", "\\");
       for (const requested of [
@@ -200,6 +239,7 @@ try {
           ...dependencies({ currentDirectory: root }),
           createSecurity: () => ({
             preflight: client.preflight.bind(client),
+            validate: client.validate.bind(client),
             run: async (selected, options) => {
               assert.equal(
                 (await client.preflight(selected, options)).repository,
@@ -229,12 +269,16 @@ try {
       );
   }
   await mkdir(sibling, { mode: 0o700 });
-  async function checkHistory(expectedTarget: string | undefined) {
+  const savedAlias = join(root, "owner", "alias");
+  async function checkHistory(
+    expectedTarget: string | undefined,
+    requested = requestedRepository,
+  ) {
     const history = createCliTest(main);
     let selectedTarget: string | undefined;
     assert.equal(
       await history.runCli(
-        ["findings", "list", requestedRepository, "--json"],
+        ["findings", "list", requested, "--json"],
         dependencies({
           currentDirectory: root,
           onWorkbench: (args): JsonObject => {
@@ -243,6 +287,7 @@ try {
                 repositories: [
                   { targetId: "sibling", targetPath: sibling },
                   { targetId: "physical", targetPath: repository },
+                  { targetId: "saved-alias", targetPath: savedAlias },
                 ],
               };
             }
@@ -266,12 +311,306 @@ try {
     );
   }
   await checkHistory("physical");
-  await assert.rejects(
-    client.preflight(requestedRepository, {
-      outputDir: join(repository, "output"),
-    }),
-    { name: "OutputInsideProtectedRootError" },
+  const publication = createCliTest(main);
+  const published: string[] = [];
+  assert.equal(
+    await publication.runCli(
+      [
+        "publish",
+        "scan",
+        requestedRepository,
+        "--scan-dir",
+        repository,
+        "--to",
+        "cloud",
+        "--dry-run",
+      ],
+      {
+        ...dependencies({ currentDirectory: root }),
+        publishScanToCloud: async (directory) => {
+          published.push(directory);
+          return { scanId: "scan-1", findingIds: [], findingCount: 0 };
+        },
+      },
+    ),
+    0,
+    publication.stderr.text(),
   );
+  assert.deepEqual(published, [await realpath(repository)]);
+  const sourceOptions = dependencies({ currentDirectory: root });
+  sourceOptions.readLocalExternalFindings = async ({
+    repository: selected,
+  }) => {
+    assert.equal(await realpath(selected), repository);
+    return { repository, findings: [] };
+  };
+  sourceOptions.exportFindings = async ({ sourceRoot }) => {
+    assert.equal(await realpath(sourceRoot!), repository);
+    return "";
+  };
+  await writeFile(join(root, "vendor.json"), "[]");
+  await writeFile(join(repository, "vendor.json"), "[]");
+  await writeFile(join(sibling, "vendor.json"), "invalid sibling report");
+  const publish = (selected: string, file = "vendor.json") => [
+    "publish",
+    "findings",
+    file,
+    "--to",
+    "local",
+    "--repository",
+    selected,
+    "--provider",
+    "wiz",
+    "--source-key",
+    "fixture",
+    "--dry-run",
+    "--json",
+  ];
+  for (const command of [
+    ["findings", "imported", requestedRepository, "--json"],
+    publish(requestedRepository, `${requestedRepository}/vendor.json`),
+    ["export", "scan", "--output", "-", "--source-root", requestedRepository],
+  ]) {
+    const cli = createCliTest(main);
+    assert.equal(
+      await cli.runCli(command, sourceOptions),
+      0,
+      cli.stderr.text(),
+    );
+    if (command[0] !== "export")
+      assert.equal(JSON.parse(cli.stdout.text()).repository, repository);
+  }
+  const outputDir = `${requestedRepository}/output`;
+  await assert.rejects(client.preflight(requestedRepository, { outputDir }), {
+    name: "OutputInsideProtectedRootError",
+  });
+  const output = createCliTest(main);
+  assert.equal(
+    await output.runCli(
+      [
+        "scan",
+        requestedRepository,
+        "--dry-run",
+        "--output-dir",
+        outputDir,
+        "--json",
+      ],
+      {
+        ...dependencies({ currentDirectory: root }),
+        createSecurity: localClient,
+      },
+    ),
+    2,
+  );
+  assert.match(output.stderr.text(), /outside the scanned directory/);
+  const owner = join(root, "owner");
+  await mkdir(join(owner, "tools"), { recursive: true, mode: 0o700 });
+  execFileSync("git", ["init", "--quiet", owner]);
+  execFileSync("git", ["init", "--quiet", repository]);
+  await symlink(repository, savedAlias);
+  const selected = join(repository, "components");
+  const physical = join(root, "physical");
+  const saved = join(physical, "saved-output");
+  await mkdir(saved, { mode: 0o700 });
+  await writeFile(join(saved, "prior-marker"), "existing output");
+  await symlink(join(physical, "child"), join(repository, "build"));
+  await symlink(join(repository, "build"), join(owner, "linked-build"));
+  await symlink(selected, join(owner, "selected"));
+  const outside = {
+    name: "OutputInsideProtectedRootError",
+    protectedRoot: await realpath(repository),
+  };
+  const workflowOutput = join(physical, "workflow-output");
+  const writer = new TestClient(
+    {},
+    {
+      environment: {
+        PATH: process.env["PATH"],
+        HOME: root,
+        CODEX_SECURITY_STATE_DIR: join(workflowOutput, "state"),
+      },
+      runWorkbench,
+    },
+  );
+  try {
+    for (const outputDir of [
+      `${repository}/build/../saved-output`,
+      `${owner}/alias/build/../saved-output`,
+      `${owner}/linked-build/../saved-output`,
+    ]) {
+      await assert.rejects(
+        writer.run(selected, { mock: true, outputDir, archiveExisting: true }),
+        outside,
+      );
+    }
+    assert.deepEqual(await readdir(saved), ["prior-marker"]);
+    assert.equal(
+      await readFile(join(saved, "prior-marker"), "utf8"),
+      "existing output",
+    );
+    for (const outputDir of [
+      workflowOutput,
+      `${entry}/link/../workflow-output`,
+    ]) {
+      await assert.rejects(
+        writer.run(selected, { mock: true, outputDir, workflowId: "guard" }),
+        /Workflow state must be outside the sealed scan artifacts/,
+      );
+    }
+    assert.equal(
+      existsSync(join(workflowOutput, "state", "workbench.sqlite3")),
+      false,
+    );
+  } finally {
+    await writer.close();
+  }
+  const plan = (outputDir: string) =>
+    runComponentScans({
+      repository: selected,
+      outputDir,
+      components: [{ name: "Source", paths: ["."] }],
+      planOnly: true,
+    });
+  await assert.rejects(plan(`${owner}/selected/../build/new-plan`), outside);
+  for (const [outputDir, name] of [
+    [`${entry}/link/../operator-plan`, "operator-plan"],
+    [`${repository}/../plain-plan`, "plain-plan"],
+  ] as const) {
+    const result = await plan(outputDir);
+    assert.equal(result.planPath, join(physical, name, "components.json"));
+    assert.equal(
+      JSON.parse(await readFile(result.planPath, "utf8")).components[0].name,
+      "Source",
+    );
+  }
+  await checkHistory("saved-alias", savedAlias);
+  await checkHistory("saved-alias", "owner/tools/../alias");
+  const requestedAlias = `${owner}/tools/../alias`;
+  const alias = createCliTest(main);
+  assert.equal(
+    await alias.runCli(
+      publish(requestedAlias),
+      dependencies({
+        currentDirectory: root,
+        environment: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(owner, "state"),
+        },
+      }),
+    ),
+    2,
+  );
+  assert.match(alias.stderr.text(), /outside the protected scan root/);
+  const exportRoot = process.argv[3]!;
+  const source = join(exportRoot, "source");
+  const physicalSource = join(exportRoot, "physical");
+  await mkdir(source);
+  await mkdir(join(physicalSource, "child"), { recursive: true });
+  await symlink(join(physicalSource, "child"), join(source, "link"));
+  const traversedSource = `${source}/link/..`;
+  const scan = await copyCompletedScan(exportRoot);
+  if (process.platform === "linux" && existsSync("/proc/self/fd")) {
+    await mkdir(join(physicalSource, "src"));
+    await writeFile(
+      join(physicalSource, "src", "extract.py"),
+      "\n".repeat(40) + "extract(member)\n",
+    );
+    await using directory = await open(join(physicalSource, "child"));
+    const sarif = await runArtifactExport({
+      scanDir: scan,
+      sourceRoot: `/proc/self/fd/${directory.fd}/..`,
+      format: "sarif",
+      output: "-",
+    });
+    const [finding] = JSON.parse(sarif!).runs[0].results;
+    assert.equal(
+      finding.partialFingerprints.primaryLocationLineHash,
+      "68da6fe4396c35f9:1",
+    );
+  }
+  for (const [sourceRoot, directory] of [
+    [requestedAlias, owner],
+    [traversedSource, source],
+    [traversedSource, physicalSource],
+    [traversedSource, exportRoot],
+  ] as const) {
+    const python = join(directory, "fixture-python");
+    await writeFile(
+      python,
+      '#!/bin/sh\necho run >> "$0-ran"\nexec python3 "$@"\n',
+      { mode: 0o755 },
+    );
+    const exported = createCliTest(main);
+    const code = await exported.runCli(
+      [
+        "export",
+        scan,
+        "--output",
+        "-",
+        "--source-root",
+        sourceRoot,
+        "--python",
+        python,
+      ],
+      {
+        ...dependencies({ currentDirectory: root }),
+        exportFindings: runArtifactExport,
+      },
+    );
+    if (directory === exportRoot) {
+      assert.equal(code, 0, exported.stderr.text());
+      assert.equal(JSON.parse(exported.stdout.text()).version, "2.1.0");
+      assert.equal(await readFile(`${python}-ran`, "utf8"), "run\nrun\n");
+    } else {
+      assert.equal(code, 2);
+      assert.match(
+        exported.stderr.text(),
+        /configured plugin Python interpreter is unavailable/,
+      );
+      await assert.rejects(realpath(`${python}-ran`), { code: "ENOENT" });
+    }
+  }
+  await assert.rejects(
+    prepareNormalizedLocalImport(
+      { read: 0, findings: [], excluded: [] },
+      {
+        repository: `${requestedRepository}/components`,
+        provider: "wiz",
+        sourceKey: "fixture",
+      },
+      {
+        environment: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(repository, "state"),
+        },
+      },
+    ),
+    /outside the protected scan root/,
+  );
+  const prompt = createCliTest(main);
+  await writeFile(join(repository, "prompt.md"), "physical");
+  await writeFile(join(sibling, "prompt.md"), "sibling");
+  let selectedPrompt: string | undefined;
+  assert.equal(
+    await prompt.runCli(
+      [
+        "scan",
+        requestedRepository,
+        "--scan-prompt-file",
+        `${requestedRepository}/prompt.md`,
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: root,
+        onTurn: (_, options) => {
+          selectedPrompt = options.scanPrompt;
+        },
+      }),
+    ),
+    0,
+    prompt.stderr.text(),
+  );
+  assert.equal(selectedPrompt, "physical");
   await mkdir(join(entry, "missing"), { mode: 0o700 });
   await assert.rejects(
     client.preflight(`${entry}/link/../missing`),
@@ -281,6 +620,12 @@ try {
   await writeFile(join(root, "outside", "app.ts"), "export {};\n");
   await writeFile(join(repository, "app.ts"), "export {};\n");
   await symlink(join(root, "outside", "child"), join(repository, "outside"));
+  await assert.rejects(
+    client.preflight(requestedRepository, {
+      scanPromptFile: `${requestedRepository}/outside/../app.ts`,
+    }),
+    /directory links outside the selected repository/,
+  );
   await assert.rejects(
     client.preflight(repository, { target: ["outside/../app.ts"] }),
     /outside the repository/,

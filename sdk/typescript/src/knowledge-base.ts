@@ -10,11 +10,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, join } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
-import { expandHome } from "./runtime.js";
+import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
 import {
   gitMarkerRoot,
   isGitMetadataDirectory,
@@ -42,6 +42,20 @@ export interface KnowledgeBaseSnapshot {
   readonly documents: Readonly<Record<string, string>>;
 }
 
+export async function knowledgeBaseProtectedRoots(
+  snapshot: KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return snapshot.protectedRoots === undefined
+    ? await Promise.all(
+        snapshot.sources.map(
+          async (source) =>
+            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        ),
+      )
+    : [...snapshot.protectedRoots];
+}
+
 /** @internal Extract once so campaign identity and workers use identical inputs. */
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
@@ -55,7 +69,7 @@ export async function readKnowledgeBaseSnapshot(
       signal?.throwIfAborted();
       if (!requested.trim())
         throw new Error("Knowledge base paths cannot be empty.");
-      const path = resolve(expandHome(requested));
+      const path = await resolveParentTraversal(resolveInputPath(requested));
       const metadata = await lstat(path);
       if (metadata.isSymbolicLink()) {
         throw new Error(
@@ -113,15 +127,13 @@ export async function readKnowledgeBaseSnapshot(
       extracted[filename] = text;
       index++;
     }
-    return {
+    const snapshot = {
       sources: [...sources],
-      protectedRoots: await Promise.all(
-        [...sources].map(
-          async (source) =>
-            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        ),
-      ),
       documents: extracted,
+    };
+    return {
+      ...snapshot,
+      protectedRoots: await knowledgeBaseProtectedRoots(snapshot, signal),
     };
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
@@ -139,15 +151,7 @@ export async function prepareKnowledgeBase(
       "documents" in input
         ? input
         : await readKnowledgeBaseSnapshot(input, signal);
-    const protectedRoots =
-      snapshot.protectedRoots === undefined
-        ? await Promise.all(
-            snapshot.sources.map(
-              async (source) =>
-                (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-            ),
-          )
-        : [...snapshot.protectedRoots];
+    const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
     );
