@@ -2596,6 +2596,12 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:end -->",
               );
+              expect(output.appServer?.prompt).toContain(
+                "--helper validate-patch-risk-assessment <assessment.json>",
+              );
+              expect(output.appServer?.prompt).toContain(
+                "references/windows-validation.md",
+              );
               const artifact = JSON.parse(
                 output
                   .appServer!.prompt.split("\n")
