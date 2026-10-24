@@ -35,7 +35,10 @@ function reviewValidation<T>(
   signal: AbortSignal | undefined,
   detailedErrors: boolean | undefined,
 ) {
+  let aborted = false;
+  let abortReason: unknown;
   const result = (value: unknown, detailed = detailedErrors): T => {
+    if (aborted) throw abortReason;
     signal?.throwIfAborted();
     if (!validator) throw new Error("The review has already ended.");
     return validator(value, detailed);
@@ -47,6 +50,9 @@ function reviewValidation<T>(
     },
     close: () => {
       validator = undefined;
+      aborted = signal?.aborted ?? false;
+      if (aborted) abortReason = signal?.reason;
+      signal = undefined;
     },
   };
 }

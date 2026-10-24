@@ -180,7 +180,7 @@ receiving the answer. A completed remote model turn alone is insufficient.
 
 Custom `reviewRunner.run(request, options)` implementations receive an optional
 `options.validate(candidate)` callback using the same dedupe validators as the final
-answer, with detailed finding-field errors. It returns void on success and throws
+answer, identifying the first failing finding field. It returns void on success and throws
 `InvalidDeduplicationDecision` for a rejected decision. Other exceptions propagate.
 Access it on the original options object; the callback is non-enumerable and omitted
 when options are cloned or spread.

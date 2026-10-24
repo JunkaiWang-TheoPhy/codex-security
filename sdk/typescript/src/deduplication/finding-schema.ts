@@ -9,7 +9,7 @@ export class InvalidFindingError extends Error {
 }
 
 let schema: object | undefined;
-const validators = new Map<boolean, ValidateFunction<Finding>>();
+let validator: ValidateFunction<Finding> | undefined;
 
 function clearValidationErrors(validator: ValidateFunction): void {
   const pending = [validator.schemaEnv];
@@ -45,22 +45,17 @@ export function findingSchema(): object {
 
 export function requireFinding(
   value: unknown,
-  collectErrors = false,
+  detailedErrors = false,
   failureKind: "record" | "decision" = "record",
 ): Finding {
-  let validator = validators.get(collectErrors);
-  if (!validator) {
-    validator = new Ajv2020({
-      strict: false,
-      allErrors: collectErrors,
-    }).compile<Finding>(findingSchema());
-    validators.set(collectErrors, validator);
-  }
+  validator ??= new Ajv2020({ strict: false }).compile<Finding>(
+    findingSchema(),
+  );
   try {
     if (!validator(value)) {
       const failure = new InvalidFindingError(
         "Record must satisfy the Finding schema, including provenance." +
-          (collectErrors
+          (detailedErrors
             ? " " +
               (validator.errors ?? [])
                 .map(

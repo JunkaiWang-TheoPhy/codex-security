@@ -891,37 +891,59 @@ test("SDK validation propagates cancellation even after the runner receives a ca
   expect(() => validate({})).toThrow(reason);
 });
 
-test("Finding feedback identifies fields while imports and legacy failures stay compact", async () => {
-  const message =
-    "Record must satisfy the Finding schema, including provenance.";
-  const result = await deduplicateRecords(input(), {
-    reviewRunner: {
-      async run(request, options) {
-        const value = answer(request) as { mergedFinding?: Finding };
-        const finding = value.mergedFinding;
-        if (finding) {
-          finding.title = finding.summary = finding.remediation = "";
-          finding.locations[0]!.path = 1 as never;
-          finding.severity.level = "invalid" as never;
-          throws(() => requireFinding(finding), { message });
-          throws(() => validateReview(value, [finding]), { message });
-          for (const field of [
-            "title",
-            "summary",
-            "remediation",
-            "locations/0/path",
-            "severity/level",
-          ]) {
+test.each([
+  "title",
+  "summary",
+  "remediation",
+  "locations/0/path",
+  "severity/level",
+])(
+  "Finding feedback identifies %s while legacy failures stay compact",
+  async (field) => {
+    const message =
+      "Record must satisfy the Finding schema, including provenance.";
+    const result = await deduplicateRecords(input(), {
+      reviewRunner: {
+        async run(request, options) {
+          const value = answer(request) as { mergedFinding?: Finding };
+          const finding = value.mergedFinding;
+          if (finding) {
+            if (
+              field === "title" ||
+              field === "summary" ||
+              field === "remediation"
+            )
+              finding[field] = "";
+            else if (field === "locations/0/path")
+              finding.locations[0]!.path = 1 as never;
+            else finding.severity.level = "invalid" as never;
+            throws(() => requireFinding(finding), { message });
+            throws(() => validateReview(value, [finding]), { message });
             expect(() => requireFinding(finding, true)).toThrow(`/${field}`);
             expect(() => options!.validate!(value)).toThrow(`/${field}`);
           }
-        }
-        return value;
+          return value;
+        },
       },
-    },
+    });
+    expect(result.status).toBe("unresolved");
+    for (const entry of result.unresolved) expect(entry.message).toBe(message);
+  },
+);
+
+test("repeated invalid entries do not amplify Finding feedback", () => {
+  const messages = [1, 50_000].map((count) => {
+    const finding = structuredClone(document.findings[0]!);
+    finding.codeEvidence = Array(count).fill({});
+    try {
+      requireFinding(finding, true);
+      throw new Error("Expected invalid finding");
+    } catch (error) {
+      return (error as Error).message;
+    }
   });
-  expect(result.status).toBe("unresolved");
-  for (const entry of result.unresolved) expect(entry.message).toBe(message);
+  expect(messages[0]).toContain("/codeEvidence/0");
+  expect(messages[1]).toBe(messages[0]);
 });
 
 test("concurrent SDK invocations retain their starting error policy", async () => {
@@ -1085,9 +1107,10 @@ test("detailed finding feedback releases root and nested validator state", () =>
     let message;
     try { requireFinding(invalid, true); } catch (error) { message = error.message; }
     const rejected = compiled.at(-1);
+    const rootErrors = rejected.errors;
+    const nestedErrors = rejected.schemaEnv.refs["#/$defs/dataFlow"].validate.errors;
     requireFinding(valid, true);
     const detailedReusedAfterRejection = rejected === compiled.at(-1);
-    const nestedErrors = rejected.schemaEnv.refs["#/$defs/dataFlow"].validate.errors;
     const detailed = compiled.at(-1);
     requireFinding(valid, true);
     const detailedReused = detailed === compiled.at(-1);
@@ -1101,7 +1124,7 @@ test("detailed finding feedback releases root and nested validator state", () =>
     requireFinding(valid);
     const legacy = compiled.at(-1);
     requireFinding(valid);
-    console.log(JSON.stringify({ message, detailedReusedAfterRejection, nestedErrors, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
+    console.log(JSON.stringify({ message, detailedReusedAfterRejection, nestedErrors, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors }));
   `;
   const child = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
