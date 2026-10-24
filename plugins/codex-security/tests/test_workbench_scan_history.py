@@ -2263,6 +2263,7 @@ def test_finding_history_scopes_saved_aliases_to_repository_identity(
     plan = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
     batch = next(item for item in plan["batches"] if item["afterScanId"] == current[1]["scanId"])
     assert batch.get("knownFindingGroups", []) == groups
+    assert set(batch.get("excludedScanIds", [])) == (set() if eligible else old_ids)
     if not eligible:
         assert [item["scanId"] for item in batch["beforeScans"]] == [current[0]["scanId"]]
     if change == "legacy":

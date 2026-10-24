@@ -486,13 +486,10 @@ def list_unmatched_scan_pairs(
                 matching_findings[scan["id"]] = [
                     _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
+        history = selected[: selected_index + 1]
+        excluded = [scan["id"] for scan in history if _saved_repository_conflict(scan, after)]
         known_groups = _known_finding_groups(
-            known_links,
-            {
-                scan["id"]
-                for scan in selected[: selected_index + 1]
-                if not _saved_repository_conflict(scan, after)
-            },
+            known_links, {scan["id"] for scan in history} - set(excluded)
         )
         batches.append(
             {
@@ -506,6 +503,7 @@ def list_unmatched_scan_pairs(
                     for before in previous
                 ],
                 **({"knownFindingGroups": known_groups} if known_groups else {}),
+                **({"excludedScanIds": excluded} if excluded else {}),
             }
         )
     return {
