@@ -158,6 +158,24 @@ test("preparation retains current body bytes, large integers and independent ser
   assert.deepEqual(changedSpace.findingsToEmbed, first.findingsToEmbed);
 });
 
+for (const encoding of ["UTF-8", "UTF-16le", "UTF-16be"] as const) {
+  test(`${encoding} preserves distinct noncharacter keys in stored finding JSON`, async (t) => {
+    const { database, prepare } = await fixture(t, encoding);
+    const keys = { "\uFFFE": "first", "\uFFFF": "second" };
+    const original = { ...finding("synthetic"), extensions: keys };
+    const { findingsToEmbed } = prepared(prepare([original]));
+    assert.deepEqual(findingsToEmbed, [original]);
+    const { bytes } = database
+      .prepare("SELECT CAST(details_json AS BLOB) AS bytes FROM findings")
+      .get()!;
+    const stored = new TextDecoder(encoding).decode(bytes as Uint8Array);
+    assert.deepEqual(JSON.parse(stored).extensions, keys);
+    if (encoding === "UTF-8") {
+      for (const key of Object.keys(keys)) assert.ok(stored.includes(key));
+    }
+  });
+}
+
 for (const encoding of ["UTF-16le", "UTF-16be"] as const) {
   test(`${encoding} databases reuse the same text and cache keys across preparation and embedding`, async (t) => {
     const { database, prepare, embed } = await fixture(t, encoding);

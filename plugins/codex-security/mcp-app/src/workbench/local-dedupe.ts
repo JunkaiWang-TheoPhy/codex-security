@@ -48,10 +48,12 @@ function column(expression: string, name: string): string {
     ELSE ${expression} END AS ${name}, typeof(${expression}) AS ${name}_type`;
 }
 
-function columnReader(database: DatabaseSync) {
+function databaseEncoding(database: DatabaseSync): string {
   // CAST(TEXT AS BLOB) returns bytes in SQLite's database encoding.
-  const encoding = database.prepare("PRAGMA encoding").get()!
-    .encoding as string;
+  return database.prepare("PRAGMA encoding").get()!.encoding as string;
+}
+
+function columnReader(encoding: string) {
   const decoder =
     encoding === "UTF-8"
       ? undefined
@@ -147,7 +149,8 @@ function prepare(
   payload: Preparation,
   timestamp: string,
 ) {
-  const value = columnReader(database);
+  const encoding = databaseEncoding(database);
+  const value = columnReader(encoding);
   // A sealed scan selects finding IDs, not permission to select another corpus.
   const target = resolvedPathText(payload.repositoryPath, false);
   requireSqliteText([target]);
@@ -213,13 +216,15 @@ function prepare(
       } catch (error) {
         throw new LocalDedupeError((error as Error).message);
       }
-      insert.run(
-        finding.findingId,
-        ...identity,
-        stringifyJson(finding, 0),
-        timestamp,
-        timestamp,
-      );
+      const body = stringifyJson(finding, 0);
+      // SQLite replaces these code points when transcoding bound UTF-8 to UTF-16.
+      const details =
+        encoding === "UTF-8"
+          ? body
+          : body
+              .replaceAll("\uFFFE", "\\ufffe")
+              .replaceAll("\uFFFF", "\\uffff");
+      insert.run(finding.findingId, ...identity, details, timestamp, timestamp);
     }
     link.run(payload.anchorRepositoryId, finding.findingId);
   }
@@ -298,7 +303,7 @@ function validVector(
 }
 
 function embed(database: DatabaseSync, payload: EmbeddingBatch) {
-  const value = columnReader(database);
+  const value = columnReader(databaseEncoding(database));
   const current = database.prepare(
     `SELECT ${column("details_json", "details")} FROM findings WHERE id = ?`,
   );
