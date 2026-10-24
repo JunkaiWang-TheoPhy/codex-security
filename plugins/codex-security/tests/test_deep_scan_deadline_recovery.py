@@ -162,15 +162,16 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     assert checkpoint.read_bytes() == original
 
 
-@pytest.mark.parametrize("candidate_id", ["sparse", None], ids=["explicit", "anonymous"])
+@pytest.mark.parametrize("association", ["explicit", "anonymous", "shared", "embedded"])
 def test_discarded_worker_evidence_preserves_other_surface_dispositions(
-    workbench_api, workbench_db, deadline_scan, candidate_id
+    workbench_api, workbench_db, deadline_scan, association
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan)
     sparse = worker_finding(scan, "incomplete")
     sparse.pop("codeEvidence")
-    link = {"candidateId": candidate_id} if candidate_id else {}
+    candidate_id = "complete" if association == "shared" else "sparse"
+    link = {} if association == "anonymous" else {"candidateId": candidate_id}
     sparse["provenance"].update(link)
     retained = worker_finding(scan, "retained")
     retained["provenance"]["candidateId"] = "complete"
@@ -189,9 +190,15 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
             "candidateId": "independent",
         },
     ]
+    if association in {"shared", "embedded"}:
+        surfaces[0]["finding"] = sparse
+        surfaces[1]["finding"] = retained
+    if association == "embedded":
+        for surface in surfaces[:2]:
+            surface["id"] = surface.pop("candidateId")
     checkpoint = write_checkpoint(
         output / "checkpoints",
-        saved_draft(scan.scan_id, findings=[sparse, retained], surfaces=surfaces),
+        saved_draft(scan.scan_id, findings=[retained, sparse], surfaces=surfaces),
     )
     original = checkpoint.read_bytes()
 
@@ -210,12 +217,55 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     ]
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert {row["title"] for row in findings} == {scan.findings[0]["title"], retained["title"]}
+    task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
+    pending = next(row for row in coverage["surfaces"] if row["disposition"] == "needs_follow_up")
+    assert task["surfaceIds"] == [pending["id"]]
+    assert task["paths"] == [sparse["locations"][0]["path"]]
+    assert f"{checkpoint.relative_to(scan.scan_dir)} finding 2" in task["reason"]
+    report = (scan.scan_dir / "report.md").read_text().split("## Deferred Requested Work")[1]
+    assert checkpoint.name in report and sparse["title"] in report and task["paths"][0] in report
     assert json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
     assert checkpoint.read_bytes() == original
 
 
-def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
+def test_unlinked_sparse_checkpoint_leaves_earlier_worker_surface_reported(
     workbench_api, workbench_db, deadline_scan
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    retained = worker_finding(scan, "retained")
+    surface = {"id": "first", "label": "First review", "disposition": "reported"}
+    earlier = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, findings=[retained], surfaces=[surface])
+    )
+    sparse = worker_finding(scan, "unrelated")
+    sparse.pop("validation")
+    later = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, findings=[{"title": "Invalid row"}, sparse]),
+    )
+    original = [path.read_bytes() for path in (earlier, later)]
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert (
+        next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)["disposition"]
+        == "reported"
+    )
+    task = next(
+        row
+        for row in coverage["deferred"]
+        if row.get("workerId") == worker_id and "unrelated" in row["reason"]
+    )
+    assert "surfaceIds" not in task
+    assert f"{later.relative_to(scan.scan_dir)} finding 2" in task["reason"]
+    assert original == [path.read_bytes() for path in (earlier, later)]
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
+    workbench_api, workbench_db, deadline_scan, archived
 ):
     scan = deadline_scan
     local_id = "input"
@@ -230,7 +280,9 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     closure = {"id": local_id, "reason": "The parent completed this review."}
     scan.coverage.update(surfaces=[accepted], resolvedDeferred=[closure])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-    owner, output = canceled_discovery_output(workbench_db, scan)
+    owner, output = canceled_discovery_output(workbench_db, scan, attempt=2 if archived else 1)
+    if archived:
+        output = output.parent / "attempts" / "attempt-1"
     sparse = worker_finding(scan, "unfinished")
     sparse.pop("validation")
     sparse["provenance"].update(workerId=accepted_owner, candidateId=local_id)
@@ -257,6 +309,7 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     (task,) = [row for row in coverage["deferred"] if row.get("workerId") == owner]
     suffix = hashlib.sha256(local_id.encode()).hexdigest()
     assert task["candidateId"] == f"{owner}-attempt-1-candidate-{suffix}"
+    assert task["provenance"]["attempt"] == 1
     assert task["provenance"]["candidateId"] == local_id
     assert checkpoint.read_bytes() == original
 
@@ -649,6 +702,75 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
                 finding["provenance"].pop("previousFindings")
     assert findings_after == findings_before
     assert after == before
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
+)
+@pytest.mark.parametrize("revision", ["unchanged", "corrected", "authored-followup"])
+def test_deadline_followup_survives_publication_retries(
+    workbench_api, workbench_db, deadline_scan, tmp_path, revision
+):
+    scan = deadline_scan
+    worker, output = canceled_discovery_output(workbench_db, scan)
+    finding = worker_finding(scan, "incomplete-worker-review")
+    finding["provenance"]["candidateId"] = "input"
+    validation = finding.pop("validation")
+    surface = {
+        "id": "entry",
+        "label": "Worker review",
+        "candidateId": "input",
+        "disposition": "reported",
+        "receiptRefs": [],
+    }
+    checkpoint = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, findings=[finding], surfaces=[surface])
+    )
+    original = checkpoint.read_bytes()
+    database = tmp_path / "replay.db"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+
+    publications = []
+    for _ in range(2):
+        interrupt_finish_before_commit(workbench_api, database, scan)
+        publications.append(json.loads((scan.scan_dir / "coverage.json").read_bytes()))
+    assert publications[0] == publications[1]
+    if revision == "corrected":
+        finding["validation"] = validation
+        latest = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(scan.scan_id, findings=[finding], surfaces=[surface]),
+        )
+        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": latest.name}))
+    elif revision == "authored-followup":
+        write_checkpoint(
+            output / "checkpoints",
+            saved_draft(scan.scan_id, surfaces=[{**surface, "disposition": "needs_follow_up"}]),
+        )
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        finish(workbench_api, connection, scan, terminal_reason="capped")
+        assert complete(workbench_api, connection, scan)["progress"]["status"] == "complete"
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
+    surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker]
+    assert surfaces[0]["id"] == f"{worker}/entry"
+    if revision == "corrected":
+        (task,) = [row for row in publications[0]["deferred"] if row.get("workerId") == worker]
+        findings = json.loads((scan.scan_dir / "findings.json").read_bytes())["findings"]
+        (completed,) = [row for row in findings if row["provenance"].get("workerId") == worker]
+        assert task["id"] == f"{worker}/discarded-{completed['findingId']}"
+        assert completed["validation"] == validation
+        assert not any(row.get("workerId") == worker for row in coverage["deferred"])
+        assert [row["disposition"] for row in surfaces] == ["reported"]
+    elif revision == "authored-followup":
+        assert [row["disposition"] for row in surfaces] == ["needs_follow_up", "needs_follow_up"]
+        (task,) = [row for row in coverage["deferred"] if row.get("workerId") == worker]
+        assert task["surfaceIds"] == [row["id"] for row in surfaces]
+    else:
+        assert coverage == publications[0]
+        assert [row["disposition"] for row in surfaces] == ["needs_follow_up"]
+    assert checkpoint.read_bytes() == original
 
 
 @pytest.mark.skipif(

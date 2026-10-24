@@ -8,6 +8,7 @@ from argparse import Namespace
 from datetime import datetime, timedelta
 
 import pytest
+from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import (
     add_worker,
     assert_published_aggregate,
@@ -718,6 +719,70 @@ def test_count_capped_repair_after_deadline_preserves_original_cutoff(
     )
     assert (scan.scan_dir / "coverage.json").read_bytes() == coverage
     assert repaired["completedAt"] == selected_at
+
+
+@pytest.mark.parametrize("checkpoint_at_selection", [False, True])
+def test_evidence_repair_preserves_selected_deadline_findings(
+    workbench_api, workbench_db, deadline_scan, checkpoint_at_selection
+):
+    scan = deadline_scan
+    _, output = canceled_discovery_output(workbench_db, scan)
+    worker_finding = copy.deepcopy(scan.findings[0])
+    worker_finding.update(
+        identity={"anchor": "separate-canceled-review"}, provenance={"source": "local_plugin"}
+    )
+    draft = saved_draft(scan.scan_id, findings=[worker_finding])
+    if checkpoint_at_selection:
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+    owner = "selected-report-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    if not checkpoint_at_selection:
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+    original_checkpoint = checkpoint.read_bytes()
+    findings_path = scan.scan_dir / "findings.json"
+    original = json.loads(findings_path.read_text())
+    identities = [row["identity"] for row in original["findings"]]
+    assert len(identities) == 1 + checkpoint_at_selection
+    original["findings"][0].pop("validation")
+    findings_path.write_text(json.dumps(original))
+    coverage_path = scan.scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+
+    claim = workbench_api["deep_scan"].claim_deep_scan_coordinator(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+        ),
+    )
+    generation = claim["deepScan"]["coordinatorGeneration"]
+    reducer_path = workbench_db.execute(
+        "SELECT result_manifest_path FROM deep_scan_workers WHERE id = ?", (scan.reducer_id,)
+    ).fetchone()[0]
+    publication = stage_publication(
+        scan, generation=generation, result_path=reducer_path, title=scan.findings[0]["title"]
+    )
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+    )
+    assert [
+        row["identity"] for row in json.loads(findings_path.read_text())["findings"]
+    ] == identities
+    repaired = finish(
+        workbench_api, workbench_db, scan, terminal_reason="capped", generation=generation
+    )
+    assert repaired["completedAt"] == selected["completedAt"]
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    rows = json.loads(findings_path.read_text())["findings"]
+    assert [row["identity"] for row in rows] == identities
+    assert rows[0]["validation"] == scan.findings[0]["validation"]
+    sealed_coverage = json.loads(coverage_path.read_text())
+    assert sealed_coverage["surfaces"] == coverage["surfaces"]
+    assert sealed_coverage["deferred"] == coverage["deferred"]
+    assert checkpoint.read_bytes() == original_checkpoint
 
 
 @pytest.mark.parametrize("sparse_finding", [False, True])

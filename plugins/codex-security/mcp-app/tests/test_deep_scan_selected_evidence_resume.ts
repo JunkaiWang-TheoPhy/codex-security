@@ -254,21 +254,32 @@ for (const { route, saturated, lateFailure } of [
           accepted.config.stopAfterConsecutiveErrors,
         );
       const originalCoverage = await readJson(run.scanDir, "coverage.json");
-      const originalFindings = (await readJson(run.scanDir, "findings.json"))
-        .findings;
+      const parentFindingsPath = path.join(run.scanDir, "findings.json");
       const acceptedPaths = accepted.persistedWorkers.flatMap((worker) =>
         worker.resultManifestPath ? [worker.resultManifestPath] : [],
       );
       // Simulate artifacts accepted before the update, without resetting the
       // persisted terminal status, selected manifest, budget or coordinator lease.
-      for (const file of [
-        ...acceptedPaths,
-        path.join(run.scanDir, "findings.json"),
-      ]) {
+      for (const file of [...acceptedPaths, parentFindingsPath]) {
         const draft = await readJson(file);
         for (const finding of draft.findings) delete finding.validation;
+        if (file === parentFindingsPath && route === "plugin" && !saturated) {
+          // Older parents derived anchors from titles and scoped coverage by worker.
+          draft.findings[0].identity = { anchor: "unsafe-fixture-query" };
+          const surface = originalCoverage.surfaces[0];
+          const { workerId, sourceId } = surface.provenance;
+          surface.id = `${workerId}/${sourceId ?? "0"}`;
+          surface.workerId = workerId;
+          delete surface.provenance;
+          delete originalCoverage.reviews;
+          await writeJson(
+            path.join(run.scanDir, "coverage.json"),
+            originalCoverage,
+          );
+        }
         await writeJson(file, draft);
       }
+      const originalFindings = (await readJson(parentFindingsPath)).findings;
       const original = await Promise.all(
         acceptedPaths.map((file) => readFile(file, "utf8")),
       );
@@ -366,11 +377,14 @@ for (const { route, saturated, lateFailure } of [
         await readJson(run.scanDir, "coverage.json"),
         originalCoverage,
       );
+      const findingKey = (finding: { ruleId: string; identity: object }) => [
+        finding.ruleId,
+        finding.identity,
+      ];
+      const repairedFindings = (await readJson(parentFindingsPath)).findings;
       assert.deepEqual(
-        (await readJson(run.scanDir, "findings.json")).findings.map(
-          (finding: { id: string }) => finding.id,
-        ),
-        originalFindings.map((finding: { id: string }) => finding.id),
+        repairedFindings.map(findingKey),
+        originalFindings.map(findingKey),
       );
       assert.equal(
         repaired.coordinatorGeneration,

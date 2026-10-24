@@ -1871,7 +1871,9 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        if zero_discovery_deadline or (discovery_deadline and standard_scan_manifest):
+        if zero_discovery_deadline or (
+            discovery_deadline and standard_scan_manifest and run["completed_at"] is None
+        ):
             deadline_publication = saved_results.preserve_deep_deadline_draft(
                 dependencies(),
                 connection,

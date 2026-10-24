@@ -27,12 +27,14 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from workbench.saved_coverage import (
+    _DeadlineFindingSource,
     _merge_tied_parent_observations,
     _parent_observation_content,
     _project_worker_closure,
     _projected_worker_closure_sources,
     _resolved_deferred_rows,
     _saved_coverage_id,
+    _worker_source_directory,
     prepare_saved_coverage_projection,
 )
 from workbench.saved_sources import (
@@ -309,7 +311,7 @@ def _inherit_coverage_sources(
 
 
 def _recover_preserved_worker_source(
-    scan_dir, relative, scan_id, binding, worker_id, worker, draft, warnings
+    scan_dir, relative, scan_id, binding, worker_id, worker, draft, warnings, source_indexes
 ):
     discarded_findings = []
     # Recover imported records without relaxing canonical parent validation.
@@ -360,6 +362,8 @@ def _recover_preserved_worker_source(
         if discarded:
             discarded_findings.extend(discarded)
         for recovered_finding in recovered["findings"]:
+            if source_indexes is not None:
+                source_indexes[id(recovered_finding)] = index
             provenance = recovered_finding["provenance"]
             if "workerId" in provenance:
                 provenance["workerId"] = worker_id
@@ -449,6 +453,7 @@ def merge_saved_results(
     project_worker_coverage: bool = False,
     created_paths: set[str] | None = None,
     current_contract: bool = False,
+    deadline_sources: dict[tuple[str, bytes], _DeadlineFindingSource] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -634,6 +639,7 @@ def merge_saved_results(
             latest_reducer = None
 
     discarded_by_source: dict[str, list[str]] = {}
+    source_indexes = {} if deadline_sources is not None else None
     pending = deque(paths.items())
     while pending:
         relative, worker_id = pending.popleft()
@@ -661,6 +667,7 @@ def merge_saved_results(
                     next(worker for worker in workers if worker["id"] == worker_id),
                     draft,
                     warnings,
+                    source_indexes,
                 )
                 if discarded:
                     discarded_by_source[relative] = discarded
@@ -689,10 +696,7 @@ def merge_saved_results(
     for relative, _, worker_id in sources:
         if worker_id not in headed_workers:
             continue
-        directory = Path(relative).parent
-        if directory.name == "checkpoints":
-            directory = directory.parent
-        _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
+        _, attempt = worker_attempts.get(_worker_source_directory(relative), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
     selected_observations: dict[str, tuple[int, int]] = {}
     parent_heads: list[tuple[int, str]] = []
@@ -966,6 +970,12 @@ def merge_saved_results(
         parent,
         source_order,
         project_worker_coverage=project_worker_coverage,
+        worker_attempts=worker_attempts,
+        unchanged_sources={
+            path
+            for path, digest in parent_preserved_sources.items()
+            if source_digests.get(path) == digest
+        },
         preserve_canonical_parent=preserve_canonical_parent,
         receipt_resolver=lambda relative, row, owner: resolve_coverage_receipts(
             scan_dir, row, workers_by_id[owner], relative
@@ -1031,11 +1041,8 @@ def merge_saved_results(
             return item
         worker_id, relative, _, index, source = origin
         if relative not in accepted_sources:
-            directory = Path(relative).parent
-            if directory.name == "checkpoints":
-                directory = directory.parent
             worker = workers_by_id.get(worker_id)
-            if worker is None or worker_attempts.get(directory.as_posix(), (None, None)) != (
+            if worker is None or worker_attempts.get(_worker_source_directory(relative)) != (
                 worker_id,
                 worker["attempt"],
             ):
@@ -3184,6 +3191,24 @@ def merge_saved_results(
         retained_surface_rows=retained_surface_rows,
         resolved=resolved,
     )
+    if deadline_sources is not None:
+        surface_ids: dict[str, set[str]] = {}
+        for (relative, _), targets in surface_ids_by_source.items():
+            surface_ids.setdefault(relative, set()).update(targets)
+        for position, group in retained_groups.items():
+            owner = group["owner"]
+            if owner is None:
+                continue
+            source, value = group["observations"][owner]
+            if (index := source_indexes.get(id(value))) is not None:
+                relative = source[0]
+                _, attempt = worker_attempts.get(
+                    _worker_source_directory(relative), (owner, workers_by_id[owner]["attempt"])
+                )
+                key = owner, _semantic_identity_key(findings[position])
+                deadline_sources[key] = _DeadlineFindingSource(
+                    relative, index, attempt, surface_ids.get(relative, set())
+                )
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
