@@ -132,9 +132,8 @@ job-level cache syntax until the linter supports them. The zizmor configuration
 records reviewed privileged triggers and their trust boundaries. Review these
 exceptions when changing the affected workflows.
 
-CI package builds and npm release validation require the production dependency
-audit to pass. Run it locally with `pnpm --dir sdk/typescript run audit:prod`.
-The existing policy checks production dependencies at the high-severity threshold.
+CI and npm release validation audit the SDK and bundled MCP app's production
+lockfiles. Run both audits locally with `pnpm --dir sdk/typescript run audit:prod`.
 Resolve high or critical advisories, or audit service failures, before retrying.
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the

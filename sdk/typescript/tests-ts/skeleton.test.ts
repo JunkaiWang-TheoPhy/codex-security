@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import {
@@ -644,7 +645,7 @@ describe("TypeScript package skeleton", () => {
     );
     expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
-      "pnpm audit --prod --audit-level high",
+      "node scripts/audit-production.mjs",
     );
   });
 
@@ -661,6 +662,38 @@ describe("TypeScript package skeleton", () => {
           /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
         );
       }
+    }
+  });
+
+  test("audits both production lockfiles even if either audit fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "production audits "));
+    const windows = process.platform === "win32";
+    try {
+      await writeFile(
+        join(directory, windows ? "pnpm.cmd" : "pnpm"),
+        windows
+          ? '@echo off\r\nfor %%I in ("%CD%") do @echo audited %%~nxI %*\r\nfor %%I in ("%CD%") do @if "%%~nxI"=="%FAIL_PROJECT%" exit /b 7\r\nexit /b 0\r\n'
+          : '#!/bin/sh\necho "audited ${PWD##*/} $*"\n[ "${PWD##*/}" != "$FAIL_PROJECT" ] || exit 7\n',
+        { mode: 0o755 },
+      );
+      for (const failure of ["", "typescript", "mcp-app"]) {
+        const result = await runCommand(
+          Bun.which("node")!,
+          [
+            fileURLToPath(
+              new URL("../scripts/audit-production.mjs", import.meta.url),
+            ),
+          ],
+          { env: { ...process.env, PATH: directory, FAIL_PROJECT: failure } },
+        );
+        expect(result.status, result.stderr).toBe(failure ? 7 : 0);
+        expect(result.stdout.match(/^audited .+$/gmu)).toEqual([
+          "audited typescript audit --prod --audit-level high",
+          "audited mcp-app audit --prod --audit-level high",
+        ]);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
