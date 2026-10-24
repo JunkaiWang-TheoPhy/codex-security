@@ -148,6 +148,7 @@ export function createWorkerLifecycleCases({
       await Promise.race([
         (async () => {
           while (
+            !controller.signal.aborted &&
             (await readFile(fixture.completionMarkerPath, "utf8").catch(
               () => "",
             )) !==
