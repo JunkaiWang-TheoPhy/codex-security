@@ -200,7 +200,9 @@ jobs:
 ```
 
 Replace the Action placeholder with a reviewed commit that includes Bedrock
-support. This example is report-only; the usual severity thresholds, summaries,
+support and [automatic Ubuntu sandbox setup](#ubuntu-sandbox-setup). For older
+pins, keep the [manual setup step](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
+This example is report-only; the usual severity thresholds, summaries,
 annotations, artifacts, and SARIF outputs also work with Bedrock.
 
 Both `mode: standard` and `mode: deep` use the selected AWS credentials. Allow
@@ -325,12 +327,20 @@ jobs:
 <!-- action-workflow:pull-request:end -->
 
 The scan job fails on high or critical findings, scanner errors, or required
-reporting errors. Usable reports remain available after an execution failure.
+reporting errors. After a failure, a later step with `if: failure()` in the same
+job can read any validated reports through the Action outputs. Set
+`upload-artifacts: 'true'` to make those reports downloadable after the job ends.
 File and line annotations are enabled by default.
 
-The workflow reruns when a PR's base branch changes, even when the head commit is
-unchanged. Title and body edits do not start or cancel scans; their skipped jobs
-use a separate check name and cannot satisfy the required **Codex Security** check.
+The repository workflow above reruns when a PR's base branch changes, even when
+the head commit is unchanged. Title and body edits skip the scan and use a
+separate concurrency group and check name, preserving the active scan and its
+required **Codex Security** result.
+
+For `pull_request`, GitHub runs required ruleset workflows on `opened`,
+`synchronize`, and `reopened`. After retargeting a PR covered by that rule, push
+a new commit or close and reopen the PR to scan the new base.
+See [GitHub's supported ruleset triggers](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#supported-event-triggers).
 
 For scan-triggering events, the separate **Codex Security** job runs even if the
 scan job is skipped. It passes only after a successful scan job that reports a completed scan or a
@@ -416,8 +426,8 @@ A dry run checks local setup and requires `fail-on-severity: none`.
 Use the [required PR check](#scan-pull-requests) to handle skipped scan jobs as
 well as the Action's own results.
 
-Usable reports retained after an execution failure remain available, but are not
-eligible for SARIF upload. Invalid or missing required reports, a changed
+After an execution failure, the Action returns paths to usable reports and sets
+`sarif-upload-ready: false`. Invalid or missing required reports, a changed
 checkout, and requested artifact-upload or runtime-cleanup failures also fail
 the step. Empty diffs and dry runs use `scan-status: skipped`.
 

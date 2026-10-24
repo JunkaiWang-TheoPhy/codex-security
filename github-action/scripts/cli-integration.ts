@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { parseInputs, scanArguments } from '../src/inputs.js';
 import { analyzeResults } from '../src/results.js';
-import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, SandboxUnavailableError, writeRuntimeLauncher } from '../src/runtime.js';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
 const [candidatePackage, candidateVersion] = process.argv.slice(2);
@@ -264,9 +264,14 @@ try {
   const shadowBin = join(repository, 'bin');
   await mkdir(shadowBin);
   await writeFile(join(shadowBin, 'bwrap'), '#!/bin/sh\n: > "$0.ran"\nexit 70\n', {mode:0o755});
+  const probeEnv = {...venvEnv, CODEX_HOME:join(root, 'probe-home')};
   await checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:'example/model'}, {
-    ...venvEnv, PATH:shadowBin + delimiter + venvEnv.PATH, CODEX_HOME:join(root, 'probe-home'),
+    ...probeEnv, PATH:shadowBin + delimiter + venvEnv.PATH,
   });
+  await assert.rejects(checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:''}, probeEnv),
+    error => error instanceof Error && !(error instanceof SandboxUnavailableError) && /model/i.test(error.message));
+  await assert.rejects(checkSandbox(process.execPath, cli, {repository, provider:'openai', model:''}, {...probeEnv, CODEX_CLI_PATH:'/bin/false'}),
+    SandboxUnavailableError);
   await assert.rejects(readFile(join(shadowBin, 'bwrap.ran')), {code:'ENOENT'});
   await rm(shadowBin, {recursive:true});
   // Use the published MCP launcher and its actual allowlist without a model turn.

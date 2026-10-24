@@ -56222,12 +56222,15 @@ async function checkPython(pythonPath, cwd, env) {
   if (result.exitCode !== 0 || result.timedOut || result.interrupted || result.signal)
     throw new Error("Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.");
 }
+var SANDBOX_UNAVAILABLE_EXIT = 75;
+var SandboxUnavailableError = class extends Error {
+};
 async function ensureSandbox(options, probe, execute = runProcess) {
   try {
     await probe();
     return;
   } catch (error2) {
-    if (options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) throw error2;
+    if (!(error2 instanceof SandboxUnavailableError) || options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) throw error2;
   }
   const sudo = "/usr/bin/sudo";
   for (const args of [
@@ -56259,10 +56262,23 @@ async function checkSandbox(nodePath, cliPath, options, env) {
     const runtime = await fromCli('runtime.js');
     const config = parseCodexOverrides([], model || undefined, undefined, provider);
     await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
-    await runtime.probeCodexSandbox(runtime.resolveCodexCommand(process.env), process.env);
+    const command = runtime.resolveCodexCommand(process.env);
+    try { await runtime.probeCodexSandbox(command, process.env); }
+    catch (error) {
+      const { SandboxUnavailableError } = await fromCli('errors.js');
+      if (!(error instanceof SandboxUnavailableError)) throw error;
+      console.error(error);
+      process.exitCode = ${SANDBOX_UNAVAILABLE_EXIT};
+    }
   `, cliPath, options.provider, options.model], { cwd: options.repository, env });
-  if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
-    throw new Error(`Codex Security sandbox preflight failed. ${result.stderr || result.stdout}`);
+  const detail = result.stderr || result.stdout;
+  if (result.interrupted || result.signal || result.timedOut)
+    throw new Error(`Codex Security sandbox preflight ${result.timedOut ? "timed out" : "was interrupted"}. ${detail}`);
+  if (result.exitCode !== 0) {
+    const message = `Codex Security sandbox preflight failed. ${detail}`;
+    if (result.exitCode === SANDBOX_UNAVAILABLE_EXIT) throw new SandboxUnavailableError(message);
+    throw new Error(message);
+  }
 }
 async function writeRuntimeLauncher(path6, executable, name, value) {
   const quote = (value2) => "'" + value2.replaceAll("'", "'\\''") + "'";
@@ -56316,13 +56332,15 @@ async function setupRuntime(options) {
 ${details}`);
     }
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
-    await ensureSandbox(
-      { cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log },
-      () => checkSandbox(nodePath, cliPath, options, { ...env, CODEX_HOME: (0, import_node_path4.join)(root, "probe-home") })
-    );
-    try {
-      options.log?.("Codex sandbox probe succeeded without model calls.");
-    } catch {
+    if (options.model) {
+      await ensureSandbox(
+        { cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log },
+        () => checkSandbox(nodePath, cliPath, options, { ...env, CODEX_HOME: (0, import_node_path4.join)(root, "probe-home") })
+      );
+      try {
+        options.log?.("Codex sandbox probe succeeded without model calls.");
+      } catch {
+      }
     }
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);

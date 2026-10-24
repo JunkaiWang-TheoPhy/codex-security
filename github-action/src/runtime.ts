@@ -118,6 +118,10 @@ export async function checkPython(pythonPath: string, cwd: string, env: NodeJS.P
     throw new Error('Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.');
 }
 
+// Carry only the pinned SDK's SandboxUnavailableError across the probe process.
+const SANDBOX_UNAVAILABLE_EXIT = 75;
+export class SandboxUnavailableError extends Error {}
+
 export async function ensureSandbox(options: {
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -128,7 +132,7 @@ export async function ensureSandbox(options: {
   try { await probe(); return; }
   catch (error) {
     // Docker job containers inherit the host image labels but own their setup.
-    if (options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24' || fs.existsSync('/.dockerenv')) throw error;
+    if (!(error instanceof SandboxUnavailableError) || options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24' || fs.existsSync('/.dockerenv')) throw error;
   }
   const sudo = '/usr/bin/sudo';
   for (const args of [
@@ -160,10 +164,23 @@ export async function checkSandbox(nodePath: string, cliPath: string, options: P
     const runtime = await fromCli('runtime.js');
     const config = parseCodexOverrides([], model || undefined, undefined, provider);
     await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
-    await runtime.probeCodexSandbox(runtime.resolveCodexCommand(process.env), process.env);
+    const command = runtime.resolveCodexCommand(process.env);
+    try { await runtime.probeCodexSandbox(command, process.env); }
+    catch (error) {
+      const { SandboxUnavailableError } = await fromCli('errors.js');
+      if (!(error instanceof SandboxUnavailableError)) throw error;
+      console.error(error);
+      process.exitCode = ${SANDBOX_UNAVAILABLE_EXIT};
+    }
   `, cliPath, options.provider, options.model], {cwd: options.repository, env});
-  if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
-    throw new Error(`Codex Security sandbox preflight failed. ${result.stderr || result.stdout}`);
+  const detail = result.stderr || result.stdout;
+  if (result.interrupted || result.signal || result.timedOut)
+    throw new Error(`Codex Security sandbox preflight ${result.timedOut ? 'timed out' : 'was interrupted'}. ${detail}`);
+  if (result.exitCode !== 0) {
+    const message = `Codex Security sandbox preflight failed. ${detail}`;
+    if (result.exitCode === SANDBOX_UNAVAILABLE_EXIT) throw new SandboxUnavailableError(message);
+    throw new Error(message);
+  }
 }
 
 /** Restore a captured runner setting after Codex clears an MCP child's environment. */
@@ -217,11 +234,14 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
       throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ', timed out' : ''}${install.interrupted ? ', interrupted' : ''}).\n${details}`);
     }
     const cliPath = await regularFile(join(destination, 'node_modules', '@openai', 'codex-security', 'bin', 'codex-security.mjs'));
-    // Codex excludes executables under its working directory during sandbox startup.
-    await ensureSandbox({cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log},
-      () => checkSandbox(nodePath, cliPath, options, {...env, CODEX_HOME: join(root, 'probe-home')}));
-    try { options.log?.('Codex sandbox probe succeeded without model calls.'); }
-    catch { /* Optional progress must not interrupt runtime preparation. */ }
+    // parseInputs supplies the OpenAI default. The CLI reports missing external-provider models.
+    if (options.model) {
+      // Codex excludes executables under its working directory during sandbox startup.
+      await ensureSandbox({cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log},
+        () => checkSandbox(nodePath, cliPath, options, {...env, CODEX_HOME: join(root, 'probe-home')}));
+      try { options.log?.('Codex sandbox probe succeeded without model calls.'); }
+      catch { /* Optional progress must not interrupt runtime preparation. */ }
+    }
     // Private reports deliberately live outside the disposable credentials/runtime
     // root so downstream upload-sarif remains usable after the post action.
     const resultsDirectory = await mkdtemp(join(tempRoot, 'codex-security-reports-'));

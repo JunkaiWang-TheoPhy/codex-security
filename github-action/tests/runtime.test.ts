@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm, stat } from
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, SandboxUnavailableError, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
 import { runProcess } from '../src/process.js';
 
 test('tool discovery preserves the selected PATH launcher spelling', async (t) => {
@@ -155,7 +155,7 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
   };
   const env = runtimeEnvironment({root, home:root, codexHome:root, stateDirectory:root, runnerPath:`${checkout}:/usr/bin:/bin`});
   let probes = 0;
-  const probe = async () => { if (++probes === 1) throw new Error('Synthetic unavailable sandbox'); };
+  const probe = async () => { if (++probes === 1) throw new SandboxUnavailableError('Synthetic unavailable sandbox'); };
   await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24', log:() => {throw new Error('synthetic log failure');}}, probe, execute);
   assert.equal(probes, 2);
   await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'}, probe, execute);
@@ -173,14 +173,14 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
   }
   assert.equal(fs.existsSync(join(root, 'checkout-command-ran')), false);
   await writeFile(sudo, `#!${process.execPath}\nconsole.error('synthetic apt diagnostic'); process.exit(17);\n`, {mode:0o755});
-  await assert.rejects(ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new Error('Sandbox unavailable'); }, execute),
+  await assert.rejects(ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new SandboxUnavailableError('Sandbox unavailable'); }, execute),
     /Ubuntu sandbox setup failed: sudo -n \/usr\/bin\/apt-get update \(exit 17\).*synthetic apt diagnostic/s);
 });
 
 test('sandbox setup leaves self-hosted runners and other images unchanged', async t => {
   const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Sandbox provisioning must not run.'); });
   for (const [runnerEnvironment,imageOS] of [['self-hosted','ubuntu24'],['github-hosted','ubuntu22'],[undefined,undefined]])
-    await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment,imageOS}, async () => { throw new Error('Runner sandbox unavailable'); }, execute), /Runner sandbox unavailable/);
+    await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment,imageOS}, async () => { throw new SandboxUnavailableError('Runner sandbox unavailable'); }, execute), /Runner sandbox unavailable/);
   assert.equal(execute.mock.callCount(), 0);
 });
 
@@ -188,17 +188,24 @@ test('sandbox setup skips Docker job containers with inherited hosted Ubuntu lab
   const existsSync = fs.existsSync;
   t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? true : existsSync(path));
   const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Container provisioning must not run.'); });
-  await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new Error('Container sandbox unavailable'); }, execute), /Container sandbox unavailable/);
+  await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new SandboxUnavailableError('Container sandbox unavailable'); }, execute), /Container sandbox unavailable/);
   assert.equal(execute.mock.callCount(), 0);
 });
 
-test('sandbox preflight preserves the shipped SDK diagnostic and fails before scanning', async t => {
+test('hosted setup propagates cancellations and provider errors without provisioning', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-sandbox-failure-')));
   t.after(() => rm(root, {recursive:true,force:true}));
+  const existsSync = fs.existsSync;
+  t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? false : existsSync(path));
   const probe = join(root, 'probe');
-  await writeFile(probe, '#!/bin/sh\necho "synthetic bwrap diagnostic" >&2\nexit 1\n', {mode:0o755});
-  await assert.rejects(checkSandbox(probe, join(root, 'cli.mjs'), {repository:root,provider:'openai',model:''}, {}),
-    /Codex Security sandbox preflight failed.*synthetic bwrap diagnostic/s);
+  const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Unexpected host setup'); });
+  const check = () => checkSandbox(probe, join(root, 'cli.mjs'), {repository:root,provider:'openrouter',model:''}, {});
+  const host = {cwd:root, env:{}, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'};
+  await writeFile(probe, `#!${process.execPath}\nconsole.error('synthetic provider diagnostic'); process.exitCode = 1;\n`, {mode:0o755});
+  await assert.rejects(ensureSandbox(host, check, execute), /Codex Security sandbox preflight failed.*synthetic provider diagnostic/s);
+  await writeFile(probe, `#!${process.execPath}\nprocess.on('SIGTERM', () => process.exit(0)); process.kill(process.ppid, 'SIGINT'); setInterval(() => {}, 1000);\n`);
+  await assert.rejects(ensureSandbox(host, check, execute), /sandbox preflight was interrupted/);
+  assert.equal(execute.mock.callCount(), 0);
 });
 
 test('Python launcher selection and preflight preserve virtualenv context', async (t) => {
