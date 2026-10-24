@@ -137,9 +137,8 @@ export class LocalDeduplication {
     this.signal?.throwIfAborted();
     this.options ??= (async () => {
       const environment = workbenchEnvironment(this.environment);
-      const pluginRoot = await bundledPluginRoot();
       return {
-        pluginRoot,
+        pluginRoot: await bundledPluginRoot(),
         environment,
         signal: this.signal,
         protectedRoot: [
@@ -150,9 +149,8 @@ export class LocalDeduplication {
         failureMessage: "Could not access local deduplication state",
       };
     })();
-    const options = await this.options;
     const result = await this.workbench(
-      options,
+      await this.options,
       [
         payload.action === "neighbors"
           ? "find-potential-duplicates"

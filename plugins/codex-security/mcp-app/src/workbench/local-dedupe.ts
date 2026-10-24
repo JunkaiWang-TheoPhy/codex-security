@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { resolvedPathText } from "../helpers/helper-files";
 import {
+  compareCodePoints,
   parseJson,
   requireFiniteNumbers,
   stringifyJson,
@@ -124,15 +125,7 @@ function orderedFinding(value: unknown): unknown {
   // Python sorted response keys recursively; preserve the SDK embedding input.
   return Object.fromEntries(
     Object.entries(value)
-      .sort(([left], [right]) => {
-        const a = Array.from(left, (point) => point.codePointAt(0)!);
-        const b = Array.from(right, (point) => point.codePointAt(0)!);
-        for (let index = 0; index < Math.min(a.length, b.length); index++) {
-          const difference = a[index]! - b[index]!;
-          if (difference !== 0) return difference;
-        }
-        return a.length - b.length;
-      })
+      .sort(([left], [right]) => compareCodePoints(left, right))
       .map(([key, item]) => [key, orderedFinding(item)]),
   );
 }
