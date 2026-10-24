@@ -63,11 +63,25 @@ export function workflowDigest(value: unknown): string {
   return createHash("sha256").update(json).digest("hex");
 }
 
-/** Shared request identity for registered scans and opt-in findings workflows. */
+/** Registered scans identify prepared knowledge by staged names and text. */
 export function scanRequestDigest(
   config: CodexSecurityConfig,
   options: ScanOptions,
   repository?: string,
+): string {
+  return requestDigest(
+    config,
+    options,
+    repository,
+    options.knowledgeBaseSnapshot?.documents,
+  );
+}
+
+function requestDigest(
+  config: CodexSecurityConfig,
+  options: ScanOptions,
+  repository?: string,
+  stagedDocuments?: Readonly<Record<string, string>>,
 ): string {
   return workflowDigest({
     config,
@@ -83,15 +97,12 @@ export function scanRequestDigest(
             )
           : (options.target ?? "repository"),
       mode: options.mode ?? DEFAULT_SCAN_MODE,
-      // Prepared campaign context is identified by its staged names and text.
-      knowledgeBasePaths:
-        options.knowledgeBaseSnapshot === undefined
-          ? options.knowledgeBasePaths
-          : undefined,
-      knowledgeBaseSnapshot:
-        options.knowledgeBaseSnapshot === undefined
-          ? undefined
-          : { documents: options.knowledgeBaseSnapshot.documents },
+      ...(stagedDocuments === undefined
+        ? {}
+        : {
+            knowledgeBasePaths: undefined,
+            knowledgeBaseSnapshot: { documents: stagedDocuments },
+          }),
       outputDir:
         options.outputDir === undefined
           ? undefined
@@ -154,6 +165,21 @@ export class FindingWorkflow {
 
   async bind(binding: WorkflowBinding): Promise<WorkflowState> {
     return (await this.command({ action: "bind", binding }))!;
+  }
+
+  async bindScan(
+    repositoryPath: string,
+    config: CodexSecurityConfig,
+    options: ScanOptions,
+  ): Promise<WorkflowState> {
+    // Preserve a stored documents-only digest when this request reproduces it.
+    const saved =
+      options.knowledgeBaseSnapshot && (await this.get())?.scanRequestDigest;
+    const digest =
+      saved && saved === scanRequestDigest(config, options)
+        ? saved
+        : requestDigest(config, options);
+    return this.bind({ repositoryPath, scanRequestDigest: digest });
   }
 
   async begin(stage: WorkflowStage): Promise<WorkflowState> {

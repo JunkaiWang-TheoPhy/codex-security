@@ -767,12 +767,9 @@ export class CodexSecurity {
     );
     if (options.outputDir !== undefined)
       await workflow.protectArtifacts(options.outputDir);
-    const state = await workflow.bind({
-      repositoryPath: local.repository,
-      scanRequestDigest: scanRequestDigest(this.config, {
-        ...options,
-        ...local.prompts,
-      }),
+    const state = await workflow.bindScan(local.repository, this.config, {
+      ...options,
+      ...local.prompts,
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
