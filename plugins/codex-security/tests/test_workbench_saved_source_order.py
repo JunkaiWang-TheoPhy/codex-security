@@ -22,6 +22,7 @@ from workbench_test_support import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
 import workbench_saved_results as saved
+from workbench import saved_sources
 
 
 def call_workbench(monkeypatch, state, codex_home, *args):
@@ -74,13 +75,18 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "standard-worker-thread",
     )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert not any(row["id"] == "review" for row in coverage["deferred"])
-    assert all(
-        row.get("workerId") == worker_id
-        for row in coverage["deferred"]
-        if row["id"] != "scan-stopped"
+    pending_rows = [row for row in coverage["deferred"] if row.get("reason") == "Review remains."]
+    assert pending_rows == (
+        [
+            {
+                **pending["coverage"]["deferred"][0],
+                "id": f"{worker_id}-attempt-1-deferred-1",
+                "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+            }
+        ]
+        if latest_pending
+        else []
     )
-    assert any(row["id"] == f"{worker_id}/review" for row in coverage["deferred"]) is latest_pending
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
         == frozen
@@ -106,7 +112,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         result.write_bytes(result.read_bytes())
         set_fixture_mtime(result, 300)
     directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
-    children = saved._children
+    children = saved_sources._children
     published = []
 
     def publish_after_listing(root, relative):
@@ -118,7 +124,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
             published.append(checkpoint)
         return names
 
-    monkeypatch.setattr(saved, "_children", publish_after_listing)
+    monkeypatch.setattr(saved_sources, "_children", publish_after_listing)
     call_workbench(
         monkeypatch,
         state,
@@ -129,15 +135,16 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     )
     assert len(published) == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    expected_id = f"{worker_id}/review" if layout == "worker" else "review"
+    expected = pending["coverage"]["deferred"][0]
     if layout == "worker":
-        assert not any(row["id"] == "review" for row in coverage["deferred"])
-        assert all(
-            row.get("workerId") == worker_id
-            for row in coverage["deferred"]
-            if row["id"] != "scan-stopped"
-        )
-    assert any(row["id"] == expected_id for row in coverage["deferred"])
+        expected = {
+            **expected,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+        }
+    assert [row for row in coverage["deferred"] if row.get("reason") == "Review remains."] == [
+        expected
+    ]
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert published[0].relative_to(scan_dir).as_posix() in sources
     assert any("/checkpoint-heads/" in f"/{path}" for path in sources)
