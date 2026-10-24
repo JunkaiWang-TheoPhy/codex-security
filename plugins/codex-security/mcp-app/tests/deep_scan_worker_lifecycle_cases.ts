@@ -19,7 +19,6 @@ export function createWorkerLifecycleCases({
   fakeCodexFixture,
   trustedParentSandbox,
   withWorkerFixture,
-  assertConfigOverrides,
   restoreEnv,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
@@ -34,10 +33,6 @@ export function createWorkerLifecycleCases({
       workingDirectory: string,
     ) => Promise<Result>,
   ) => Promise<Result>;
-  assertConfigOverrides: (
-    args: readonly string[],
-    values: Record<string, string | number | boolean | undefined>,
-  ) => void;
   restoreEnv: (name: string, value: string | undefined) => void;
   codexWorkerTurnError: typeof WorkerErrors.codexWorkerTurnError;
   DeepScanNonRetryableError: typeof WorkerErrors.DeepScanNonRetryableError;
@@ -46,7 +41,7 @@ export function createWorkerLifecycleCases({
     testCompletedWorkerDrainPreservesCancellation,
     testCancelCompletedWorkerDrain,
     testCompletedWorkerFlushesBeforeSettling,
-    testUnbudgetedCompletedWorkerReturns,
+    testCompletedWorkerClosesIdleServer,
     testUsageLimitClassification,
     testWorkerTerminalEvents,
   };
@@ -67,7 +62,6 @@ export function createWorkerLifecycleCases({
     pendingStart = false,
   ) {
     const fixture = await fakeCodexFixture();
-    const restoreDrain = await budgetedWorkerFixture(fixture);
     const saved = [
       "CODEX_CLI_PATH",
       "CODEX_HOME",
@@ -98,7 +92,7 @@ export function createWorkerLifecycleCases({
       await writeFile(configPath, "");
       await writeFile(
         workerConfigPath,
-        '[worker_runtime]\ndrain_session_records = true\nnative_profile = "completion_fixture"\n',
+        '[worker_runtime]\nnative_profile = "completion_fixture"\n',
       );
       await writeFile(
         path.join(home, "completion_fixture.config.toml"),
@@ -180,9 +174,6 @@ export function createWorkerLifecycleCases({
         assert.equal(invocation.argv.includes("--profile"), false);
       else assertFlagPair(invocation.argv, "--profile", "completion_fixture");
       assert.equal(invocation.thread.method === "thread/resume", resumed);
-      assertConfigOverrides(invocation.argv, {
-        drain_session_records: undefined,
-      });
 
       controller.abort("coordinator canceled its worker");
       await assert.rejects(execution, /abort|coordinator canceled/i);
@@ -246,13 +237,11 @@ export function createWorkerLifecycleCases({
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
       for (const [name, value] of saved) restoreEnv(name, value);
-      restoreDrain();
     }
   }
 
   async function testCancelCompletedWorkerDrain() {
     const fixture = await fakeCodexFixture();
-    const restoreDrain = await budgetedWorkerFixture(fixture);
     const previousPath = process.env.CODEX_CLI_PATH;
     process.env.CODEX_CLI_PATH = fixture.executablePath;
     const controller = new AbortController();
@@ -311,13 +300,11 @@ export function createWorkerLifecycleCases({
         } catch {}
       await execution?.catch(() => {});
       restoreEnv("CODEX_CLI_PATH", previousPath);
-      restoreDrain();
     }
   }
 
   async function testCompletedWorkerFlushesBeforeSettling() {
     const fixture = await fakeCodexFixture();
-    const restoreDrain = await budgetedWorkerFixture(fixture);
     const previousPath = process.env.CODEX_CLI_PATH;
     process.env.CODEX_CLI_PATH = fixture.executablePath;
     const controller = new AbortController();
@@ -383,29 +370,10 @@ export function createWorkerLifecycleCases({
       }
       process.removeListener("uncaughtException", captureUnexpectedError);
       restoreEnv("CODEX_CLI_PATH", previousPath);
-      restoreDrain();
     }
   }
 
-  async function budgetedWorkerFixture(
-    fixture: Awaited<ReturnType<typeof fakeCodexFixture>>,
-  ) {
-    const saved = [
-      "CODEX_SECURITY_CONFIG_PATH",
-      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-    ].map((name) => [name, process.env[name]] as const);
-    const config = path.join(fixture.root, "budget-config.toml");
-    const worker = path.join(fixture.root, "budget-worker.toml");
-    await writeFile(config, "");
-    await writeFile(worker, "[worker_runtime]\ndrain_session_records = true\n");
-    process.env.CODEX_SECURITY_CONFIG_PATH = config;
-    process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = worker;
-    return () => {
-      for (const [name, value] of saved) restoreEnv(name, value);
-    };
-  }
-
-  async function testUnbudgetedCompletedWorkerReturns() {
+  async function testCompletedWorkerClosesIdleServer() {
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumed of [false, true]) {
         await withWorkerFixture(
@@ -454,7 +422,7 @@ export function createWorkerLifecycleCases({
                     controller.abort("fixture completion bound");
                     reject(
                       new Error(
-                        "unbudgeted worker did not close its idle app-server",
+                        "completed worker did not close its idle app-server",
                       ),
                     );
                   }, 5_000);

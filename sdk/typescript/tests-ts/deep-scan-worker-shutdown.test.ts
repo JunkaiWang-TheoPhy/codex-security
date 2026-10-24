@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
 import {
+  execFile,
   spawn,
   type ChildProcess,
   type SpawnOptions,
 } from "node:child_process";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { getEventListeners } from "node:events";
 import { loadBundledRuntime } from "./plugin-root.js";
 import { nodeCommand } from "./support/shell.js";
@@ -79,7 +82,6 @@ async function bundledWorkerExecutor(
       | "shutdown-failure"
       | "missing-terminal";
     holdClose?: boolean;
-    drainSessionRecords?: boolean;
     preflight?: () => Promise<{ useOpenAiApiKey: boolean }>;
   } = {},
 ) {
@@ -200,10 +202,7 @@ async function bundledWorkerExecutor(
       SYNTHETIC_WORKER_MODE: options.mode ?? "completed",
       SYNTHETIC_WORKER_HOLD_CLOSE: String(options.holdClose ?? false),
     }),
-    async () => ({
-      config: {},
-      drainSessionRecords: options.drainSessionRecords ?? false,
-    }),
+    async () => ({ config: {} }),
     () => undefined,
     options.preflight ?? (async () => ({ useOpenAiApiKey: false })),
     () => undefined,
@@ -277,43 +276,37 @@ test("settles completed bundled Deep Scan workers after terminal and EOF", async
   }
 });
 
-test.each([false, true])(
-  "drains completed bundled Deep Scan workers during coordinator cancellation (drain=%p)",
-  async (drainSessionRecords) => {
-    const controller = new AbortController();
-    const cancellation = new Error(
-      "coordinator canceled its remaining workers during cleanup",
-    );
-    const fixture = await bundledWorkerExecutor({
-      holdClose: true,
-      drainSessionRecords,
+test("drains completed bundled Deep Scan workers during coordinator cancellation", async () => {
+  const controller = new AbortController();
+  const cancellation = new Error(
+    "coordinator canceled its remaining workers during cleanup",
+  );
+  const fixture = await bundledWorkerExecutor({ holdClose: true });
+  let settled = false;
+  const outcome = fixture.run(controller.signal).finally(() => {
+    settled = true;
+  });
+  const observed = outcome.then(
+    (result) => ({ result }),
+    (error: unknown) => ({ error }),
+  );
+  try {
+    await fixture.eof;
+    expect(settled).toBe(false);
+    controller.abort(cancellation);
+    expect(settled).toBe(false);
+    fixture.release();
+    expect(await observed).toMatchObject({
+      error: { name: "AbortError", cause: cancellation },
     });
-    let settled = false;
-    const outcome = fixture.run(controller.signal).finally(() => {
-      settled = true;
-    });
-    const observed = outcome.then(
-      (result) => ({ result }),
-      (error: unknown) => ({ error }),
-    );
-    try {
-      await fixture.eof;
-      expect(settled).toBe(false);
-      controller.abort(cancellation);
-      expect(settled).toBe(false);
-      fixture.release();
-      expect(await observed).toMatchObject({
-        error: { name: "AbortError", cause: cancellation },
-      });
-      expect(
-        fixture.requests.some(({ method }) => method === "turn/interrupt"),
-      ).toBe(false);
-    } finally {
-      await fixture.cleanup();
-      await outcome.catch(() => {});
-    }
-  },
-);
+    expect(
+      fixture.requests.some(({ method }) => method === "turn/interrupt"),
+    ).toBe(false);
+  } finally {
+    await fixture.cleanup();
+    await outcome.catch(() => {});
+  }
+});
 
 test("propagates bundled Deep Scan worker shutdown failures", async () => {
   const fixture = await bundledWorkerExecutor({ mode: "shutdown-failure" });
@@ -408,3 +401,40 @@ test("rejects bundled worker EOF without a terminal turn", async () => {
     await fixture.cleanup();
   }
 });
+
+for (const boundary of [
+  "lifecycle",
+  "runtime settings",
+  "executable selection",
+  "diagnostics",
+]) {
+  test(`Deep worker ${boundary} at the child-process boundary`, async () => {
+    // Keep each portable boundary in the SDK's macOS and Windows test shards.
+    const { stdout, stderr } = await promisify(execFile)(
+      "node",
+      [
+        "--experimental-strip-types",
+        "--test-reporter=tap",
+        "--test-name-pattern",
+        `^Deep worker ${boundary}`,
+        fileURLToPath(
+          new URL(
+            "../../../plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
+            import.meta.url,
+          ),
+        ),
+      ],
+      { timeout: 110_000 },
+    );
+    const passed = new RegExp(`^ok [0-9]+ - Deep worker ${boundary}\\r?$`, "m");
+    if (!passed.test(stdout)) {
+      throw Object.assign(
+        new Error(`No passing Deep worker ${boundary} group.`),
+        {
+          stdout,
+          stderr,
+        },
+      );
+    }
+  }, 120_000);
+}

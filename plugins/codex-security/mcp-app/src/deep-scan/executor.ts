@@ -73,7 +73,6 @@ interface CodexSdkWorkerRuntimeSettings {
   preflightProviderOverrides?: string[];
   privateProviders?: Record<string, unknown>;
   nativeProfile?: string;
-  drainSessionRecords?: boolean;
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -562,11 +561,9 @@ async function workerRuntimeSettings(
   const {
     environment: workerEnvironment,
     native_profile: nativeProfile,
-    drain_session_records: drainSessionRecords,
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
-  settings.drainSessionRecords = drainSessionRecords === true;
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }
