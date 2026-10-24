@@ -162,6 +162,58 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     assert checkpoint.read_bytes() == original
 
 
+@pytest.mark.parametrize("candidate_id", ["sparse", None], ids=["explicit", "anonymous"])
+def test_discarded_worker_evidence_preserves_other_surface_dispositions(
+    workbench_api, workbench_db, deadline_scan, candidate_id
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    sparse = worker_finding(scan, "incomplete")
+    sparse.pop("codeEvidence")
+    link = {"candidateId": candidate_id} if candidate_id else {}
+    sparse["provenance"].update(link)
+    retained = worker_finding(scan, "retained")
+    retained["provenance"]["candidateId"] = "complete"
+    surfaces = [
+        {"id": "one", "label": "Incomplete finding", "disposition": "reported", **link},
+        {
+            "id": "two",
+            "label": "Complete finding",
+            "disposition": "reported",
+            "candidateId": "complete",
+        },
+        {
+            "id": "three",
+            "label": "Independent review",
+            "disposition": "no_issue_found",
+            "candidateId": "independent",
+        },
+    ]
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, findings=[sparse, retained], surfaces=surfaces),
+    )
+    original = checkpoint.read_bytes()
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert sorted(
+        (row["label"], row["disposition"])
+        for row in coverage["surfaces"]
+        if row.get("workerId") == worker_id
+    ) == [
+        ("Complete finding", "reported"),
+        ("Incomplete finding", "needs_follow_up"),
+        ("Independent review", "no_issue_found"),
+    ]
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert {row["title"] for row in findings} == {scan.findings[0]["title"], retained["title"]}
+    assert json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    assert checkpoint.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "invalid_terminal", [False, True], ids=["valid-terminal", "invalid-terminal"]
 )
