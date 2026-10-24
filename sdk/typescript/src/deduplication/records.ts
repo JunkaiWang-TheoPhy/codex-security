@@ -37,6 +37,7 @@ function reviewValidation<T>(
 ) {
   let aborted = false;
   let abortReason: unknown;
+  let ended = false;
   const result = (value: unknown, detailed = detailedErrors): T => {
     if (aborted) throw abortReason;
     signal?.throwIfAborted();
@@ -44,11 +45,21 @@ function reviewValidation<T>(
     return validator(value, detailed);
   };
   return {
-    result,
+    result: (value: unknown): T => {
+      ended = true;
+      return result(value);
+    },
     preflight: (value: unknown): void => {
+      if (ended) {
+        if (aborted) throw abortReason;
+        signal?.throwIfAborted();
+        throw new Error("The review has already ended.");
+      }
       result(value, true);
     },
     close: () => {
+      if (!validator) return;
+      ended = true;
       validator = undefined;
       aborted = signal?.aborted ?? false;
       if (aborted) abortReason = signal?.reason;
@@ -183,35 +194,39 @@ export async function deduplicateRecords(
       const validation = reviewValidation(validate, signal, throwReviewErrors);
       try {
         return await abortable(async () => {
-          signal?.throwIfAborted();
-          return validation.result(
-            await options.reviewRunner.run(
-              {
-                ...review,
-                requestId: randomUUID(),
-                attribution: recordsReviewAttribution(
-                  findingIds,
-                  references,
-                  relationships,
-                ),
-                trustedInstructions: [
-                  sourceReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningInstructions
-                    : pairReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningFindingFormatInstructions
-                    : pairFindingFormatInstructions,
-                ].join("\n\n"),
-                findingSchema: structuredClone(findingSchema()),
-              },
-              Object.defineProperty({ signal }, "validate", {
-                value: validation.preflight,
-                writable: true,
-                configurable: true,
-              }),
-            ),
-          );
+          try {
+            signal?.throwIfAborted();
+            return validation.result(
+              await options.reviewRunner.run(
+                {
+                  ...review,
+                  requestId: randomUUID(),
+                  attribution: recordsReviewAttribution(
+                    findingIds,
+                    references,
+                    relationships,
+                  ),
+                  trustedInstructions: [
+                    sourceReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningInstructions
+                      : pairReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningFindingFormatInstructions
+                      : pairFindingFormatInstructions,
+                  ].join("\n\n"),
+                  findingSchema: structuredClone(findingSchema()),
+                },
+                Object.defineProperty({ signal }, "validate", {
+                  value: validation.preflight,
+                  writable: true,
+                  configurable: true,
+                }),
+              ),
+            );
+          } finally {
+            validation.close();
+          }
         }, signal);
       } catch (error) {
         // Records mode discards the batch after any failed review.

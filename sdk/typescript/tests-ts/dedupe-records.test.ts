@@ -874,20 +874,24 @@ test.each(["refusal", "cleanup", "decision"])(
 test("SDK validation propagates cancellation even after the runner receives a candidate", async () => {
   const controller = new AbortController();
   const started = Promise.withResolvers<(value: unknown) => void>();
+  const finish = Promise.withResolvers<unknown>();
   const reason = new Error("Review deadline expired");
   const done = deduplicateRecords(input(), {
     signal: controller.signal,
     throwReviewErrors: true,
     reviewRunner: {
-      async run(_request, options) {
+      run(_request, options) {
         started.resolve(options!.validate!);
-        return await new Promise(() => {});
+        return finish.promise;
       },
     },
   });
   const validate = await started.promise;
   controller.abort(reason);
   await expect(done).rejects.toBe(reason);
+  expect(() => validate({})).toThrow(reason);
+  finish.resolve({});
+  await finish.promise;
   expect(() => validate({})).toThrow(reason);
 });
 
@@ -1002,6 +1006,63 @@ test.each([false, true])(
 );
 
 test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "settling the runner revokes preflight (signal: %s, rejection: %s)",
+  async (withSignal, reject) => {
+    const data = input();
+    data.observations = data.observations.slice(0, 2);
+    data.candidateRelationships = [
+      { observationId: "a", candidateObservationIds: ["b"] },
+    ];
+    const ready = Promise.withResolvers<(value: unknown) => void>();
+    const finish = Promise.withResolvers<unknown>();
+    const candidate = {
+      decisions: {
+        "pair-1": { decision: "DISTINCT", rationale: "Synthetic distinction" },
+      },
+    };
+    let finalChecked = false;
+    const done = deduplicateRecords(data, {
+      signal: withSignal ? new AbortController().signal : undefined,
+      reviewRunner: {
+        run(_request, options) {
+          ready.resolve(options!.validate!);
+          return finish.promise;
+        },
+      },
+    });
+    const validate = await ready.promise;
+    if (reject) finish.reject(new Error("Synthetic runner rejection"));
+    else
+      finish.resolve({
+        get decisions() {
+          finalChecked = true;
+          return candidate.decisions;
+        },
+      });
+    const late = Promise.withResolvers<unknown>();
+    queueMicrotask(() => {
+      try {
+        validate(candidate);
+        late.resolve(undefined);
+      } catch (error) {
+        late.resolve(error);
+      }
+    });
+    expect((await done).status).toBe(reject ? "unresolved" : "completed");
+    expect(finalChecked).toBe(!reject);
+    expect(await late.promise).toBeInstanceOf(Error);
+    expect(((await late.promise) as Error).message).toBe(
+      "The review has already ended.",
+    );
+  },
+);
+
+test.each([
   ["preflight", "Zod"],
   ["final", "Zod"],
   ["preflight", "import"],
@@ -1108,7 +1169,7 @@ test("detailed finding feedback releases root and nested validator state", () =>
     try { requireFinding(invalid, true); } catch (error) { message = error.message; }
     const rejected = compiled.at(-1);
     const rootErrors = rejected.errors;
-    const nestedErrors = rejected.schemaEnv.refs["#/$defs/dataFlow"].validate.errors;
+    const nestedErrors = Object.values(rejected.schemaEnv.refs).flatMap(ref => typeof ref.validate === "function" ? [ref.validate.errors] : []);
     requireFinding(valid, true);
     const detailedReusedAfterRejection = rejected === compiled.at(-1);
     const detailed = compiled.at(-1);
@@ -1134,7 +1195,7 @@ test("detailed finding feedback releases root and nested validator state", () =>
   expect(result.message).toContain("/attackPath/dataFlow/transformations");
   expect(result.rootErrors).toBeNull();
   expect(result.detailedReusedAfterRejection).toBe(true);
-  expect(result.nestedErrors).toBeNull();
+  expect(result.nestedErrors).toEqual(result.nestedErrors.map(() => null));
   expect(result.detailedReused).toBe(true);
   expect(result.preserved).toBe(true);
   expect(result.reusedAfterThrow).toBe(true);

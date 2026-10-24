@@ -51,6 +51,7 @@ export function requireFinding(
   validator ??= new Ajv2020({ strict: false }).compile<Finding>(
     findingSchema(),
   );
+  let valid = false;
   try {
     if (!validator(value)) {
       const failure = new InvalidFindingError(
@@ -71,9 +72,10 @@ export function requireFinding(
         });
       throw failure;
     }
+    valid = true;
     return value;
   } finally {
     // Compiled $ref validators retain their own error arrays.
-    clearValidationErrors(validator);
+    if (!valid) clearValidationErrors(validator);
   }
 }
