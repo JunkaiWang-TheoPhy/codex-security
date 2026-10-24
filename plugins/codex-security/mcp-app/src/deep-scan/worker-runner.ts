@@ -581,6 +581,7 @@ export class DeepScanWorkerRunner {
       await fs.cp(artifactDir, attemptRoot, {
         recursive: true,
         preserveTimestamps: true,
+        verbatimSymlinks: true,
         filter: async (source) => {
           const entry = await fs.lstat(source);
           return (

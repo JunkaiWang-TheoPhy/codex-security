@@ -71,6 +71,23 @@ test(
           contents,
         );
       }
+      const resumedContents = "Synthetic resumed analysis.\n";
+      await writeFile(
+        path.join(workspace, "saved-analysis.txt"),
+        resumedContents,
+      );
+      assert.equal(
+        await readFile(path.join(workspace, "analysis-link"), "utf8"),
+        resumedContents,
+      );
+      assert.equal(
+        await readFile(path.join(archive, "saved-analysis.txt"), "utf8"),
+        contents,
+      );
+      assert.equal(
+        await readFile(path.join(archive, "analysis-link"), "utf8"),
+        contents,
+      );
       assert.ok((await lstat(path.join(workspace, "worker.pipe"))).isFIFO());
       await assert.rejects(lstat(path.join(archive, "worker.pipe")), {
         code: "ENOENT",
