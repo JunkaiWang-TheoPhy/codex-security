@@ -184,8 +184,10 @@ answer, identifying the first failing finding field. It returns void on success 
 `InvalidDeduplicationDecision` for a rejected decision. Other exceptions propagate.
 Access it on the original options object; the callback is non-enumerable and omitted
 when options are cloned or spread.
-The callback is valid only while that runner is active; retained callbacks reject
-after the review ends and release the review's findings.
+The SDK revokes the callback when it observes runner settlement or cancellation.
+Handlers registered by the runner may run before the SDK observes settlement.
+Adapters must stop accepting submissions before settling their runner; preflight
+success does not prove that a remote review is still active.
 
 Set `throwReviewErrors: true` on `deduplicateRecords` to receive typed decision
 failures and preserve other review errors instead of returning an unresolved batch.
