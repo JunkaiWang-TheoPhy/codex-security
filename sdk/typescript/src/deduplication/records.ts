@@ -105,7 +105,6 @@ export async function deduplicateRecords(
   const { signal } = options;
   signal?.throwIfAborted();
   const { throwReviewErrors } = options;
-  let reviewRunner: DeduplicationReviewRunner | undefined;
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -164,9 +163,8 @@ export async function deduplicateRecords(
       try {
         return await abortable(async () => {
           signal?.throwIfAborted();
-          reviewRunner ??= options.reviewRunner;
           return validateDecision(
-            await reviewRunner.run(
+            await options.reviewRunner.run(
               {
                 ...review,
                 requestId: randomUUID(),

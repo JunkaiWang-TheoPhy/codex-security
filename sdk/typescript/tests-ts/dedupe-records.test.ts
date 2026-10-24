@@ -1072,3 +1072,22 @@ test.each(["empty", "cancelled"])(
     else expect(result).toHaveProperty("status", "completed");
   },
 );
+
+test("review-scoped provider getters retain their existing lifecycle", async () => {
+  let providers = 0;
+  const result = await deduplicateRecords(input(), {
+    get reviewRunner() {
+      providers++;
+      let closed = false;
+      return {
+        async run(request: DeduplicationReviewRequest) {
+          if (closed) throw new Error("Synthetic provider already closed");
+          closed = true;
+          return answer(request);
+        },
+      };
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(providers).toBe(6);
+});
