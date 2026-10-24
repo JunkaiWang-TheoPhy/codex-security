@@ -1879,6 +1879,8 @@ process.stdout.write(JSON.stringify({
       null,
     ],
     ["could not open responseStatus=401/cache", null],
+    ["permission denied opening C:\\synthetic\\response_code=403\\cache", null],
+    ["could not open /synthetic/status_code=429/cache", null],
     ["401 Unauthorized", "Authentication failed"],
     ["403 Forbidden", "selected model is unavailable"],
     ["429 Too Many Requests", "rate limited"],
