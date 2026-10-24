@@ -19,7 +19,7 @@ const ci = Bun.YAML.parse(
       name: string;
       needs?: string | string[];
       if?: string;
-      strategy?: { matrix: Record<string, string[]> };
+      strategy?: { matrix: Record<string, string[]>; "fail-fast"?: boolean };
       steps: { name: string; if?: string; run: string }[];
     }
   >;
@@ -63,14 +63,6 @@ const aggregates = [
   ["ci", {}, "ci"] as const,
   ...ci.jobs["required-test"]!.strategy!.matrix["os"]!.map(
     (os) => ["required-test", { os }, `${os} / node-22`] as const,
-  ),
-  ...ci.jobs["windows"]!.strategy!.matrix["node"]!.map(
-    (node) =>
-      [
-        "windows",
-        { node },
-        `windows-latest / node-${node === "22.13.0" ? "22" : node}`,
-      ] as const,
   ),
 ];
 
@@ -121,7 +113,6 @@ test("all source jobs depend on classification and titles cannot block source ch
     "ubuntu-latest / node-22",
     "macos-latest / node-22",
     "windows-latest / node-22",
-    "windows-latest / node-24",
   ]);
   expect(ci.on.pull_request.types).toEqual([
     "opened",
@@ -368,18 +359,17 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
 }
 
 test("legacy required check names propagate the final CI gate result", () => {
-  for (const id of ["required-test", "windows"]) {
-    const aggregate = ci.jobs[id]!;
-    expect(aggregate.needs).toContain("ci");
-    expect(aggregate.if).toContain("always()");
-    const gate = aggregate.steps.find(
-      (step) => step.name === "Require CI gate",
-    )!;
-    expect(gate.run).toBe("exit 1");
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
-        result !== "success",
-      );
-    }
+  const forwarder = ci.jobs["required-test"]!;
+  expect(forwarder.strategy?.["fail-fast"]).toBe(false);
+  expect(new Set([forwarder.needs].flat())).toEqual(
+    new Set(["classify-changes", "ci"]),
+  );
+  expect(forwarder.if).toContain("always()");
+  const gate = forwarder.steps.find((step) => step.name === "Require CI gate")!;
+  expect(gate.run).toBe("exit 1");
+  for (const result of ["success", "failure", "cancelled", "skipped"]) {
+    expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
+      result !== "success",
+    );
   }
 });
