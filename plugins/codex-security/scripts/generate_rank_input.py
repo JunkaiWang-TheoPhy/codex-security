@@ -36,7 +36,7 @@ from workbench_target import (
     git_blob_samples,
     git_command,
     git_directory_snapshot_paths,
-    is_worktree_regular_file,
+    local_diff_status,
 )
 
 JsonRow = dict[str, object]
@@ -281,10 +281,10 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         )
         linked_prefixes: dict[str, bool] = {}
         return sorted(
-            (path, status)
+            (path, selected)
             for path, status in combined.items()
             if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
-            and (status == "D" or is_worktree_regular_file(repo, path, linked_prefixes))
+            and (selected := local_diff_status(repo, path, status, linked_prefixes)) is not None
         )
     raise SystemExit(f"Unknown diff mode: {mode}")
 

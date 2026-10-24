@@ -690,13 +690,19 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
     return path
 
 
-def is_worktree_regular_file(target: Path, path: Path, linked_prefixes: dict[str, bool]) -> bool:
+def local_diff_status(
+    target: Path, path: Path, status: str, linked_prefixes: dict[str, bool]
+) -> str | None:
+    if status == "D":
+        return status
     try:
-        return _directory_link_boundary(target, path, linked_prefixes) == path and stat.S_ISREG(
-            path.lstat().st_mode
-        )
+        if _directory_link_boundary(target, path, linked_prefixes) != path:
+            # Git can report a modification through a junction. Its base file
+            # is gone from the local view, so read only the committed blob.
+            return "D" if status == "M" else None
+        return status if stat.S_ISREG(path.lstat().st_mode) else None
     except (FileNotFoundError, NotADirectoryError):
-        return False
+        return None
 
 
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:

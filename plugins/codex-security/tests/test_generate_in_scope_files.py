@@ -679,25 +679,35 @@ def test_diff_inventory_combines_staged_and_unstaged_changes(tmp_path: Path) -> 
     ]
 
 
-def test_local_diff_inventory_skips_staged_paths_below_directory_links(tmp_path: Path) -> None:
+def test_local_diff_inventory_uses_base_files_below_directory_links(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
+    changed = write_file(repository, "linked/changed.py", b"version = 1\n")
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
-    staged = write_file(repository, "staged/routes.py")
-    git(repository, "add", "staged")
+    base = git(repository, "rev-parse", "HEAD")
+    changed.write_bytes(b"version = 2\n")
+    git(repository, "commit", "-qam", "change tracked file")
+    staged = write_file(repository, "linked/staged.py")
+    git(repository, "add", "linked/staged.py")
+    # Make Git report the indexed modification on POSIX even after replacing the directory.
+    git(repository, "update-index", "--skip-worktree", "linked/changed.py")
+    changed.unlink()
     staged.unlink()
     staged.parent.rmdir()
+    external = tmp_path / "external"
+    write_file(external, "changed.py", b"binary\0content")
+    write_file(external, "staged.py")
     try:
-        staged.parent.symlink_to("app", target_is_directory=True)
+        staged.parent.symlink_to(external, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks are unavailable")
 
     output = tmp_path / "in_scope_files.txt"
     result = run_inventory(
-        repository, ".", output, arguments=["--diff-base", "HEAD", "--diff-mode", "local-patch"]
+        repository, ".", output, arguments=["--diff-base", base, "--diff-mode", "local-patch"]
     )
     assert result.returncode == 0, result.stderr
-    assert output.read_bytes() == b""
+    assert output.read_text(encoding="utf-8").splitlines() == ["linked/changed.py"]
 
 
 def test_revision_inventory_checks_the_selected_revision_not_the_worktree(tmp_path: Path) -> None:
