@@ -36,7 +36,6 @@ jobs:
           effort: high
           max-cost: "5"
           fail-on-severity: high
-          upload-artifacts: "true"
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 

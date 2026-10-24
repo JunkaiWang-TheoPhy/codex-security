@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm, stat } from
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureRunnerPath, checkPython, checkSandbox, setupHostedSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
 import { runProcess } from '../src/process.js';
 
 test('tool discovery preserves the selected PATH launcher spelling', async (t) => {
@@ -63,6 +63,8 @@ test('runtime installation accepts npm shell shims and uses the Action Node exec
     await rm(root, { recursive: true, force: true });
   });
   const bin = join(root, 'tools');
+  const repository = join(root, 'checkout');
+  await mkdir(repository);
   await mkdir(bin);
   await symlink(python, join(bin, 'python3'));
   await writeFile(join(bin, 'node'), '#!/bin/sh\nexit 72\n', {mode:0o755});
@@ -79,6 +81,9 @@ fs.writeFileSync(path.join(bin, 'codex-security.mjs'), '// Synthetic installed C
 const packageRoot = path.dirname(bin);
 fs.writeFileSync(path.join(packageRoot, 'package.json'), '{"type":"module"}');
 fs.mkdirSync(path.join(packageRoot, 'dist'));
+fs.writeFileSync(path.join(packageRoot, 'dist/cli.js'), 'export const parseCodexOverrides = (_, model, effort, provider) => ({model, provider});');
+fs.writeFileSync(path.join(packageRoot, 'dist/api.js'), 'export const scanRuntimeCodexConfig = config => config;');
+fs.writeFileSync(path.join(packageRoot, 'dist/config.js'), "export const writeCodexConfig = (file, config) => { process.env.PROBE_CONFIG = JSON.stringify(config); };");
 fs.writeFileSync(path.join(packageRoot, 'dist/runtime.js'), [
   "import { writeFileSync } from 'node:fs';",
   "export function resolveCodexCommand(env) { return {command: env.CODEX_HOME + '/synthetic-codex'}; }",
@@ -92,7 +97,7 @@ NODE
   const libraryPath = (previousLibraryPath === undefined ? '' : previousLibraryPath + ':') + '/synthetic-first-library';
   process.env.LD_LIBRARY_PATH = libraryPath;
   const captured = captureRunnerPath();
-  const runtime = await setupRuntime({actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root});
+  const runtime = await setupRuntime({actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root, repository, provider:'openrouter', model:'example/model'});
   const invocation = JSON.parse(await readFile(join(runtime.root, 'install', 'npm-invocation.json'), 'utf8'));
   assert.equal(invocation.nodePath, process.execPath);
   assert.equal(invocation.cwd, join(runtime.root, 'install'));
@@ -108,9 +113,10 @@ NODE
   const credentials = scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'});
   assert.equal(runtime.env(credentials).PYTHON, 'python3');
   assert.equal(runtime.env(credentials).CODEX_MCP_NODE_PATH, join(runtime.root, 'bin', 'node'));
-  const sandboxInvocation = JSON.parse(await readFile(join(runtime.root, 'sandbox-invocation.json'), 'utf8'));
-  assert.equal(sandboxInvocation.command.command, join(runtime.codexHome, 'synthetic-codex'));
-  assert.equal(sandboxInvocation.env.CODEX_HOME, runtime.codexHome);
+  const sandboxInvocation = JSON.parse(await readFile(join(repository, 'sandbox-invocation.json'), 'utf8'));
+  assert.equal(sandboxInvocation.command.command, join(runtime.root, 'probe-home', 'synthetic-codex'));
+  assert.equal(sandboxInvocation.env.CODEX_HOME, join(runtime.root, 'probe-home'));
+  assert.deepEqual(JSON.parse(sandboxInvocation.env.PROBE_CONFIG), {model:'example/model', provider:'openrouter'});
   assert.equal(sandboxInvocation.env.PATH, invocation.env.PATH);
   assert.equal(sandboxInvocation.env.OPENAI_API_KEY, undefined);
   assert.equal(sandboxInvocation.env.ACTIONS_RUNTIME_TOKEN, undefined);
@@ -148,7 +154,11 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
     return runProcess(sudo, args, options);
   };
   const env = runtimeEnvironment({root, home:root, codexHome:root, stateDirectory:root, runnerPath:`${checkout}:/usr/bin:/bin`});
-  await setupHostedSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24', log:() => {throw new Error('synthetic log failure');}}, execute);
+  let probes = 0;
+  const probe = async () => { if (++probes === 1) throw new Error('Synthetic unavailable sandbox'); };
+  await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24', log:() => {throw new Error('synthetic log failure');}}, probe, execute);
+  assert.equal(probes, 2);
+  await ensureSandbox({cwd:root, env, runnerEnvironment:'github-hosted', imageOS:'ubuntu24'}, probe, execute);
   const calls = (await readFile(join(root, 'setup.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls.map(call => call.args), [
     ['-n','/usr/bin/apt-get','update'],
@@ -163,14 +173,14 @@ test('hosted Ubuntu sandbox setup uses system commands despite checkout PATH sha
   }
   assert.equal(fs.existsSync(join(root, 'checkout-command-ran')), false);
   await writeFile(sudo, `#!${process.execPath}\nconsole.error('synthetic apt diagnostic'); process.exit(17);\n`, {mode:0o755});
-  await assert.rejects(setupHostedSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, execute),
+  await assert.rejects(ensureSandbox({cwd:root,env,runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new Error('Sandbox unavailable'); }, execute),
     /Ubuntu sandbox setup failed: sudo -n \/usr\/bin\/apt-get update \(exit 17\).*synthetic apt diagnostic/s);
 });
 
 test('sandbox setup leaves self-hosted runners and other images unchanged', async t => {
   const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Sandbox provisioning must not run.'); });
   for (const [runnerEnvironment,imageOS] of [['self-hosted','ubuntu24'],['github-hosted','ubuntu22'],[undefined,undefined]])
-    await setupHostedSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment,imageOS}, execute);
+    await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment,imageOS}, async () => { throw new Error('Runner sandbox unavailable'); }, execute), /Runner sandbox unavailable/);
   assert.equal(execute.mock.callCount(), 0);
 });
 
@@ -178,21 +188,16 @@ test('sandbox setup skips Docker job containers with inherited hosted Ubuntu lab
   const existsSync = fs.existsSync;
   t.mock.method(fs, 'existsSync', (path: fs.PathLike) => path === '/.dockerenv' ? true : existsSync(path));
   const execute = t.mock.fn<typeof runProcess>(async () => { throw new Error('Container provisioning must not run.'); });
-  await setupHostedSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, execute);
+  await assert.rejects(ensureSandbox({cwd:'/unused',env:{PATH:'/no-sudo'},runnerEnvironment:'github-hosted',imageOS:'ubuntu24'}, async () => { throw new Error('Container sandbox unavailable'); }, execute), /Container sandbox unavailable/);
   assert.equal(execute.mock.callCount(), 0);
 });
 
 test('sandbox preflight preserves the shipped SDK diagnostic and fails before scanning', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-sandbox-failure-')));
   t.after(() => rm(root, {recursive:true,force:true}));
-  await mkdir(join(root, 'bin'));
-  await mkdir(join(root, 'dist'));
-  await writeFile(join(root, 'package.json'), '{"type":"module"}');
-  await writeFile(join(root, 'dist/runtime.js'), `
-    export function resolveCodexCommand() { return {command:'/synthetic-codex'}; }
-    export async function probeCodexSandbox() { throw new Error('synthetic bwrap diagnostic'); }
-  `);
-  await assert.rejects(checkSandbox(process.execPath, join(root, 'bin/codex-security.mjs'), root, {}),
+  const probe = join(root, 'probe');
+  await writeFile(probe, '#!/bin/sh\necho "synthetic bwrap diagnostic" >&2\nexit 1\n', {mode:0o755});
+  await assert.rejects(checkSandbox(probe, join(root, 'cli.mjs'), {repository:root,provider:'openai',model:''}, {}),
     /Codex Security sandbox preflight failed.*synthetic bwrap diagnostic/s);
 });
 

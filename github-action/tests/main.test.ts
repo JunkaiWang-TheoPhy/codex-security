@@ -151,7 +151,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
       try {
         process.exitCode = 0;
         await runAction(root, {
-          setupRuntime: async () => { setups++; await configuration.prepare?.(); await reports(); return runtime; },
+          setupRuntime: async (options) => { setups++; options.log?.('Synthetic provisioning output.'); await configuration.prepare?.(); await reports(); return runtime; },
           cleanupRuntime: async () => { cleanups++; if (configuration.cleanupFails) throw new Error('Synthetic cleanup failure'); },
           runProcess: async (_executable, args, options): Promise<ProcessResult> => {
             processes++; capturedArgs = args; capturedEnvironment = options.env;
@@ -435,7 +435,7 @@ test('verbose false suppresses CLI diagnostics but retains lifecycle and results
   const app = await harness(t); app.setInput('verbose', 'false'); const result = await app.run();
   assert.equal(result.exitCode, 0);
   assert.ok(!result.args.includes('--verbose'));
-  assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
+  assert.doesNotMatch(result.logs, /Synthetic live CLI progress|Synthetic provisioning output/);
   assert.match(result.logs, /Starting security scan/);
   assert.match(result.logs, /Scan: completed/);
 });
@@ -589,11 +589,13 @@ for (const threshold of ['low', 'medium', 'high', 'critical']) {
   test(`dry-run rejects ${threshold} enforcement before runtime setup`, async (t) => {
     const app = await harness(t);
     app.setInput('dry-run', 'true'); app.setInput('fail-on-severity', threshold);
+    app.setInput('summary', 'false');
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
     assert.equal(result.outputs['policy-status'], 'not-evaluated');
     assert.equal(result.outputs['scan-status'], 'failed');
     assert.match(result.logs, /dry-run requires fail-on-severity: none/);
+    assert.equal(result.summary, '');
   });
 }
 

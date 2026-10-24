@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { parseInputs, scanArguments } from '../src/inputs.js';
 import { analyzeResults } from '../src/results.js';
-import { captureRunnerPath, checkPython, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
 const [candidatePackage, candidateVersion] = process.argv.slice(2);
@@ -261,6 +261,14 @@ try {
   await writeRuntimeLauncher(nodeLauncher, process.execPath, 'RUNNER_TRACKING_ID', 'synthetic-cli-job');
   const venvEnv = runtimeEnvironment({root, home, codexHome:env.CODEX_HOME, stateDirectory:env.CODEX_SECURITY_STATE_DIR,
     runnerPath, runnerTrackingId:'synthetic-cli-job', runnerLibraryPath:libraryPath});
+  const shadowBin = join(repository, 'bin');
+  await mkdir(shadowBin);
+  await writeFile(join(shadowBin, 'bwrap'), '#!/bin/sh\n: > "$0.ran"\nexit 70\n', {mode:0o755});
+  await checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:'example/model'}, {
+    ...venvEnv, PATH:shadowBin + delimiter + venvEnv.PATH, CODEX_HOME:join(root, 'probe-home'),
+  });
+  await assert.rejects(readFile(join(shadowBin, 'bwrap.ran')), {code:'ENOENT'});
+  await rm(shadowBin, {recursive:true});
   // Use the published MCP launcher and its actual allowlist without a model turn.
   // The synthetic server reports its marker and one actual Node child's marker.
   const mcpConfig = JSON.parse(await readFile(join(cliPackage, '_bundled_plugin/.mcp.json'), 'utf8')).mcpServers['codex-security'];

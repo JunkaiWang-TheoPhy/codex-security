@@ -37,6 +37,9 @@ export function scanCredentials(provider: ScanCredentials['provider'], source: N
 export interface RuntimeOptions {
   actionRoot: string;
   tempRoot: string;
+  repository: string;
+  provider: ScanCredentials['provider'];
+  model: string;
   log?: (line: string) => void;
 }
 export interface Runtime {
@@ -115,15 +118,18 @@ export async function checkPython(pythonPath: string, cwd: string, env: NodeJS.P
     throw new Error('Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.');
 }
 
-export async function setupHostedSandbox(options: {
+export async function ensureSandbox(options: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   runnerEnvironment?: string;
   imageOS?: string;
   log?: (line: string) => void;
-}, execute = runProcess): Promise<void> {
-  // Docker job containers inherit the host image labels but own their setup.
-  if (options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24' || fs.existsSync('/.dockerenv')) return;
+}, probe: () => Promise<void>, execute = runProcess): Promise<void> {
+  try { await probe(); return; }
+  catch (error) {
+    // Docker job containers inherit the host image labels but own their setup.
+    if (options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24' || fs.existsSync('/.dockerenv')) throw error;
+  }
   const sudo = '/usr/bin/sudo';
   for (const args of [
     ['-n', '/usr/bin/apt-get', 'update'],
@@ -138,20 +144,26 @@ export async function setupHostedSandbox(options: {
     if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
       throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(' ')} (exit ${result.exitCode}). ${result.stderr || result.stdout}`);
   }
+  await probe();
 }
 
-export async function checkSandbox(nodePath: string, cliPath: string, cwd: string, env: NodeJS.ProcessEnv, log?: (line: string) => void): Promise<void> {
+export async function checkSandbox(nodePath: string, cliPath: string, options: Pick<RuntimeOptions, 'repository' | 'provider' | 'model'>, env: NodeJS.ProcessEnv): Promise<void> {
   // Reuse the shipped SDK's executable selection and sandbox probe. No model calls.
   const result = await runProcess(nodePath, ['--input-type=module', '--eval', `
     import { pathToFileURL } from 'node:url';
     import { dirname, join } from 'node:path';
-    const runtime = await import(pathToFileURL(join(dirname(process.argv[1]), '../dist/runtime.js')).href);
+    const [cli, provider, model] = process.argv.slice(1);
+    const fromCli = file => import(pathToFileURL(join(dirname(cli), '../dist', file)).href);
+    const { parseCodexOverrides } = await fromCli('cli.js');
+    const { scanRuntimeCodexConfig } = await fromCli('api.js');
+    const { writeCodexConfig } = await fromCli('config.js');
+    const runtime = await fromCli('runtime.js');
+    const config = parseCodexOverrides([], model || undefined, undefined, provider);
+    await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
     await runtime.probeCodexSandbox(runtime.resolveCodexCommand(process.env), process.env);
-  `, cliPath], {cwd, env, log});
+  `, cliPath, options.provider, options.model], {cwd: options.repository, env});
   if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
     throw new Error(`Codex Security sandbox preflight failed. ${result.stderr || result.stdout}`);
-  try { log?.('Codex sandbox probe succeeded without model calls.'); }
-  catch { /* Optional progress must not interrupt runtime preparation. */ }
 }
 
 /** Restore a captured runner setting after Codex clears an MCP child's environment. */
@@ -186,7 +198,6 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (runnerLibraryPath !== undefined) await writeRuntimeLauncher(join(root, 'bin', 'python3'), pythonPath, 'LD_LIBRARY_PATH', runnerLibraryPath);
     const env = runtimeEnvironment(paths);
     await checkPython(pythonPath, root, env);
-    await setupHostedSandbox({cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log});
     const source = join(actionRoot, 'runtime');
     const lockPath = await regularFile(join(source, 'package-lock.json'));
     const packagePath = await regularFile(join(source, 'package.json'));
@@ -201,13 +212,16 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
     await writeFile(globalConfig, '', { mode: 0o600, flag: 'wx' });
     const install = await runProcess(npmPath, ['ci', '--ignore-scripts', '--include=optional', `--registry=${REGISTRY}`, `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${join(root, 'npm-cache')}`, '--no-audit', '--no-fund', '--loglevel=error'], { cwd: destination, env, timeoutMs: 10 * 60 * 1000, log: options.log });
     if (install.exitCode !== 0 || install.timedOut || install.interrupted) {
-      // npm sometimes writes lock/usage diagnostics to stdout. This process had
-      // no credentials and every physical line is still treated as untrusted.
-      for (const line of safeLogLines(install.stdout)) options.log?.(line);
-      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ', timed out' : ''}${install.interrupted ? ', interrupted' : ''}). Check the prefixed npm diagnostics, registry access, and runner prerequisites.`);
+      // npm can write lockfile diagnostics to stdout.
+      const details = safeLogLines([install.stderr, install.stdout].join('\n')).join('\n');
+      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ', timed out' : ''}${install.interrupted ? ', interrupted' : ''}).\n${details}`);
     }
     const cliPath = await regularFile(join(destination, 'node_modules', '@openai', 'codex-security', 'bin', 'codex-security.mjs'));
-    await checkSandbox(nodePath, cliPath, root, env, options.log);
+    // Codex excludes executables under its working directory during sandbox startup.
+    await ensureSandbox({cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log},
+      () => checkSandbox(nodePath, cliPath, options, {...env, CODEX_HOME: join(root, 'probe-home')}));
+    try { options.log?.('Codex sandbox probe succeeded without model calls.'); }
+    catch { /* Optional progress must not interrupt runtime preparation. */ }
     // Private reports deliberately live outside the disposable credentials/runtime
     // root so downstream upload-sarif remains usable after the post action.
     const resultsDirectory = await mkdtemp(join(tempRoot, 'codex-security-reports-'));

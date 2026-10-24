@@ -56073,7 +56073,7 @@ async function resolveTarget(inputs, event) {
     else if (pr) diffBase = (await git(repository, ["merge-base", pr.base.sha, diffHead])).trim();
     else throw new Error("diff-base is required for diff scans outside pull_request events.");
     if (!SHA.test(diffBase)) throw new Error("Could not resolve the diff base. Fetch full history.");
-    emptyDiff = (await gitResult(repository, ["diff", "--no-ext-diff", "--no-textconv", "--quiet", diffBase, diffHead, "--"], [0, 1])).exitCode === 0;
+    emptyDiff = (await gitResult(repository, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--quiet", diffBase, diffHead, "--"], [0, 1])).exitCode === 0;
   }
   const analysisRef = pr ? `refs/pull/${pr.number ?? event.payload.number}/head` : event.ref;
   const publishable = /^refs\/(heads|tags|pull)\//.test(analysisRef);
@@ -56222,8 +56222,13 @@ async function checkPython(pythonPath, cwd, env) {
   if (result.exitCode !== 0 || result.timedOut || result.interrupted || result.signal)
     throw new Error("Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.");
 }
-async function setupHostedSandbox(options, execute = runProcess) {
-  if (options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) return;
+async function ensureSandbox(options, probe, execute = runProcess) {
+  try {
+    await probe();
+    return;
+  } catch (error2) {
+    if (options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) throw error2;
+  }
   const sudo = "/usr/bin/sudo";
   for (const args of [
     ["-n", "/usr/bin/apt-get", "update"],
@@ -56240,20 +56245,24 @@ async function setupHostedSandbox(options, execute = runProcess) {
     if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
       throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(" ")} (exit ${result.exitCode}). ${result.stderr || result.stdout}`);
   }
+  await probe();
 }
-async function checkSandbox(nodePath, cliPath, cwd, env, log2) {
+async function checkSandbox(nodePath, cliPath, options, env) {
   const result = await runProcess(nodePath, ["--input-type=module", "--eval", `
     import { pathToFileURL } from 'node:url';
     import { dirname, join } from 'node:path';
-    const runtime = await import(pathToFileURL(join(dirname(process.argv[1]), '../dist/runtime.js')).href);
+    const [cli, provider, model] = process.argv.slice(1);
+    const fromCli = file => import(pathToFileURL(join(dirname(cli), '../dist', file)).href);
+    const { parseCodexOverrides } = await fromCli('cli.js');
+    const { scanRuntimeCodexConfig } = await fromCli('api.js');
+    const { writeCodexConfig } = await fromCli('config.js');
+    const runtime = await fromCli('runtime.js');
+    const config = parseCodexOverrides([], model || undefined, undefined, provider);
+    await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
     await runtime.probeCodexSandbox(runtime.resolveCodexCommand(process.env), process.env);
-  `, cliPath], { cwd, env, log: log2 });
+  `, cliPath, options.provider, options.model], { cwd: options.repository, env });
   if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
     throw new Error(`Codex Security sandbox preflight failed. ${result.stderr || result.stdout}`);
-  try {
-    log2?.("Codex sandbox probe succeeded without model calls.");
-  } catch {
-  }
 }
 async function writeRuntimeLauncher(path6, executable, name, value) {
   const quote = (value2) => "'" + value2.replaceAll("'", "'\\''") + "'";
@@ -56288,7 +56297,6 @@ async function setupRuntime(options) {
     if (runnerLibraryPath !== void 0) await writeRuntimeLauncher((0, import_node_path4.join)(root, "bin", "python3"), pythonPath, "LD_LIBRARY_PATH", runnerLibraryPath);
     const env = runtimeEnvironment(paths);
     await checkPython(pythonPath, root, env);
-    await setupHostedSandbox({ cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log });
     const source = (0, import_node_path4.join)(actionRoot, "runtime");
     const lockPath = await regularFile((0, import_node_path4.join)(source, "package-lock.json"));
     const packagePath = await regularFile((0, import_node_path4.join)(source, "package.json"));
@@ -56303,11 +56311,19 @@ async function setupRuntime(options) {
     await (0, import_promises3.writeFile)(globalConfig, "", { mode: 384, flag: "wx" });
     const install = await runProcess(npmPath, ["ci", "--ignore-scripts", "--include=optional", `--registry=${REGISTRY}`, `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${(0, import_node_path4.join)(root, "npm-cache")}`, "--no-audit", "--no-fund", "--loglevel=error"], { cwd: destination, env, timeoutMs: 10 * 60 * 1e3, log: options.log });
     if (install.exitCode !== 0 || install.timedOut || install.interrupted) {
-      for (const line of safeLogLines(install.stdout)) options.log?.(line);
-      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}). Check the prefixed npm diagnostics, registry access, and runner prerequisites.`);
+      const details = safeLogLines([install.stderr, install.stdout].join("\n")).join("\n");
+      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}).
+${details}`);
     }
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
-    await checkSandbox(nodePath, cliPath, root, env, options.log);
+    await ensureSandbox(
+      { cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log },
+      () => checkSandbox(nodePath, cliPath, options, { ...env, CODEX_HOME: (0, import_node_path4.join)(root, "probe-home") })
+    );
+    try {
+      options.log?.("Codex sandbox probe succeeded without model calls.");
+    } catch {
+    }
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);
     return { ...paths, nodePath, cliPath, resultsDirectory, env: (credentials) => runtimeEnvironment(paths, credentials) };
@@ -99599,7 +99615,7 @@ async function runAction(actionRoot, overrides = {}) {
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);
       try {
-        runtime = await deps.setupRuntime({ actionRoot, tempRoot, log: info });
+        runtime = await deps.setupRuntime({ actionRoot, tempRoot, repository: target.repository, provider: inputs.provider, model: inputs.model, log: inputs.verbose ? info : void 0 });
       } finally {
         clearInterval(timer);
       }
@@ -99708,7 +99724,7 @@ async function runAction(actionRoot, overrides = {}) {
         setOutput("sarif-upload-ready", "false");
       }
     }
-    if (inputs?.summary !== false) {
+    if (inputs?.summary ?? getInput("summary") !== "false") {
       try {
         await summary.addRaw(`## Codex Security
 

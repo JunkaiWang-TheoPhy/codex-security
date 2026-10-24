@@ -13,9 +13,9 @@ with access to the selected model. OpenAI is the default provider. See
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
-Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
-The matching `action-vX.Y.Z` release lists the full distribution commit SHA
-and links to the product changelog after the Action has passed release checks.
+Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full distribution SHA from an
+`action-vX.Y.Z` release that includes automatic Ubuntu sandbox setup.
+For older pins, including `action-v0.6.0`, keep the [manual sandbox setup](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
 When using a fork, replace `openai` with the fork owner.
 
 The [repository workflow](examples/repository.yml) below uses `gpt-5.6-sol` and
@@ -52,7 +52,6 @@ jobs:
           effort: high
           max-cost: "5"
           fail-on-severity: none
-          upload-artifacts: "true"
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
@@ -67,10 +66,10 @@ also fail the job. Intentional exclusions and investigation notes do not.
 
 ### Ubuntu sandbox setup
 
-For jobs running directly on GitHub-hosted Ubuntu 24.04 VMs, the Action installs
-`bubblewrap` and `apparmor-profiles` and loads the supplied
-`bwrap-userns-restrict` AppArmor profile. It then verifies that Codex can start
-its sandbox before using the scan credential. No separate setup step is needed.
+The Action checks that Codex can start its sandbox before using the scan
+credential. If the check fails on a GitHub-hosted Ubuntu 24.04 VM, the Action
+installs `bubblewrap` and `apparmor-profiles`, loads the supplied
+`bwrap-userns-restrict` AppArmor profile, and checks startup again.
 
 Self-hosted runners and job containers must provide a working Codex sandbox.
 The Action checks sandbox startup in both, but does not install system packages
@@ -254,6 +253,11 @@ required status check only for branches that do not use a merge queue. The Actio
 does not support `merge_group` events, so this workflow cannot provide the required
 check for a merge queue.
 
+A pull request can change its workflow and still report the same check name.
+Before requiring this check, use an organization ruleset that runs a workflow
+from a protected ref, or require code owner approval for changes to
+`.github/workflows/` and `CODEOWNERS` and dismiss stale approvals.
+
 <!-- action-workflow:pull-request:start -->
 
 ```yaml
@@ -295,7 +299,6 @@ jobs:
           effort: high
           max-cost: "5"
           fail-on-severity: high
-          upload-artifacts: "true"
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 
@@ -379,9 +382,10 @@ two-hour job timeout.
 ## Reports
 
 The Action writes a job summary and source annotations. Set
-`upload-artifacts: 'true'` to add a report-download link to the job summary.
-Reports are retained for seven days by default; use `retention-days` to change
-this. Reports can contain source code and vulnerability details.
+`upload-artifacts: 'true'` to upload full reports and link them from the summary.
+Anyone signed in to GitHub with read access to the repository can download the
+reports, which can contain source code and vulnerability details. Set
+`retention-days` to change the default of seven days.
 
 The job summary includes the configured provider, reported input/cached/output
 token usage, and estimated USD cost, including a range when supplied by the CLI.
@@ -509,9 +513,9 @@ elapsed-time messages only.
 in a separate job. A dry run does not perform the security review required
 by a severity-enforcing job.
 
-The Action now prepares the sandbox for jobs running directly on GitHub-hosted
-Ubuntu 24.04 VMs. Remove the manual Bubblewrap/AppArmor setup step from those
-jobs. Self-hosted runners and job containers still require a preconfigured sandbox.
+Once your Action pin includes automatic sandbox setup, remove the manual
+Bubblewrap/AppArmor step from jobs running directly on GitHub-hosted Ubuntu
+24.04 VMs. Self-hosted runners and job containers still require a preconfigured sandbox.
 
 The workflow examples use a model and cost limit supported by the pinned CLI.
 

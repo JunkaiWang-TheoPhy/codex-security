@@ -38,6 +38,7 @@ jobs:
           SHELLCHECK_OPTS: --severity=warning
         run: |
           actionlint -color
+          actionlint -color github-action/examples/*.yml
           shellcheck docker/verify-container-compose.sh
       - name: Test release progress reporting
         run: node --test .github/scripts/test_release_progress.mjs
