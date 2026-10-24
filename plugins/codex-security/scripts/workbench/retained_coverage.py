@@ -1667,10 +1667,24 @@ def merge_saved_results(
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
+
+    def render_worker_closure(relative, owner, closure):
+        worker = workers_by_id.get(owner)
+        canonical = projected_coverage if parent_is_canonical else {}
+        if projection.is_reviewed_worker(canonical, worker):
+            retained = coverage_origins.retained_closure(
+                closure,
+                worker,
+                drafts_by_path[relative]["coverage"],
+                canonical,
+                reviewed_attempts,
+            )
+            if retained is not None:
+                return retained
+        return _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+
     retained_closures = [
-        closure
-        if owner is None
-        else _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+        closure if owner is None else render_worker_closure(relative, owner, closure)
         for (owner, _), (_, closure, relative) in closed_deferred.items()
     ]
     coverage.pop("resolvedDeferred", None)
@@ -2639,13 +2653,33 @@ def merge_saved_results(
     if isinstance(coverage.get("surfaces"), list):
         for relative, owner, source_surface, surface in surface_updates:
             original_surface = surface
-            # Generic updates already resolve each receipt at its saved source.
+            canonical = projected_coverage if parent_is_canonical else {}
+            worker = workers_by_id.get(owner)
+            published = None
+            source_owner, original_source = record_source("surfaces", owner, source_surface)
+            if (
+                worker is not None
+                and source_owner == owner
+                and (origin := projection_origins.get(id(original_source)))
+            ):
+                published = coverage_origins.retained_record(
+                    "surfaces",
+                    original_source,
+                    origin[3],
+                    worker,
+                    origin[4],
+                    canonical,
+                    reviewed_attempts,
+                    id(original_source) in inferred_coverage_ids,
+                )
+            # Bind the unmodified occurrence before applying its repaired receipt union.
             surface = projection.repair_reviewed_surface(
                 coverage,
-                projected_coverage if parent_is_canonical else {},
-                workers_by_id.get(owner),
+                canonical,
+                worker,
                 source_surface,
                 surface,
+                published=published,
             ) or project_record("surfaces", surface, source_surface, receipts_resolved=True)
             reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface["id"]
             if surface not in coverage["surfaces"] and (

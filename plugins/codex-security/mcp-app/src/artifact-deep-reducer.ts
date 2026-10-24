@@ -136,7 +136,7 @@ export async function readDeepReductionSources(
           }
         }
         if (current.length || archived.length)
-          result = reconcileAcceptedWorkerHistory(
+          result = await reconcileAcceptedWorkerHistory(
             workerContext,
             result,
             [...current, ...archived],

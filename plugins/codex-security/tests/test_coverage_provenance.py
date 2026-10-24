@@ -642,8 +642,9 @@ def test_retained_surface_occurrences_match_each_receipt(
 
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("tampered", [False, True])
+@pytest.mark.parametrize("local_collision", [False, True])
 def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
-    workbench_api, workbench_db, publication_scan, monkeypatch, retry, tampered
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, tampered, local_collision
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -662,6 +663,8 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
         (shared, "Synthetic shared evidence.\n"),
         (local, "Different synthetic retry evidence.\n"),
     ):
+        if receipt == local and not local_collision:
+            continue
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text(contents)
     surface = {
@@ -715,7 +718,9 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
         },
     )
     originals = {
-        path: path.read_bytes() for path in [result, archived, shared, local, *checkpoints]
+        path: path.read_bytes()
+        for path in [result, archived, shared, local, *checkpoints]
+        if path.is_file()
     }
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     if tampered:
@@ -723,7 +728,8 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
         current = [row for row in coverage["surfaces"] if row != parent]
         assert len(current) == 1
         assert current[0]["provenance"]["attempt"] == 2
-        assert current[0]["receiptRefs"] == [local.relative_to(scan.scan_dir).as_posix()]
+        selected = local if local_collision else shared
+        assert current[0]["receiptRefs"] == [selected.relative_to(scan.scan_dir).as_posix()]
     else:
         assert coverage["surfaces"] == [parent]
         pending = next(
@@ -733,4 +739,158 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
         )
         assert pending["surfaceIds"] == [parent["id"]]
     assert all("scanReceiptRefs" not in row.get("provenance", {}) for row in coverage["surfaces"])
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "change",
+    ["unchanged", "changed-copy", "other-owner", "changed-closure", "new-closure", "receipt-only"],
+)
+def test_third_retry_receipt_repair_preserves_bound_canonical_identity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, change
+):
+    scan = publication_scan()
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = 3 WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    original = "artifacts/original.md"
+    replacement = "artifacts/replacement.md"
+    first_copy = f"artifacts/archived-receipts/attempt-01/{original}"
+    second_copy = f"artifacts/archived-receipts/attempt-02/{replacement}"
+    nested_copy = f"artifacts/archived-receipts/attempt-02/{first_copy}"
+    first = output.parent / "attempts/attempt-01"
+    second = output.parent / "attempts/attempt-02"
+    for directory, refs in (
+        (first, [original]),
+        (second, [replacement, first_copy]),
+        (output, [replacement, first_copy, second_copy, nested_copy]),
+    ):
+        for ref in refs:
+            receipt = directory / ref
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                "Synthetic original evidence.\n"
+                if ref.endswith("original.md")
+                else "Synthetic replacement evidence.\n"
+            )
+    prefix = output.relative_to(scan.scan_dir).as_posix()
+    surface = {"id": "api", "label": "Synthetic API", "disposition": "no_issue_found"}
+    closure = {"id": "review", "reason": "Synthetic review completed."}
+    for directory, refs, pending in (
+        (first, ["artifacts/missing.md", f"{prefix}/{original}"], True),
+        (second, [f"{prefix}/{replacement}", f"{prefix}/{first_copy}"], False),
+        (
+            output,
+            [f"{prefix}/{ref}" for ref in (replacement, first_copy, second_copy, nested_copy)],
+            False,
+        ),
+    ):
+        if change == "receipt-only":
+            pending = False
+            if directory != first:
+                refs = [f"{prefix}/{replacement}"]
+        coverage = {
+            **scan.coverage,
+            "completeness": "partial" if pending else "complete",
+            "surfaces": [
+                {
+                    **surface,
+                    "disposition": "needs_follow_up" if pending else "no_issue_found",
+                    "receiptRefs": refs,
+                }
+            ],
+            "deferred": (
+                [{"id": "review", "reason": "Synthetic review pending.", "surfaceIds": ["api"]}]
+                if pending
+                else []
+            ),
+            **({} if pending or change == "receipt-only" else {"resolvedDeferred": [closure]}),
+        }
+        if directory == output and change in {"changed-closure", "new-closure"}:
+            coverage["resolvedDeferred"] = [
+                {
+                    "id": "review" if change == "changed-closure" else "new-review",
+                    "reason": "Synthetic new review outcome.",
+                }
+            ]
+        draft = {"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": coverage}
+        (directory / "result.json").write_text(json.dumps(draft))
+        checkpoint = write_checkpoint(directory / "checkpoints", draft)
+        (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    source = json.loads(result.read_text())["coverage"]["surfaces"][0]
+    parent_owner = "other-worker" if change == "other-owner" else worker_id
+    parent = {
+        **source,
+        "id": f"{parent_owner}-attempt-3-surface-1",
+        "provenance": {"workerId": parent_owner, "attempt": 2, "sourceId": "api"},
+    }
+    accepted_closure = {
+        **closure,
+        "id": f"{worker_id}-attempt-2-resolved-review",
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [parent],
+            "deferred": [],
+            "resolvedDeferred": [] if change == "receipt-only" else [accepted_closure],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "complete"}
+                for attempt in (2, 3)
+            ],
+        },
+    )
+    if change == "changed-copy":
+        (output / second_copy).write_text("Synthetic changed copy evidence.\n")
+    originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    if change not in {"changed-copy", "other-owner"}:
+        assert len(coverage["surfaces"]) == 1
+        retained = coverage["surfaces"][0]
+        assert retained["id"] == parent["id"]
+        assert retained["provenance"] == parent["provenance"]
+    else:
+        assert parent in coverage["surfaces"]
+        current = [row for row in coverage["surfaces"] if row != parent]
+        assert len(current) == 1
+        retained = current[0]
+        assert retained["provenance"]["workerId"] == worker_id
+        assert retained["provenance"]["attempt"] == (3 if change == "changed-copy" else 2)
+        assert retained["id"] != parent["id"]
+    assert retained["disposition"] == "no_issue_found"
+    assert not any(ref.endswith("/missing.md") for ref in retained["receiptRefs"])
+    assert all((scan.scan_dir / ref).is_file() for ref in retained["receiptRefs"])
+    expected_closures = [] if change == "receipt-only" else [accepted_closure]
+    if change in {"changed-closure", "new-closure"}:
+        current_closure = {
+            "id": f"{worker_id}-attempt-3-resolved-"
+            + ("review" if change == "changed-closure" else "new-review"),
+            "reason": "Synthetic new review outcome.",
+        }
+        expected_closures = (
+            [current_closure]
+            if change == "changed-closure"
+            else [accepted_closure, current_closure]
+        )
+    if change == "new-closure":
+        assert current_closure in coverage["resolvedDeferred"]
+        assert all(
+            row["id"] != accepted_closure["id"] or row == accepted_closure
+            for row in coverage["resolvedDeferred"]
+        )
+    else:
+        assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == sorted(
+            expected_closures, key=lambda row: row["id"]
+        )
     assert all(path.read_bytes() == data for path, data in originals.items())

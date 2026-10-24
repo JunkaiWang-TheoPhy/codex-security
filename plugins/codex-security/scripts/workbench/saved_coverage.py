@@ -295,34 +295,51 @@ class SavedCoverageOrigins:
             return left == right
         left_refs = self.receipt_resolver(left_path, left, owner)
         right_refs = self.receipt_resolver(right_path, right, owner)
-        left.pop("receiptRefs", None)
-        right.pop("receiptRefs", None)
+        shared_refs = []
+        for row in (left, right):
+            provenance = row.get("provenance")
+            shared = provenance.pop("scanReceiptRefs", []) if isinstance(provenance, dict) else []
+            shared_refs.append(shared if isinstance(shared, list) else [])
+            if isinstance(provenance, dict) and not provenance:
+                row.pop("provenance")
+            row.pop("receiptRefs", None)
         if left != right:
             return False
-        if left_refs == right_refs:
+        if left_refs == right_refs and (
+            not isinstance(left_refs, list)
+            or all((ref in shared_refs[0]) == (ref in shared_refs[1]) for ref in left_refs)
+        ):
             return True
         if not isinstance(left_refs, list) or not isinstance(right_refs, list):
             return False
 
-        def relative_refs(refs, path):
+        def receipt_identities(refs, path, shared):
             prefix = self.directory(path).as_posix() + "/"
-            return [
-                re.sub(
-                    r"^(?:artifacts/archived-receipts/attempt-[0-9]+/)+",
-                    "",
-                    ref.removeprefix(prefix),
+            identities = []
+            for ref in refs:
+                digest = self.receipt_digest(ref)
+                if digest is None:
+                    return None
+                scan_owned = ref in shared
+                local = not scan_owned and ref.startswith(prefix)
+                logical = (
+                    re.sub(
+                        r"^(?:artifacts/archived-receipts/attempt-[0-9]+/)+",
+                        "",
+                        ref.removeprefix(prefix),
+                    )
+                    if local
+                    else ref
                 )
-                if isinstance(ref, str) and ref.startswith(prefix)
-                else ref
-                for ref in refs
-            ]
+                identity = (scan_owned, local, logical, digest)
+                if identity not in identities:
+                    identities.append(identity)
+            return identities
 
-        if relative_refs(left_refs, left_path) != relative_refs(right_refs, right_path):
-            return False
-        left_digests = [self.receipt_digest(ref) for ref in left_refs]
-        return None not in left_digests and left_digests == [
-            self.receipt_digest(ref) for ref in right_refs
-        ]
+        left_identities = receipt_identities(left_refs, left_path, shared_refs[0])
+        return left_identities is not None and left_identities == receipt_identities(
+            right_refs, right_path, shared_refs[1]
+        )
 
     def attempt(self, field, index, worker, source):
         relative = self.paths.get(id(source))
@@ -360,6 +377,31 @@ class SavedCoverageOrigins:
                 self.origin_sources[key] = path
         self.attempts[key] = attempt
         return attempt
+
+    def retained_closure(self, closure, worker, source, published, reviewed):
+        relative = self.paths.get(id(source))
+        if relative is None or self.sources[relative][1] != worker["id"]:
+            return None
+        rows = self.sources[relative][0].get("resolvedDeferred", [])
+        if not isinstance(rows, list):
+            return None
+        for index, row in enumerate(rows, 1):
+            if row != closure:
+                continue
+            attempt = self.attempt("resolvedDeferred", index, worker, source)
+            if (relative, "resolvedDeferred", index) not in self.origin_sources or (
+                worker["id"],
+                attempt,
+            ) not in reviewed:
+                return None
+            candidate = {
+                "id": f"{worker['id']}-attempt-{attempt}-resolved-{closure['id']}",
+                "reason": closure["reason"],
+            }
+            canonical = published.get("resolvedDeferred", [])
+            if isinstance(canonical, list) and candidate in canonical:
+                return copy.deepcopy(candidate)
+        return None
 
     def relink_deferred(self, retained, surface_ids):
         if retained.get("surfaceIds") != surface_ids:
@@ -576,23 +618,26 @@ class SavedCoverageProjection:
             for review in (reviews if isinstance(reviews, list) else [])
         )
 
-    def repair_reviewed_surface(self, coverage, canonical, worker, source, surface):
+    def repair_reviewed_surface(
+        self, coverage, canonical, worker, source, surface, *, published=None
+    ):
         if not self.is_reviewed_worker(canonical, worker):
             return None
-        published = next(
-            (
-                row
-                for row in canonical.get("surfaces", [])
-                if isinstance(row, dict)
-                and isinstance(provenance := row.get("provenance"), dict)
-                and provenance.get("workerId") == worker["id"]
-                and provenance.get("attempt") == worker["attempt"]
-                and provenance.get("sourceId") == surface.get("id")
-                and row.get("disposition") == surface.get("disposition")
-            ),
-            None,
-        )
         if published is None:
+            published = next(
+                (
+                    row
+                    for row in canonical.get("surfaces", [])
+                    if isinstance(row, dict)
+                    and isinstance(provenance := row.get("provenance"), dict)
+                    and provenance.get("workerId") == worker["id"]
+                    and provenance.get("attempt") == worker["attempt"]
+                    and provenance.get("sourceId") == surface.get("id")
+                    and row.get("disposition") == surface.get("disposition")
+                ),
+                None,
+            )
+        if published is None or published.get("disposition") != surface.get("disposition"):
             return None
         retained = next(
             (

@@ -414,6 +414,132 @@ for (const history of [
   });
 }
 
+for (const repair of [
+  "matching closeout",
+  "no valid replacement",
+  "independent source",
+]) {
+  test(`accepted direct-file history receipt repair: ${repair}`, async () => {
+    const f = await fixture();
+    try {
+      const original = "artifacts/original.txt";
+      const missing = "artifacts/missing.txt";
+      const replacement = "artifacts/replacement.txt";
+      await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(f.output, original),
+        "Synthetic original evidence.\n",
+      );
+      await recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], {
+          complete: false,
+          coverage: {
+            completeness: "partial",
+            surfaces: [
+              {
+                id: "review",
+                label: "Synthetic review",
+                disposition: "needs_follow_up",
+                receiptRefs: [original, missing],
+              },
+              ...(repair === "independent source"
+                ? [
+                    {
+                      id: "independent",
+                      label: "Independent incomplete review",
+                      disposition: "needs_follow_up",
+                      receiptRefs: [missing],
+                    },
+                  ]
+                : []),
+            ],
+            explicitExclusions: [],
+            deferred: [
+              {
+                id: "review-gap",
+                reason: "Synthetic pending evidence.",
+                surfaceIds: ["review"],
+              },
+            ],
+          },
+        }),
+      );
+      await archiveDirectory(
+        f.output,
+        path.join(f.workerRoot, "attempts/attempt-01"),
+      );
+      await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(f.output, replacement),
+        "Synthetic replacement evidence.\n",
+      );
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(
+          workerDraft([], {
+            complete: true,
+            coverage: {
+              completeness: "complete",
+              surfaces: [
+                {
+                  id: "review",
+                  label: "Synthetic review",
+                  disposition: "no_issue_found",
+                  receiptRefs:
+                    repair === "no valid replacement" ? [] : [replacement],
+                },
+              ],
+              explicitExclusions: [],
+              deferred: [],
+              resolvedDeferred: [
+                { id: "review-gap", reason: "Synthetic completed evidence." },
+              ],
+            },
+          }),
+        ),
+      );
+      await validateDiscoveryArtifacts(
+        createDeepScanArtifacts(f.scanRoot),
+        f.resultPath,
+        scanId,
+      );
+      const before = await artifactTree(f.scanRoot);
+      const { coverage } = (await readDeepReductionSources(f.context))
+        .discoveries[0];
+      assert.deepEqual(await artifactTree(f.scanRoot), before);
+      const reviewed = coverage.surfaces.find(
+        (row: { label: string }) => row.label === "Synthetic review",
+      );
+      assert.ok(reviewed);
+      const archivedMissing =
+        "artifacts/deep_discovery/workers/discovery-0001/attempts/attempt-01/" +
+        missing;
+      assert.equal(
+        reviewed.receiptRefs.includes(archivedMissing),
+        repair === "no valid replacement",
+      );
+      assert.ok(
+        reviewed.receiptRefs.some((ref: string) =>
+          ref.endsWith("/" + original),
+        ),
+        "Keep independent readable evidence from the earlier observation.",
+      );
+      if (repair === "independent source") {
+        const independent = coverage.surfaces.find(
+          (row: { label: string }) =>
+            row.label === "Independent incomplete review",
+        );
+        assert.ok(independent);
+        assert.equal(independent.disposition, "needs_follow_up");
+        assert.deepEqual(independent.receiptRefs, [archivedMissing]);
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const copy of [
   "unchanged",
   "changed",
