@@ -270,3 +270,17 @@ test("documentation requires static checks and explicit selection, without skipp
     );
   }
 });
+
+test("only an authenticated, successful classifier can propagate a source result", () => {
+  const classification = {
+    result: "success",
+    outputs: { "source-run": "123" },
+  };
+  assert.deepEqual(failedChecks({ "classify-changes": classification }), []);
+  for (const result of ["failure", "cancelled", "skipped"]) {
+    assert.deepEqual(
+      failedChecks({ "classify-changes": { ...classification, result } }),
+      ["classify-changes"],
+    );
+  }
+});

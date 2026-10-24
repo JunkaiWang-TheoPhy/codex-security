@@ -32,15 +32,18 @@ even when mixed with ordinary source or documentation.
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires
 successful CI for the exact main commit before publication. Title and body edits
-neither cancel source runs nor satisfy their required check names.
+leave source CI running. On an edit, CI checks the source result for the same
+pull request, base, head and test merge. It waits for a running source check and
+reports a verified result through the required checks. Missing or ambiguous
+source evidence triggers full qualification of the current tree.
 
 ## Required gate
 
 The `ci` job checks every selected required job. A failed, cancelled, missing,
 or unexpectedly skipped selected job fails the gate. An explicitly unselected
-job can be skipped. Static checks are always required. Broad test-runner
-experiments run through the separate scheduled/manual `test-quality` workflow;
-they are not merge gates.
+job can be skipped. Every source qualification includes static checks. The
+scheduled and manual `test-quality` workflow runs broad test-runner experiments
+outside the merge gate.
 
 The existing OS-named check contexts temporarily forward the `ci` result so
 repository branch rules continue to work during migration. To finish migration:
@@ -49,7 +52,8 @@ repository branch rules continue to work during migration. To finish migration:
    documentation pull requests, including a failing selected-check example.
 2. Change the repository's required status checks to `ci` and `Validate PR Title`,
    preserving their GitHub Actions integration and all unrelated protection rules.
-3. Remove the compatibility jobs `required-test` and `windows` in a follow-up.
+3. Remove the compatibility jobs `required-test` and `windows` and their
+   names from the source verification in a follow-up.
 
 Do not remove the old contexts before changing the rules. The workflow change
 itself does not change repository protection settings.
@@ -59,7 +63,7 @@ itself does not change repository protection settings.
 The workflow-selection and gate tests run without installing dependencies:
 
 ```bash
-node --test .github/scripts/test-ci-selection.mjs
+node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
 ```
 
 The [SDK testing guide](../sdk/typescript/TESTING.md) describes local behavioral

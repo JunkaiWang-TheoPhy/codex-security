@@ -3846,8 +3846,8 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toBe(10);
-    expect(classifier.if).toContain("github.event.changes.base != null");
+    expect(classifier["timeout-minutes"]).toContain("40 || 10");
+    expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
     );
@@ -3857,7 +3857,9 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
-    expect(workflow.jobs["static-checks"]?.if).toBeUndefined();
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
     for (const job of [
       "native",
       "package",
@@ -3876,13 +3878,7 @@ describe("GitHub release workflow safeguards", () => {
     }
     for (const [name, job] of Object.entries(workflow.jobs)) {
       if (
-        [
-          "classify-changes",
-          "metadata-edit",
-          "ci",
-          "required-test",
-          "windows",
-        ].includes(name)
+        ["classify-changes", "ci", "required-test", "windows"].includes(name)
       ) {
         continue;
       }
