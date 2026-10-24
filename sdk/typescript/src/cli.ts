@@ -19,7 +19,7 @@ import {
   execFileSync,
   spawn,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants,
@@ -34,6 +34,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -65,6 +66,8 @@ import {
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
+import { formatCoverageScope } from "./coverage-presentation.js";
+import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -77,7 +80,7 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
@@ -122,6 +125,7 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
+import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   publishPatchReview,
@@ -171,7 +175,6 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
-  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -257,6 +260,9 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  resolvePluginPath,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
   requireOutputOutsideRepositories,
@@ -264,12 +270,14 @@ import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   executablePathForSpawn,
+  environmentWithGit,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   pluginMetadata,
   runWorkbench,
+  workbenchEnvironment,
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -319,11 +327,16 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
+  normalizeRepository,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -1093,6 +1106,7 @@ interface ScanArguments extends ResolvedScanSettings {
   pluginPath?: string;
   pythonPath?: string;
   patch?: boolean;
+  validate?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
   showCost?: boolean;
@@ -1228,7 +1242,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
-  ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createDependencySecurity?: (
     config: CodexSecurityConfig,
     chooseAuthentication?: (
@@ -1307,6 +1321,8 @@ interface CliDependencies {
     signal?: AbortSignal,
     pythonPath?: string,
     protectedRoot?: PluginPythonOptions["protectedRoot"],
+    gitProtectedRoots?: readonly string[],
+    pluginPath?: string,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1400,27 +1416,77 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     ),
   runRepositoryCommand,
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
-    const environment = {
-      ...exportEnvironment(),
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
-    };
-    return await runWorkbench(
-      {
-        python: await resolvePluginPython({
-          configuredPath: pythonPath,
-          environment,
-          protectedRoot,
-          signal,
-        }),
-        pluginRoot: await bundledPluginRoot(),
-        environment,
-        signal,
-        failureMessage: "Could not read Codex Security scan history",
-      },
-      args,
-      input,
+  runWorkbench: async (
+    args,
+    input,
+    signal,
+    pythonPath,
+    protectedRoot,
+    gitProtectedRoots = [],
+    pluginPath,
+  ) => {
+    const checkingTarget =
+      args[0] === "get-scan" && args.includes("--check-target");
+    let environment: NodeJS.ProcessEnv =
+      !checkingTarget || protectedRoot === undefined
+        ? {
+            ...exportEnvironment(),
+            CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
+          }
+        : workbenchEnvironment(process.env);
+    const protectedRoots = await Promise.all(
+      (protectedRoot === undefined
+        ? []
+        : typeof protectedRoot === "string"
+          ? [protectedRoot]
+          : protectedRoot
+      ).map(
+        async (root) =>
+          (await gitMarkerRoot(root, signal, "outermost")) ?? root,
+      ),
     );
+    const python = await resolvePluginPython({
+      configuredPath: pythonPath,
+      environment,
+      signal,
+      protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
+    });
+    if (checkingTarget && protectedRoot !== undefined) {
+      const git = await inspectTrustedExecutable("git", environment, [
+        ...protectedRoots,
+        ...gitProtectedRoots,
+      ]);
+      environment = environmentWithGit(git.environment, git);
+    }
+    const workspace =
+      pluginPath === undefined
+        ? undefined
+        : await createIsolatedHome(undefined, (path) =>
+            requireOutputOutsideRepositories(
+              [...protectedRoots, ...gitProtectedRoots],
+              path,
+              "runtime",
+            ),
+          );
+    try {
+      return await runWorkbench(
+        {
+          python,
+          pluginRoot:
+            workspace === undefined
+              ? await bundledPluginRoot()
+              : await resolvePluginPath(pluginPath, workspace, signal),
+          environment,
+          signal,
+          failureMessage: "Could not read Codex Security scan history",
+        },
+        args,
+        input,
+      );
+    } finally {
+      if (workspace !== undefined)
+        await cleanupSdkDirectory(workspace).catch(() => undefined);
+    }
   },
   matchFindings: (input, options) =>
     matchScanFindingsInternal(input, options, { surface: "cli" }),
@@ -1454,117 +1520,25 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = parseToml(
-        stringifyToml(output.codexOverrides ?? {}),
-      ) as JsonObject;
-      const config = deepMerge(structuredClone(ambientConfig), overrides);
-      const provider = output.modelProvider ?? scanModelProvider(config);
-      // Native Codex ignores configured tables for these built-in providers.
-      const providerConfiguration =
-        typeof provider === "string" &&
-        !["openai", "ollama", "lmstudio"].includes(provider)
-          ? (
-              config["model_providers"] as
-                Record<string, JsonObject> | undefined
-            )?.[provider]
-          : undefined;
-      const providerEnvKey =
-        typeof providerConfiguration?.["env_key"] === "string"
-          ? providerConfiguration["env_key"]
-          : undefined;
-      const commandAuth = providerConfiguration?.["auth"] != null;
-      const explicitChatgpt =
-        output.auth === "chatgpt" && !isExternalModelProvider(provider);
-      const providerBearer =
-        typeof providerConfiguration?.["experimental_bearer_token"] ===
-        "string";
-      const providerKeyConfigured =
-        providerEnvKey !== undefined || providerBearer;
-      const requiresOpenAiAuth =
-        !commandAuth &&
-        (explicitChatgpt || !providerKeyConfigured) &&
-        (provider === undefined ||
-          provider === "openai" ||
-          providerConfiguration?.["requires_openai_auth"] === true ||
-          (explicitChatgpt && providerKeyConfigured));
+      const resolved = resolveSkillAuthentication(
+        { ...output, auth: output.auth },
+        processEnvironment,
+        ambientConfig,
+      );
+      const {
+        provider,
+        providerConfiguration,
+        providerEnvKey,
+        requiresOpenAiAuth,
+      } = resolved;
+      authentication = resolved.authentication;
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
-        const key = environmentEntry(
-          processEnvironment,
-          providerEnvKey,
-        )?.trim();
-        if (!key && output.auth === "api-key") {
-          throw new AuthenticationRequiredError(
-            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
-          );
-        }
-        authentication = key
-          ? { method: "api_key", source: providerEnvKey, verified: false }
-          : { method: "stored_credentials", verified: false };
-      } else {
-        authentication = scanAuthentication(
-          processEnvironment,
-          output.auth,
-          provider,
-          commandAuth,
-        );
-      }
-      if (
-        authentication.method === "stored_credentials" &&
-        isExternalModelProvider(provider)
-      ) {
-        const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
-        throw new AuthenticationRequiredError(
-          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
-        );
-      }
-      let selected = selectedScanEnvironment(
-        processEnvironment,
-        authentication.method === "command" ? "chatgpt" : output.auth,
-        provider,
-      );
-      if (
-        explicitChatgpt &&
-        !commandAuth &&
-        providerConfiguration !== undefined &&
-        providerKeyConfigured
-      ) {
-        if (providerEnvKey !== undefined) {
-          selected = Object.fromEntries(
-            Object.entries(selected).filter(([name]) =>
-              process.platform === "win32"
-                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
-                : name !== providerEnvKey,
-            ),
-          );
-        }
-        // Native provider keys take precedence over stored authentication.
-        // Apply explicit ChatGPT selection to the home and CLI configuration.
-        const providerOverrides =
-          typeof provider === "string"
-            ? (
-                overrides["model_providers"] as
-                  Record<string, JsonObject> | undefined
-              )?.[provider]
-            : undefined;
-        for (const selectedConfig of [
-          providerConfiguration,
-          providerOverrides,
-        ]) {
-          if (selectedConfig === undefined) continue;
-          delete selectedConfig["env_key"];
-          delete selectedConfig["experimental_bearer_token"];
-          selectedConfig["requires_openai_auth"] = true;
-        }
-        args = [
-          ...args,
-          ...modelProviderConfigOverride(overrides).flatMap((value) => [
-            "--config",
-            value,
-          ]),
-        ];
-      }
+      let selected = resolved.environment;
+      args = [
+        ...args,
+        ...resolved.configOverrides.flatMap((value) => ["--config", value]),
+      ];
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
@@ -3603,7 +3577,7 @@ export async function main(
         "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
-        .enum(["wiz", "snyk", "semgrep", "endor", "github"])
+        .enum(EXTERNAL_FINDINGS_READERS)
         .describe("Provider that produced these findings."),
       sourceRepositoryUrl: optionValue("--source-repository-url")
         .optional()
@@ -4352,6 +4326,10 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Patch and verify confirmed findings after the scan."),
+          validate: z
+            .boolean()
+            .default(false)
+            .describe("Run standalone finding validation after the scan."),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -4393,10 +4371,16 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine((options) => !options.validate || !options.dryRun, {
+          message: "--validate cannot be combined with --dry-run.",
+        })
         .refine(
-          (options) => !options.mock || (!options.dryRun && !options.patch),
+          (options) =>
+            !options.mock ||
+            (!options.dryRun && !options.patch && !options.validate),
           {
-            message: "--mock cannot be combined with --dry-run or --patch.",
+            message:
+              "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
       output: scanOutputSchema("SCAN_FAILED"),
@@ -4454,6 +4438,11 @@ export async function main(
               "--archive-existing requires --output-dir.",
             );
           }
+          if (options.validate && settings.maxCostUsd !== undefined) {
+            throw new CodexSecurityError(
+              "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
+            );
+          }
           outcome = await runScan(
             {
               ...settings,
@@ -4467,6 +4456,7 @@ export async function main(
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               patch: options.patch,
+              validate: options.validate,
               patchSeverity: options.patchSeverity,
               createPr: options.createPr,
               showCost: options.showCost,
@@ -5777,7 +5767,9 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ format, options }) {
+      async run({ format, options, error: incurError }) {
+        const diagnostics = captureOutput();
+        let failureReported = false;
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
@@ -5865,13 +5857,23 @@ export async function main(
               identifiers.length,
             );
             progress.startVerification();
+            const verificationErrors = new NodeWritable({
+              write(chunk, _encoding, callback) {
+                diagnostics.stream.write(chunk);
+                progress.stop();
+                void writeCliOutput(errorOutput, chunk).then(
+                  () => callback(),
+                  callback,
+                );
+              },
+            });
             try {
               exitCode = await runSkill(
                 "verify-fix",
                 selected === undefined ? [...positionals, ...imports] : [],
                 options,
                 response.stream,
-                errorOutput,
+                verificationErrors,
                 dependencies,
                 {
                   directory: repository,
@@ -5886,9 +5888,15 @@ export async function main(
                 },
               );
               if (exitCode !== 0) {
-                if (exitCode !== 130 && exitCode !== 143) exitCode = 2;
-                frameworkExit = exitCode;
-                return undefined;
+                if (exitCode === 130 || exitCode === 143) {
+                  frameworkExit = exitCode;
+                  return undefined;
+                }
+                failureReported = diagnostics.text().trim().length > 0;
+                throw new CodexSecurityError(
+                  diagnostics.text().trim() ||
+                    `Codex verification failed with exit code ${exitCode}.`,
+                );
               }
 
               results = parseFindingVerifications(response.text(), identifiers);
@@ -5919,8 +5927,15 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          throw error;
+          const message = errorMessage(error);
+          if (!failureReported)
+            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
+          return finishScan(
+            { exitCode, error: message },
+            format,
+            incurError,
+            "VERIFICATION_FAILED",
+          );
         }
       },
     })
@@ -9755,8 +9770,7 @@ async function executeScan(
   };
   signalHandlers(dependencies, "add", onInterrupt, onTerminate);
 
-  let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
-    null;
+  let security: ReturnType<CliDependencies["createSecurity"]> | null = null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
@@ -9765,6 +9779,8 @@ async function executeScan(
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
+  let validation: Record<string, unknown> | undefined;
+  let validationError: string | undefined;
   let patchServiceTier: JsonValue | undefined;
   let patchRequestMetadata: JsonObject | undefined;
   let patchOtel: JsonObject | undefined;
@@ -9778,6 +9794,12 @@ async function executeScan(
     deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    if (arguments_.validate) {
+      repository = await normalizeRepository(
+        resolve(directory, expandHome(repository)),
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
@@ -10253,13 +10275,17 @@ async function executeScan(
         }
       },
     };
+    if (
+      ((arguments_.validate && !arguments_.dryRun) ||
+        arguments_.rerunInputIdentity !== undefined) &&
+      options.knowledgeBasePaths?.length
+    ) {
+      options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        preparationAbortController.signal,
+      );
+    }
     if (arguments_.rerunInputIdentity !== undefined) {
-      if (options.knowledgeBasePaths?.length) {
-        options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
-          options.knowledgeBasePaths,
-          preparationAbortController.signal,
-        );
-      }
       const previousInputs = arguments_.rerunInputIdentity;
       const currentInputs = scanInputIdentity(
         options.scanPrompt,
@@ -10294,6 +10320,114 @@ async function executeScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
+      if (arguments_.validate) {
+        const scanId = result.manifest.scan.id;
+        const checkTarget = async () => {
+          const context = await dependencies.runWorkbench(
+            ["get-scan", "--scan-id", scanId, "--check-target"],
+            undefined,
+            preparationAbortController.signal,
+            config.pythonPath,
+            repository,
+            options.knowledgeBaseSnapshot?.protectedRoots,
+            config.pluginPath,
+          );
+          const scan = context["scan"];
+          if (
+            !isJsonObject(scan) ||
+            scan["targetPath"] !== (await realpath(repository))
+          ) {
+            throw new CodexSecurityError(
+              "The recorded scan target does not match the validation repository.",
+            );
+          }
+        };
+        const findings = result.findings.findings;
+        if (targetWarnings.length > 0) {
+          validation = {
+            status: "skipped",
+            reason: "The scan target changed during execution.",
+          };
+        } else if (findings.length === 0) {
+          try {
+            await checkTarget();
+            validation = { status: "complete", findings: 0 };
+          } catch (error) {
+            const message = errorMessage(error);
+            validationError = message;
+            validation = { status: "failed", findings: 0, message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
+            );
+          }
+        } else {
+          stopPresentation();
+          try {
+            progress?.stage(`Validating ${findings.length} scan findings`);
+          } catch {}
+          try {
+            const scanDirectory = result.scanDir;
+            let reportPath = join(scanDirectory, "validation.md");
+            const report = await open(reportPath, "wx", 0o600).catch(
+              async (error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+                  throw error;
+                reportPath = join(
+                  scanDirectory,
+                  `validation-${randomUUID()}.md`,
+                );
+                return await open(reportPath, "wx", 0o600);
+              },
+            );
+            validation = { status: "failed", findings: 0, reportPath };
+            let completed = 0;
+            try {
+              for (const finding of findings) {
+                const assessment = await security.validate({
+                  repositoryPath: repository,
+                  scanId: result.manifest.scan.id,
+                  workflowId: arguments_.workflowId,
+                  knowledgeBasePaths: options.knowledgeBasePaths,
+                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
+                  finding,
+                  auth,
+                  cyberAccessProgram: arguments_.cyberAccessProgram,
+                  safetyIdentifier: arguments_.safetyIdentifier,
+                  signal: preparationAbortController.signal,
+                });
+                await report.writeFile(
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                );
+                completed += 1;
+                validation = { ...validation, findings: completed };
+              }
+            } finally {
+              await report.close();
+            }
+            await checkTarget();
+            validation = {
+              status: "complete",
+              findings: findings.length,
+              reportPath,
+            };
+            try {
+              progress?.stage(`Finding validation saved to ${reportPath}`);
+            } catch {}
+          } catch (error) {
+            const message = errorMessage(error);
+            validationError = message;
+            validation = { ...validation, status: "failed", message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
+            );
+            if (validation["reportPath"] !== undefined) {
+              errorOutput.write(
+                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
+              );
+            }
+          }
+        }
+      }
     }
   } catch (error) {
     failed = true;
@@ -10308,7 +10442,7 @@ async function executeScan(
           diagnostic("runtime.cleanup.failed", {
             classification: classifyConnectionFailure(error),
           });
-          if (!failed) {
+          if (!failed && validationError === undefined) {
             failed = true;
             failure = error;
           }
@@ -10323,8 +10457,11 @@ async function executeScan(
     arguments_.includeFailureResults &&
     (failed || requestedSignal !== null)
   ) {
-    if (result !== null) failureData = result.toJSON();
-    else if (registeredScan !== undefined) {
+    if (result !== null) {
+      failureData = result.toJSON();
+      if (validation !== undefined)
+        failureData = { ...failureData, validation };
+    } else if (registeredScan !== undefined) {
       try {
         const contract = await loadContract(registeredScan.scanDir, {
           pluginRoot: await bundledPluginRoot(),
@@ -10346,6 +10483,19 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    if (result !== null && arguments_.validate) {
+      const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
+      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      errorOutput.write(`codex-security: ${message}\n`);
+      return {
+        exitCode,
+        error: message,
+        data: {
+          ...result.toJSON(),
+          validation: { ...validation, status: "failed", exitCode },
+        },
+      };
+    }
     const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
@@ -10450,6 +10600,7 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
+  if (validation !== undefined) scanData = { ...scanData, validation };
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
     deepScanStop = (await readDeepScanStop(
@@ -10496,6 +10647,9 @@ async function executeScan(
       ...(error === undefined ? {} : { error }),
     };
   };
+  if (validationError !== undefined) {
+    return finishResult(2, validationError);
+  }
   if (targetWarnings.length > 0) {
     const message =
       "Scan target changed during execution; results do not represent the current checkout.";
@@ -11012,6 +11166,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

@@ -7,7 +7,11 @@ import {
   normalizeOsvOutput,
   runOsvScan,
 } from "../src/sca-osv.js";
-import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
+import {
+  dependencyScanResult,
+  readDependencyScan,
+  saveDependencyScan,
+} from "../src/sca.js";
 import { dependencyInventorySummary } from "../src/sca-summary.js";
 import { dependencyTriageContract } from "../src/sca-triage.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -766,15 +770,15 @@ describe("SCA comparison", () => {
     ],
     [
       "C:\\work tree\\base",
-      "C:\\work tree\\base\\nested\\package-lock.json",
+      "C:\\work tree\\base\\Nested\\Package-Lock.json",
       "D:\\head checkout",
       "D:\\head checkout\\nested\\package-lock.json",
     ],
     [
       "C:\\base",
-      "nested\\package-lock.json",
+      "Nested\\package-lock.json",
       "/head",
-      "nested/package-lock.json",
+      "Nested/package-lock.json",
     ],
   ])(
     "correlates source identities between %s and another checkout",
@@ -793,23 +797,57 @@ describe("SCA comparison", () => {
     },
   );
 
-  test("does not conflate literal POSIX backslashes with directory separators", () => {
-    const base = fixture();
-    const head = fixture();
-    base.components[0]!.sourcePath = "nested\\folder/package-lock.json";
-    base.coverage.inputs[0]!.path = base.components[0]!.sourcePath;
-    head.components[0]!.sourcePath = "nested/folder/package-lock.json";
-    head.coverage.inputs[0]!.path = head.components[0]!.sourcePath;
-    head.matches[0]!.id = "head-match";
-    const comparison = compareScaResults(base, head);
-    expect(comparison.persisting).toEqual([]);
-    expect(comparison.newlyObserved).toEqual(["head-match"]);
-    expect(comparison.introduced).toEqual([]);
-    expect(comparison.noLongerObserved).toEqual([
-      { matchId: "match-1", resolved: false },
-    ]);
-    expect(comparison.comparable).toBe(false);
+  test("keeps advisory occurrences in case-distinct lockfiles separate in saved Windows inventories", async () => {
+    const paths = ["Lib/package-lock.json", "lib/package-lock.json"] as const;
+    async function savedOccurrence(sourcePath: string, matchId: string) {
+      const result = fixture();
+      result.repository.path = "C:\\workspace";
+      result.coverage.inputs = paths.map((path) => ({
+        ...result.coverage.inputs[0]!,
+        path,
+      }));
+      result.components[0]!.sourcePath = sourcePath;
+      result.matches[0]!.id = matchId;
+      result.outputDir = await temporaryDirectory("sca-windows-inventory-");
+      await saveDependencyScan(result);
+      return JSON.parse(
+        await readFile(join(result.outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+    }
+
+    const base = await savedOccurrence(paths[0], "base-match");
+    const head = await savedOccurrence(paths[1], "head-match");
+    expect(compareScaResults(base, head)).toMatchObject({
+      comparable: true,
+      persisting: [],
+      introduced: ["head-match"],
+      noLongerObserved: [{ matchId: "base-match", resolved: true }],
+    });
   });
+
+  test.each([
+    ["nested\\folder/package-lock.json", "nested/folder/package-lock.json"],
+    ["Nested/Package-Lock.json", "nested/package-lock.json"],
+  ])(
+    "preserves distinct POSIX source identities %s and %s",
+    (basePath, headPath) => {
+      const base = fixture();
+      const head = fixture();
+      base.components[0]!.sourcePath = basePath;
+      base.coverage.inputs[0]!.path = base.components[0]!.sourcePath;
+      head.components[0]!.sourcePath = headPath;
+      head.coverage.inputs[0]!.path = head.components[0]!.sourcePath;
+      head.matches[0]!.id = "head-match";
+      const comparison = compareScaResults(base, head);
+      expect(comparison.persisting).toEqual([]);
+      expect(comparison.newlyObserved).toEqual(["head-match"]);
+      expect(comparison.introduced).toEqual([]);
+      expect(comparison.noLongerObserved).toEqual([
+        { matchId: "match-1", resolved: false },
+      ]);
+      expect(comparison.comparable).toBe(false);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "preserves distinct drive-like POSIX inventory paths in saved comparisons",
@@ -1228,8 +1266,10 @@ describe("SCA update handoff", () => {
     );
   });
 
-  test("retains observed introduction chains and identifies only missing chains", () => {
+  test("retains observed introduction chains and their limitations in saved reports and handoffs", async () => {
     const result = fixture();
+    result.outputDir = await temporaryDirectory("sca-context-limitations-");
+    const manyBackticks = "`x".repeat(1_000_000);
     addMatch(result, "missing-chain", "2.0.0");
     result.packageContexts = [
       {
@@ -1252,19 +1292,32 @@ describe("SCA update handoff", () => {
           },
         ],
         dependencyGroups: ["dev"],
-        limitations: ["Synthetic installed-source limitation."],
+        limitations: [
+          "<!-- synthetic installed-source limitation",
+          manyBackticks,
+        ],
       },
     ];
-    const handoff = createScaUpdateHandoff(result, [
-      "match-1",
-      "missing-chain",
-    ]);
+    await saveDependencyScan(result);
+    const saved = await readDependencyScan(result.outputDir);
+    expect(saved.packageContexts?.[0]?.limitations).toEqual(
+      result.packageContexts[0]!.limitations,
+    );
+    const handoff = createScaUpdateHandoff(saved, ["match-1", "missing-chain"]);
     expect(handoff.findingText).toContain("synthetic-introducer");
     expect(handoff.findingText).toContain("packages/app/package.json");
     expect(handoff.findingText).toContain("not a complete graph");
-    expect(handoff.findingText).toContain(
-      "Synthetic installed-source limitation.",
-    );
+    for (const [text, heading] of [
+      [await readFile(join(result.outputDir, "report.md"), "utf8"), "Coverage"],
+      [handoff.findingText, "Decisions to resolve"],
+    ] as const) {
+      expect(text.includes("`` " + manyBackticks + " ``")).toBe(true);
+      const html = Bun.markdown.html(text);
+      expect(html).toContain(
+        "<code>&lt;!-- synthetic installed-source limitation</code>",
+      );
+      expect(html).toContain(`<h2>${heading}</h2>`);
+    }
     const missing = handoff.unresolvedDecisions.filter((decision) =>
       decision.includes("dependency chain"),
     );

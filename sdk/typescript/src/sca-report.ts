@@ -43,14 +43,49 @@ export interface ScaUpdateHandoff {
   validationInstructions: string;
 }
 
+function windowsRepository(path: string): boolean {
+  return win32.isAbsolute(path) && !posix.isAbsolute(path);
+}
+
 function sourceIdentity(path: string, repositoryPath: string): string {
-  const windows =
-    win32.isAbsolute(repositoryPath) && !posix.isAbsolute(repositoryPath);
-  const paths = windows ? win32 : posix;
+  const paths = windowsRepository(repositoryPath) ? win32 : posix;
   const normalized = paths.isAbsolute(path)
     ? paths.relative(repositoryPath, path)
     : paths.normalize(path);
-  return windows ? normalized.replaceAll("\\", "/") : normalized;
+  return paths === win32 ? normalized.replaceAll("\\", "/") : normalized;
+}
+
+function comparisonSourceIdentity(
+  base: ScaResult,
+  head: ScaResult,
+): typeof sourceIdentity {
+  if (
+    !windowsRepository(base.repository.path) ||
+    !windowsRepository(head.repository.path)
+  )
+    return sourceIdentity;
+
+  // Separate spellings within one saved inventory identify separate files.
+  const caseCollisions = new Set<string>();
+  for (const result of [base, head]) {
+    const spellings = new Map<string, string>();
+    for (const { path } of [
+      ...result.coverage.inputs,
+      ...result.coverage.configFiles,
+    ]) {
+      const normalized = sourceIdentity(path, result.repository.path);
+      const folded = normalized.toLowerCase();
+      const previous = spellings.get(folded);
+      if (previous !== undefined && previous !== normalized)
+        caseCollisions.add(folded);
+      spellings.set(folded, normalized);
+    }
+  }
+  return (path, repositoryPath) => {
+    const normalized = sourceIdentity(path, repositoryPath);
+    const folded = normalized.toLowerCase();
+    return caseCollisions.has(folded) ? normalized : folded;
+  };
 }
 
 function identifiers(match: ScaMatch): string[] {
@@ -84,11 +119,11 @@ function componentFor(result: ScaResult, match: ScaMatch): ScaComponent {
 
 function code(value: string): string {
   if (/[\r\n]/u.test(value)) value = JSON.stringify(value);
-  const longest = Math.max(
-    0,
-    ...(value.match(/`+/g) ?? []).map((run) => run.length),
-  );
-  const delimiter = "`".repeat(longest + 1);
+  let fenceLength = 1;
+  for (const match of value.matchAll(/`+/g)) {
+    fenceLength = Math.max(fenceLength, match[0].length + 1);
+  }
+  const delimiter = "`".repeat(fenceLength);
   return `${delimiter} ${value} ${delimiter}`;
 }
 
@@ -177,7 +212,7 @@ export function renderScaReport(result: ScaResult): string {
       ...(context?.installedPath
         ? [
             `Installed source: ${code(context.installedPath)}.`,
-            ...context.limitations,
+            ...context.limitations.map(code),
           ]
         : []),
       `Application assessment: **${assessment?.status ?? "not_started"}**${triage ? `; **${triage.verdict}** (${triage.confidence} confidence)` : ""}. Scope: static review of the current repository context.`,
@@ -219,7 +254,11 @@ export function renderScaReport(result: ScaResult): string {
   return `${sections.join("\n\n")}\n`;
 }
 
-function comparabilityReasons(base: ScaResult, head: ScaResult): string[] {
+function comparabilityReasons(
+  base: ScaResult,
+  head: ScaResult,
+  identity: typeof sourceIdentity,
+): string[] {
   const reasons: string[] = [];
   for (const [label, result] of [
     ["Base", base],
@@ -241,7 +280,7 @@ function comparabilityReasons(base: ScaResult, head: ScaResult): string[] {
     JSON.stringify(
       result.coverage.inputs
         .map((input) => [
-          sourceIdentity(input.path, result.repository.path),
+          identity(input.path, result.repository.path),
           input.format,
           input.status,
         ])
@@ -255,7 +294,7 @@ function comparabilityReasons(base: ScaResult, head: ScaResult): string[] {
     JSON.stringify(
       result.coverage.configFiles
         .map((file) => [
-          sourceIdentity(file.path, result.repository.path),
+          identity(file.path, result.repository.path),
           file.sha256,
         ])
         .sort((left, right) =>
@@ -300,7 +339,8 @@ export function compareScaResults(
   base: ScaResult,
   head: ScaResult,
 ): ScaComparison {
-  const reasons = comparabilityReasons(base, head);
+  const identity = comparisonSourceIdentity(base, head);
+  const reasons = comparabilityReasons(base, head, identity);
   const result: ScaComparison = {
     comparable: reasons.length === 0,
     reasons,
@@ -331,8 +371,8 @@ export function compareScaResults(
           comparisonPackageName(beforeComponent) ===
             comparisonPackageName(afterComponent) &&
           beforeComponent.ecosystem === afterComponent.ecosystem &&
-          sourceIdentity(beforeComponent.sourcePath, base.repository.path) ===
-            sourceIdentity(afterComponent.sourcePath, head.repository.path) &&
+          identity(beforeComponent.sourcePath, base.repository.path) ===
+            identity(afterComponent.sourcePath, head.repository.path) &&
           identifiers(after).some((id) => beforeIds.has(id))
         );
       })
@@ -497,7 +537,7 @@ export function createScaUpdateHandoff(
                 `Project manifest: ${code(context.manifestPath ?? "unknown")}.`,
                 `Observed local introduction chain: ${context.dependencyChain.map((entry) => `${code(entry.name)} ${code(entry.version)} at ${code(entry.path)}`).join(" → ")}.`,
                 "This is one observed local chain, not a complete graph or evidence of deployment or attacker reachability. Verify the introducing dependency's current update constraints.",
-                ...context.limitations,
+                ...context.limitations.map(code),
               ]
             : []),
         ].join("\n\n");
