@@ -4,6 +4,16 @@ import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
 
+test(
+  "metadata edits preserve a failed source check on the canary branch",
+  {
+    skip:
+      process.env.GITHUB_ACTIONS !== "true" ||
+      !process.env.GITHUB_HEAD_REF?.endsWith("/ci-metadata-negative-control"),
+  },
+  () => assert.fail("Intentional source failure for the metadata canary."),
+);
+
 const select = (paths, options = {}) =>
   selectChecks(paths, { event: "pull_request", ...options });
 
