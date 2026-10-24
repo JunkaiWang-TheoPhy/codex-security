@@ -71,6 +71,7 @@ from workbench.retained_coverage import (
 from workbench.retained_coverage import (
     _inherit_coverage_sources as _inherit_coverage_sources,
 )
+from workbench.retained_coverage import _projected_candidate_id
 from workbench.retained_coverage import (
     _retained_findings as _retained_findings,
 )
@@ -422,11 +423,16 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
     key = _finding_key(finding, worker_id)
     candidate_id = finding_candidate_id(finding)
     content = _finding_content(finding)
-    for previous in reversed(history):
+    matches = []
+    for previous in history:
         if not isinstance(previous, dict) or not all(field in previous for field in missing):
             continue
         provenance = previous.get("provenance", {})
-        if not isinstance(provenance, dict) or provenance.get("workerId", worker_id) != worker_id:
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("workerId", worker_id) != worker_id
+            or provenance.get("source") != finding["provenance"]["source"]
+        ):
             continue
         if (
             _finding_key(previous, worker_id) != key
@@ -434,23 +440,33 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
         ):
             continue
         proof = {field: previous[field] for field in missing}
-        if content | proof != _finding_content(previous):
-            continue
-        try:
-            _validate_completed_finding_evidence({"findings": [previous]})
-        except ContractError:
-            return
-        finding.update(proof)
+        if content | proof == _finding_content(previous):
+            matches.append(previous)
+    if not matches:
         return
+    # Recovery can append a normalized copy of an older observation after the
+    # worker's ordered revisions. Prefer the last authored proof or invalidation.
+    previous = next((row for row in reversed(matches) if "findingId" not in row), matches[-1])
+    try:
+        _validate_completed_finding_evidence({"findings": [previous]})
+    except ContractError:
+        return
+    finding.update({field: previous[field] for field in missing})
 
 
-def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warnings):
+def _defer_incomplete_deadline_findings(
+    findings, coverage, canonical_ids, worker_attempts, warnings
+):
     """Defer selected worker findings only after their revisions and receipts are reconciled."""
     retained = []
     missing: dict[str, set[str | None]] = {}
     for finding in findings["findings"]:
         worker_id = finding["provenance"].get("workerId")
-        if isinstance(worker_id, str) and finding["findingId"] not in canonical_ids:
+        if (
+            isinstance(worker_id, str)
+            and worker_id in worker_attempts
+            and finding["findingId"] not in canonical_ids
+        ):
             _restore_omitted_worker_evidence(finding, worker_id)
             try:
                 _validate_completed_finding_evidence({"findings": [finding]})
@@ -464,7 +480,15 @@ def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warni
                     "workerId": worker_id,
                 }
                 if candidate_id is not None:
-                    item["candidateId"] = candidate_id
+                    attempt = worker_attempts[worker_id]
+                    item["candidateId"] = _projected_candidate_id(
+                        f"{worker_id}-attempt-{attempt}", candidate_id
+                    )
+                    item["provenance"] = {
+                        "workerId": worker_id,
+                        "attempt": attempt,
+                        "candidateId": candidate_id,
+                    }
                 if item not in coverage["deferred"]:
                     coverage["deferred"].append(item)
                 warnings.append(reason)
@@ -477,7 +501,11 @@ def _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warni
     worker_surfaces = {}
     for surface in coverage["surfaces"]:
         source = surface.get("provenance")
-        if not isinstance(source, dict) or "workerId" not in source:
+        if (
+            not isinstance(source, dict)
+            or "workerId" not in source
+            or source["workerId"] != surface.get("workerId", source["workerId"])
+        ):
             source = surface
         owner = source.get("workerId")
         if isinstance(owner, str) and owner in missing:
@@ -614,7 +642,10 @@ def preserve_deep_deadline_draft(
         manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
         if preserve_reduction:
             canonical_ids = {finding["findingId"] for finding in canonical.findings["findings"]}
-            _defer_incomplete_deadline_findings(findings, coverage, canonical_ids, warnings)
+            worker_attempts = {worker["id"]: worker["attempt"] for worker in workers}
+            _defer_incomplete_deadline_findings(
+                findings, coverage, canonical_ids, worker_attempts, warnings
+            )
         manifest["scan"].pop("sealedAt", None)
         manifest["scan"].pop("artifacts", None)
         checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)

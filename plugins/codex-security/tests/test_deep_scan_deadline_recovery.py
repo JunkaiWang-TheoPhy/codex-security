@@ -214,6 +214,53 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     assert checkpoint.read_bytes() == original
 
 
+def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
+    workbench_api, workbench_db, deadline_scan
+):
+    scan = deadline_scan
+    local_id = "input"
+    accepted_owner = scan.completed_worker_id
+    accepted = {
+        "id": "accepted",
+        "label": "Accepted",
+        "disposition": "reported",
+        "receiptRefs": [],
+        "provenance": {"workerId": accepted_owner, "attempt": 1, "candidateId": local_id},
+    }
+    closure = {"id": local_id, "reason": "The parent completed this review."}
+    scan.coverage.update(surfaces=[accepted], resolvedDeferred=[closure])
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    owner, output = canceled_discovery_output(workbench_db, scan)
+    sparse = worker_finding(scan, "unfinished")
+    sparse.pop("validation")
+    sparse["provenance"].update(workerId=accepted_owner, candidateId=local_id)
+    surface = {
+        "id": "unfinished",
+        "label": "Unfinished",
+        "disposition": "reported",
+        "candidateId": local_id,
+        "provenance": {"workerId": accepted_owner},
+    }
+    checkpoint = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, findings=[sparse], surfaces=[surface])
+    )
+    original = checkpoint.read_bytes()
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["resolvedDeferred"] == [closure]
+    assert accepted in coverage["surfaces"]
+    unfinished = next(row for row in coverage["surfaces"] if row.get("workerId") == owner)
+    assert unfinished["disposition"] == "needs_follow_up"
+    (task,) = [row for row in coverage["deferred"] if row.get("workerId") == owner]
+    suffix = hashlib.sha256(local_id.encode()).hexdigest()
+    assert task["candidateId"] == f"{owner}-attempt-1-candidate-{suffix}"
+    assert task["provenance"]["candidateId"] == local_id
+    assert checkpoint.read_bytes() == original
+
+
 def write_worker_revisions(scan, output, earlier, latest):
     previous = write_checkpoint(
         output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
@@ -258,8 +305,13 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
 
 @pytest.mark.parametrize(
     "revision",
-    [{}, {"summary": "The updated finding describes a different exposure."}, {"validation": {}}],
-    ids=["omitted-proof", "changed-claim", "explicit-invalid-proof"],
+    [
+        {},
+        {"summary": "The updated finding describes a different exposure."},
+        {"validation": {}},
+        {"provenance": {"source": "independent_scanner", "candidateId": "worker-candidate"}},
+    ],
+    ids=["omitted-proof", "changed-claim", "explicit-invalid-proof", "different-producer"],
 )
 def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
     workbench_api, workbench_db, deadline_scan, revision
@@ -290,6 +342,37 @@ def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
         assert finding["identity"] == earlier["identity"]
         assert finding["validation"] == earlier["validation"]
         assert not deferred
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize("renewed", [False, True], ids=["withdrawn", "renewed"])
+def test_deadline_uses_the_last_authored_validation(
+    workbench_api, workbench_db, deadline_scan, renewed
+):
+    scan = deadline_scan
+    _, output = canceled_discovery_output(workbench_db, scan)
+    earlier = worker_finding(scan, "earlier-proof")
+    earlier["ruleId"] = "checkpoint-revision"
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        earlier.pop(key, None)
+    invalid = earlier | {"validation": None}
+    history = [earlier, invalid]
+    if renewed:
+        valid = earlier | {"validation": {**earlier["validation"], "summary": "Later validation."}}
+        history.append(valid)
+    latest = copy.deepcopy(earlier)
+    latest.pop("validation")
+    latest["provenance"]["previousFindings"] = history
+    originals = write_worker_revisions(scan, output, earlier, latest)
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
+    assert [row["validation"]["summary"] for row in retained] == (
+        ["Later validation."] if renewed else []
+    )
     assert {path: path.read_bytes() for path in originals} == originals
 
 

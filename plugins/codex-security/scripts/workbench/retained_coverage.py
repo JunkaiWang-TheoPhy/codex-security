@@ -136,6 +136,11 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _projected_candidate_id(prefix: str, candidate_id: str) -> str:
+    digest = hashlib.sha256(javascript_utf8(candidate_id)).hexdigest()
+    return f"{prefix}-candidate-{digest}"
+
+
 def _identity_candidate(finding: dict[str, Any]) -> str | None:
     return next(
         (
@@ -355,6 +360,9 @@ def _recover_preserved_worker_source(
         if discarded:
             discarded_findings.extend(discarded)
         for recovered_finding in recovered["findings"]:
+            provenance = recovered_finding["provenance"]
+            if "workerId" in provenance:
+                provenance["workerId"] = worker_id
             if needs_identity:
                 # Reconcile anonymous revisions before assigning sibling identities.
                 recovered_finding.pop("identity", None)
@@ -816,8 +824,7 @@ def merge_saved_results(
             if key in item:
                 result["provenance"][name] = item[key]
         if isinstance(item.get("candidateId"), str):
-            candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
-            result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
+            result["candidateId"] = _projected_candidate_id(prefix, item["candidateId"])
         if field == "surfaces":
             original = source_rows[index - 1] if isinstance(source_rows, list) else item
             result["id"] = surface_id(original, index)
