@@ -113,8 +113,9 @@ def interrupt_finish_before_commit(workbench_api, database, scan):
     assert os.waitstatus_to_exitcode(status) == 0
 
 
+@pytest.mark.parametrize("missing_field", ["remediation", "codeEvidence", "validation"])
 def test_discarded_worker_finding_leaves_its_review_pending(
-    workbench_api, workbench_db, deadline_scan
+    workbench_api, workbench_db, deadline_scan, missing_field
 ):
     scan = deadline_scan
     canonical = {
@@ -127,7 +128,7 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     worker_id, output = canceled_discovery_output(workbench_db, scan)
     invalid = worker_finding(scan, "incomplete-worker-finding")
-    invalid.pop("remediation")
+    invalid.pop(missing_field)
     checkpoint = write_checkpoint(
         output / "checkpoints",
         saved_draft(
@@ -153,7 +154,7 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     surface = next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)
     assert surface["disposition"] == "needs_follow_up"
     assert any(
-        row.get("workerId") == worker_id and "remediation" in row["reason"]
+        row.get("workerId") == worker_id and missing_field in row["reason"]
         for row in coverage["deferred"]
     )
     assert completed["progress"]["status"] == "complete"

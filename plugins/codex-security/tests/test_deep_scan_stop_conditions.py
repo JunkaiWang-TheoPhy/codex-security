@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from argparse import Namespace
+from datetime import datetime, timedelta
 
 import pytest
 from test_deep_scan_successful_publication import (
@@ -60,12 +61,13 @@ def saturated_scan(publication_scan, workbench_db):
     return scan
 
 
-def finish(workbench_api, connection, scan, *, terminal_reason="saturated"):
+def finish(workbench_api, connection, scan, *, terminal_reason="saturated", generation=None):
     return workbench_api["deep_scan"].finish_deep_scan(
         connection,
         Namespace(
             scan_id=scan.scan_id,
             terminal_reason=terminal_reason,
+            coordinator_generation=generation,
             manifest_path=str(scan.scan_dir / "scan-manifest.json"),
             staged_manifest_path=None,
             omitted_worker_id=[],
@@ -666,6 +668,56 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     if existing_head:
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
+
+
+def test_count_capped_repair_after_deadline_preserves_original_cutoff(
+    workbench_api, workbench_db, saturated_scan, monkeypatch
+):
+    scan = saturated_scan
+    deep = workbench_api["deep_scan"]
+    _, output = canceled_discovery_output(workbench_db, scan)
+    write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, deferred=[{"id": "surplus", "reason": "Unfinished review."}]),
+    )
+    owner = "count-cap-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = 2, discovery_runs_dispatched = 2, "
+            "max_time_hours = 1 WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    selected_at = selected["completedAt"]
+    coverage = (scan.scan_dir / "coverage.json").read_bytes()
+    findings_path = scan.scan_dir / "findings.json"
+    complete_findings = findings_path.read_bytes()
+    sparse = json.loads(complete_findings)
+    sparse["findings"][0].pop("validation")
+    findings_path.write_text(json.dumps(sparse))
+    selection_time = datetime.fromisoformat(selected_at.replace("Z", "+00:00"))
+    later = (selection_time + timedelta(hours=2)).isoformat()
+    monkeypatch.setattr(deep.dependencies(), "now", lambda: later)
+    claimed = deep.claim_deep_scan_coordinator(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+        ),
+    )
+    assert claimed["deepScan"]["completedAt"] is None
+    findings_path.write_bytes(complete_findings)
+    repaired = finish(
+        workbench_api,
+        workbench_db,
+        scan,
+        terminal_reason="capped",
+        generation=claimed["deepScan"]["coordinatorGeneration"],
+    )
+    assert (scan.scan_dir / "coverage.json").read_bytes() == coverage
+    assert repaired["completedAt"] == selected_at
 
 
 @pytest.mark.parametrize("sparse_finding", [False, True])

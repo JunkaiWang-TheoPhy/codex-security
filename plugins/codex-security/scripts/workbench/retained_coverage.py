@@ -21,6 +21,7 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _require_safe_json_value,
+    _validate_completed_finding_evidence,
     _validate_current_findings,
     _validate_schema_node,
     finding_candidate_id,
@@ -347,6 +348,7 @@ def _recover_preserved_worker_source(
         if recovered["findings"]:
             try:
                 _validate_current_findings(recovered, schema_dir)
+                _validate_completed_finding_evidence(recovered)
             except ContractError as exc:
                 warning = f"Skipped malformed finding: {exc}."
                 source_warnings.append(warning)

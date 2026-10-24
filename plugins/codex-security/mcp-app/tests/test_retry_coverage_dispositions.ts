@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { completedFinding } from "./scan-draft-fixture.ts";
 import {
   publishCoverageFixture,
   readFixtureCoverage,
@@ -64,23 +65,7 @@ for (const surfaceOnly of [false, true]) {
               disposition === "reported"
                 ? [
                     {
-                      ruleId: "synthetic.retained-boundary",
-                      title: "Synthetic boundary finding",
-                      summary: "A finding retained from an earlier review.",
-                      severity: {
-                        level: "high",
-                        score: 8.1,
-                        scoringSystem: "CVSS:3.1",
-                      },
-                      confidence: {
-                        level: "high",
-                        rationale: "Synthetic evidence.",
-                      },
-                      taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
-                      locations: [
-                        { path: "source.py", startLine: 1, endLine: 1 },
-                      ],
-                      remediation: "Review the synthetic boundary.",
+                      ...completedFinding("retained-boundary", "source.py"),
                       provenance: {
                         source: "local_plugin",
                         candidateId: "candidate-1",

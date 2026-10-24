@@ -169,8 +169,9 @@ def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlit
     return row
 
 
-def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
-    elapsed = _parse_timestamp(dependencies().now()) - _parse_timestamp(str(run["created_at"]))
+def deep_scan_deadline_reached(run: sqlite3.Row, at: str | None = None) -> bool:
+    cutoff = at or run["completed_at"] or dependencies().now()
+    elapsed = _parse_timestamp(cutoff) - _parse_timestamp(str(run["created_at"]))
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
 
 
@@ -505,7 +506,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "error": deep_scan_error(run),
         "createdAt": run["created_at"],
         "updatedAt": run["updated_at"],
-        "completedAt": run["completed_at"],
+        "completedAt": None if run["status"] == "running" else run["completed_at"],
         "workers": [deep_scan_worker_state(row) for row in worker_rows],
         "dedupInputs": [
             {
@@ -1031,7 +1032,6 @@ def claim_deep_scan_coordinator_locked(
             # A new generation fences the previous publisher before repair can write.
             connection.execute(
                 "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
-                "completed_at = NULL, "
                 "coordinator_generation = coordinator_generation + 1, updated_at = ? "
                 "WHERE scan_id = ?",
                 (timestamp, scan_id),
@@ -1801,10 +1801,15 @@ def finish_deep_scan_locked(
             raise SystemExit(
                 "Deep Scan cannot finish saturated before reaching its no-new-findings threshold."
             )
+        # Evidence repair keeps the cutoff that selected the original report.
+        selected_at = run["completed_at"] or dependencies().now()
+        discovery_deadline = args.terminal_reason == "capped" and deep_scan_deadline_reached(
+            run, selected_at
+        )
         if (
             args.terminal_reason == "capped"
             and run["discovery_runs_dispatched"] < run["max_discovery_runs"]
-            and not deep_scan_deadline_reached(run)
+            and not discovery_deadline
         ):
             raise SystemExit(
                 "Deep Scan cannot finish capped before reaching its configured maximum."
@@ -1833,7 +1838,6 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
-        discovery_deadline = args.terminal_reason == "capped" and deep_scan_deadline_reached(run)
         zero_discovery_deadline = (
             discovery_deadline
             and run["completion_sequence"] == 0
@@ -1883,7 +1887,7 @@ def finish_deep_scan_locked(
                 manifest_path = ?, completed_at = ?, updated_at = ?
             WHERE scan_id = ?
             """,
-            (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
+            (args.terminal_reason, manifest_path, selected_at, timestamp, scan_id),
         )
         cancel_active_workers(connection, scan_id, timestamp)
         connection.commit()
