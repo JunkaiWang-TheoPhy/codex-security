@@ -1,6 +1,6 @@
 import { gitText } from "./support/shell.js";
-import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { cpSync, readFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { check } from "prettier";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -115,6 +115,7 @@ const {
     repo: GitRepository;
     github: GitHubClient;
     dryRun?: boolean;
+    refreshBase?: boolean;
   }) => Promise<{
     action: string;
     reason?: string;
@@ -138,6 +139,9 @@ const workflow = readFileSync(
 );
 const directories = createTemporaryDirectoriesSync();
 afterEach(directories.cleanup);
+const templates = createTemporaryDirectoriesSync();
+afterAll(templates.cleanup);
+let baseRepository: string | undefined;
 
 function packageText(version = "0.1.23", dependencies = {}) {
   return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
@@ -240,6 +244,10 @@ class Fixture {
   readonly git = this.repo.git;
 
   constructor() {
+    if (baseRepository !== undefined) {
+      cpSync(baseRepository, this.directory, { recursive: true });
+      return;
+    }
     this.git("init", "-b", "main");
     this.git("config", "user.name", "Release Test");
     this.git("config", "user.email", "release-test@example.invalid");
@@ -255,6 +263,8 @@ class Fixture {
       },
       "release: bump to 0.1.23",
     );
+    baseRepository = templates.create("release pr template ");
+    cpSync(this.directory, baseRepository, { recursive: true });
   }
 
   head(branch = "main") {
@@ -320,11 +330,12 @@ class Fixture {
     return sha;
   }
 
-  run(dryRun = false) {
+  run(dryRun = false, refreshBase = true) {
     return reconcileReleasePullRequest({
       repo: this.repo,
       github: this.github,
       dryRun,
+      refreshBase,
     });
   }
 }
@@ -833,18 +844,47 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
-  const { permissions, jobs } = Bun.YAML.parse(workflow) as {
+  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
     permissions: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
       string,
       {
         if: string;
         permissions?: Record<string, string>;
+        concurrency?: { group: string; queue: string };
         env: { RELEASE_PR_DRY_RUN: string };
         steps: { id?: string; if?: string }[];
       }
     >;
   };
+
+  test("coalesces pending pushes while queued release refreshes keep their slots", () => {
+    const slot = (event_name: string, run_id: number) =>
+      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+        String(
+          new Function("github", `return ${expression}`)({
+            event_name,
+            run_id,
+          }),
+        ),
+      );
+    const push = slot("push", 10);
+    expect(slot("push", 13)).toBe(push);
+    const slots = [
+      push,
+      slot("schedule", 11),
+      slot("workflow_dispatch", 12),
+      slot("workflow_dispatch", 14),
+    ];
+    expect(new Set(slots).size).toBe(slots.length);
+    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
+    expect(jobs["reconcile"]?.concurrency).toEqual({
+      group: "node-release-pr",
+      queue: "max",
+    });
+  });
 
   test.each([
     { dryRun: "false", clientId: "", createsAppToken: false },
@@ -877,6 +917,8 @@ describe("release workflow controls", () => {
     { event: "push", enabled: undefined, dryRun: undefined, expected: true },
     { event: "push", enabled: "false", dryRun: undefined, expected: true },
     { event: "push", enabled: "true", dryRun: undefined, expected: false },
+    { event: "schedule", enabled: "true", dryRun: undefined, expected: false },
+    { event: "schedule", enabled: "false", dryRun: undefined, expected: null },
     {
       event: "workflow_dispatch",
       enabled: undefined,
@@ -927,9 +969,9 @@ describe("release workflow controls", () => {
           { RELEASE_PR_ENABLED: enabled },
         );
       });
-      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
-        String(expected),
-      ]);
+      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual(
+        expected === null ? [] : [String(expected)],
+      );
     },
   );
 });
@@ -1347,7 +1389,7 @@ describe("rolling release reconciliation", () => {
     fixture.merge("fix!: new interface", {
       "sdk/typescript/src/example.ts": "export const next = true;\n",
     });
-    const second = await fixture.run();
+    const second = await fixture.run(false, false);
     expect(second.action).toBe("updated");
     expect(second.pull).toBe(first.pull);
     expect(second.plan.version).toBe("0.2.0");
@@ -1404,11 +1446,17 @@ describe("rolling release reconciliation", () => {
     ]);
   });
 
-  test("incorporates main-only changes without another proposal review or repeated commits", async () => {
+  test("keeps an unchanged proposal head until a base refresh", async () => {
     const { fixture, first } = await Fixture.withInitialPull();
     fixture.merge("test: add coverage", {
       "sdk/typescript/tests-ts/example.test.ts": "// Additional coverage.\n",
     });
+    const initialWrites = fixture.github.writes.length;
+    const push = await fixture.run(false, false);
+    expect(push.action).toBe("unchanged");
+    expect(push.headSha).toBe(first.headSha);
+    expect(fixture.github.writes).toHaveLength(initialWrites);
+
     const updated = await fixture.run();
     expect(updated.action).toBe("updated");
     expect(updated.headSha).not.toBe(first.headSha);
@@ -1450,15 +1498,18 @@ describe("rolling release reconciliation", () => {
     );
     const reviewed = await fixture.run();
     const commentCount = fixture.github.comments.get(first.pull!)!.length;
-    fixture.merge("feat: another feature");
-    const updated = await fixture.run();
+    const mainSha = fixture.merge("feat: another feature");
+    const updated = await fixture.run(false, false);
     expect(updated.plan.files).toEqual(reviewed.plan.files);
-    expect(updated.reviewRequested).toBe(false);
+    expect(updated.headSha).toBe(reviewed.headSha);
     const comments = fixture.github.comments.get(first.pull!)!;
     expect(comments).toHaveLength(commentCount + 1);
-    expect(comments.at(-1)!.body).toContain("another feature");
-    expect(comments.at(-1)!.body).not.toContain("@codex review");
-    const rerun = await fixture.run();
+    const text = comments.at(-1)!.body.split("-->").at(-1)!;
+    expect(text).toContain(reviewed.headSha!);
+    expect(text).toContain(mainSha);
+    expect(text).toContain("another feature");
+    expect(text).not.toContain("@codex review");
+    const rerun = await fixture.run(false, false);
     expect(rerun.action).toBe("unchanged");
     expect(comments).toHaveLength(commentCount + 1);
   });
