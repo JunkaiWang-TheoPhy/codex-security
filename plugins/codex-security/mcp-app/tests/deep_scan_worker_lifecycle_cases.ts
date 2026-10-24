@@ -152,11 +152,11 @@ export function createWorkerLifecycleCases({
             (await readFile(fixture.completionMarkerPath, "utf8").catch(
               () => "",
             )) !==
-            (kind === undefined
-              ? "completed\n"
-              : pendingStart
-                ? "starting\n"
-                : "active\n")
+              (kind === undefined
+                ? "completed\n"
+                : pendingStart
+                  ? "starting\n"
+                  : "active\n")
           ) {
             await new Promise((resolve) => setTimeout(resolve, 10));
           }
