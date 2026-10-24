@@ -1,3 +1,4 @@
+import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
@@ -8,7 +9,6 @@ import {
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
-import { writeSync } from "node:fs";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 import {
@@ -17,7 +17,7 @@ import {
   nativeConfigOverrides,
 } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-import { mock } from "node:test";
+import { mock, test, type TestContext } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
 import childProcess, {
@@ -52,47 +52,20 @@ import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
-function executorMarker(phase: string, name: string): void {
-  try {
-    writeSync(process.stderr.fd, `[executor fixture] ${phase}: ${name}\n`);
-  } catch {
-    // Optional diagnostics must not replace the fixture's result.
-  }
-}
-
-async function executorCase<Result>(
-  operation: () => Promise<Result>,
-  name = operation.name,
-): Promise<Result> {
-  executorMarker("begin", name);
-  try {
-    const result = await operation();
-    executorMarker("end", name);
-    return result;
-  } catch (error) {
-    executorMarker("failure", name);
-    throw error;
-  }
-}
-
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const { bundledCodexSdkEnvironment } =
   process.platform === "win32"
     ? {}
-    : await executorCase(
-        () =>
-          importModule({
-            entryPoints: [
-              fileURLToPath(
-                new URL(
-                  "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-                  import.meta.url,
-                ),
-              ),
-            ],
-          }),
-        "bundled SDK environment",
-      );
+    : await importModule({
+        entryPoints: [
+          fileURLToPath(
+            new URL(
+              "../../../../sdk/typescript/src/codex-sdk-environment.ts",
+              import.meta.url,
+            ),
+          ),
+        ],
+      });
 
 const {
   CodexSdkWorkerExecutor,
@@ -104,25 +77,21 @@ const {
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
-} = await executorCase(
-  async () =>
-    importModule({
-      define: {
-        "import.meta.url": JSON.stringify(executorSource.href),
-      },
-      stdin: {
-        // Expose the environment snapshot only for tests.
-        contents: `${await readFile(executorSource, "utf8")}
+} = await importModule({
+  define: {
+    "import.meta.url": JSON.stringify(executorSource.href),
+  },
+  stdin: {
+    // Expose the environment snapshot only for tests.
+    contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
 export * from "./errors.js";
 export { parseDeepScan } from "./response.js";`,
-        loader: "ts",
-        resolveDir: path.dirname(fileURLToPath(executorSource)),
-        sourcefile: fileURLToPath(executorSource),
-      },
-    }),
-  "executor module",
-);
+    loader: "ts",
+    resolveDir: path.dirname(fileURLToPath(executorSource)),
+    sourcefile: fileURLToPath(executorSource),
+  },
+});
 
 const temporaryDirectories = createTemporaryDirectories(true);
 const fakeCodexFixture = createFakeCodexFixture.bind(
@@ -134,89 +103,154 @@ const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 
 try {
-  testCodeModeFrameDiagnosticBoundaries();
-  await executorCase(testLargeScopeTransport);
-  await executorCase(testOpenAiCredentialsReachWorker);
-  await executorCase(testWorkerCancellation);
-  testUsageLimitClassification();
-  await executorCase(testWorkerTerminalEvents);
-  await executorCase(testWorkerRuntimeSettings);
-  await executorCase(testUnsupportedProviderSnapshotFailsBeforeLaunch);
-  await executorCase(
-    () =>
-      testWorkerCyberAccessSettings({
-        CodexSdkWorkerExecutor,
-        fakeCodexFixture,
-        parentSandbox: trustedParentSandbox,
-        workerRequest,
-        assertConfigOverrides,
-        assertReadOnlyWorkerPolicy,
-        assertWorkerSubagentPolicy,
-        restoreEnv,
-      }),
-    "testWorkerCyberAccessSettings",
-  );
-  await executorCase(testCompletedWorkerSettlesWithoutWaitingForProcessExit);
-  if (process.platform !== "win32") {
-    await executorCase(
+  await test("Deep worker lifecycle", async (t) => {
+    await check(t, testWorkerCancellation);
+    await check(t, testWorkerTerminalEvents);
+    await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    if (process.platform !== "win32") {
+      await check(t, testStreamTerminationWithoutTerminalEventFails);
+      await check(t, testAbortPropagation);
+    }
+  });
+
+  await test("Deep worker runtime settings", async (t) => {
+    await check(t, testLargeScopeTransport);
+    await check(t, testOpenAiCredentialsReachWorker);
+    await check(t, testWorkerRuntimeSettings);
+    await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
+    await check(
+      t,
       () =>
-        testDeepScanContextSnapshots({
+        testWorkerCyberAccessSettings({
           CodexSdkWorkerExecutor,
           fakeCodexFixture,
           parentSandbox: trustedParentSandbox,
-        }),
-      "testDeepScanContextSnapshots",
-    );
-    await executorCase(testMissingParentSandboxFailsBeforeWorkerLaunch);
-    await executorCase(testDisallowedWorkerProfileFailsBeforeWorkerLaunch);
-    await executorCase(testRuntimePermissionProfileFallbackStopsAndDiscards);
-    await executorCase(testWorkerLaunchesWithoutGlobalCodex);
-    await executorCase(testPreflightBindsExecutableAndHomeBeforeChangingCwd);
-    await executorCase(
-      () =>
-        testConcurrentWorkerExecutableAliases({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          parentSandbox: trustedParentSandbox,
-          bundledCodexSdkEnvironment,
+          workerRequest,
+          assertConfigOverrides,
           assertReadOnlyWorkerPolicy,
+          assertWorkerSubagentPolicy,
+          restoreEnv,
         }),
-      "testConcurrentWorkerExecutableAliases",
+      "cyber access settings",
     );
-    await executorCase(testSdkInvocationAndThreadCapture);
-    await executorCase(
-      () => testBedrockCredentialsReachWorker(),
-      "testBedrockCredentialsReachWorker (static)",
-    );
-    await executorCase(
-      () => testBedrockCredentialsReachWorker("oidc"),
-      "testBedrockCredentialsReachWorker (oidc)",
-    );
-    await executorCase(testExternalProviderCredentialsReachWorker);
-    await executorCase(testArtifactServerUsesExtendedStartupTimeout);
-    await executorCase(testZeroSubagentsPreservesHostRestrictions);
-    await executorCase(testSdkResumesExistingThread);
-    await executorCase(testRetryNotificationDoesNotInterruptTurn);
-    await executorCase(testSandboxNamespaceDiagnosticIsPreserved);
-    await executorCase(testOwnedArtifactToolFailureDiagnosticIsPreserved);
-    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
-      await executorCase(
-        () => testArtifactDiagnosticSurvivesWorkerRetries(reference),
-        reference.includes("\0")
-          ? "artifact retry (NUL reference)"
-          : "artifact retry (Unicode reference)",
+    if (process.platform !== "win32") {
+      await check(
+        t,
+        () =>
+          testDeepScanContextSnapshots({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+          }),
+        "isolated context snapshots",
+      );
+      await check(t, testMissingParentSandboxFailsBeforeWorkerLaunch);
+      await check(t, testDisallowedWorkerProfileFailsBeforeWorkerLaunch);
+      await check(t, testRuntimePermissionProfileFallbackStopsAndDiscards);
+      await check(t, testSdkInvocationAndThreadCapture);
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker(),
+        "Bedrock credentials",
+      );
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker("oidc"),
+        "Bedrock OIDC credentials",
+      );
+      await check(t, testExternalProviderCredentialsReachWorker);
+      await check(t, testArtifactServerUsesExtendedStartupTimeout);
+      await check(t, testReducerAttemptContext);
+      await check(t, testZeroSubagentsPreservesHostRestrictions);
+      await check(t, testSdkResumesExistingThread);
+    }
+  });
+
+  await test("Deep worker executable selection", async (t) => {
+    await check(t, testConfiguredExecutablePaths);
+    if (process.platform !== "win32") {
+      await check(t, testWorkerLaunchesWithoutGlobalCodex);
+      await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+      await check(
+        t,
+        () =>
+          testConcurrentWorkerExecutableAliases({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+            bundledCodexSdkEnvironment,
+            assertReadOnlyWorkerPolicy,
+          }),
+        "concurrent executable aliases",
       );
     }
-    await executorCase(testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
-    await executorCase(testStreamTerminationWithoutTerminalEventFails);
-    await executorCase(testAbortPropagation);
-    await executorCase(testUnstructuredConfigurationFailureRemainsRetryable);
-    await executorCase(testUnstructuredThreadStartFailureRemainsRetryable);
-    await executorCase(testPolicyFailuresRemainWorkerErrors);
-    await executorCase(testMalformedCommandEventsRemainRetryable);
-    await executorCase(testRateLimitPolicyFailureRemainsRetryable);
-    await executorCase(testArtifactStartupTimeoutClassification);
-  }
+    await check(t, testWindowsAppsCodexFallsBackToRelocatedBinary);
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution(),
+      "global Windows npm package resolution",
+    );
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution("managed"),
+      "managed Windows npm package resolution",
+    );
+    if (process.platform === "win32") {
+      await check(t, testWindowsLongExecutableLaunches);
+      await check(t, testWindowsRootRelativePathsStayBoundToOriginalDrive);
+      await check(t, testWindowsWorkerEnvironmentPreservesMixedCaseKeys);
+      await check(t, testWindowsLauncherSkipsExtensionlessNpmShim);
+    }
+  });
+
+  await test("Deep worker diagnostics", async (t) => {
+    await check(t, testCodeModeFrameDiagnosticBoundaries);
+    await check(t, testUsageLimitClassification);
+    await check(t, testOsErrorCodesRemainRetryable);
+    await check(t, testTextualMissingPathErrorsRemainRetryable);
+    await check(t, testWorkerErrorClassificationPreservesExplicitFailures);
+    if (process.platform !== "win32") {
+      await check(t, testRetryNotificationDoesNotInterruptTurn);
+      await check(t, testSandboxNamespaceDiagnosticIsPreserved);
+      await check(t, testOwnedArtifactToolFailureDiagnosticIsPreserved);
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("discovery:\0" + "0"),
+        "artifact retry diagnostic: controls",
+      );
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("😀".repeat(1300)),
+        "artifact retry diagnostic: Unicode",
+      );
+      await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
+      await check(t, testUnstructuredConfigurationFailureRemainsRetryable);
+      await check(t, testUnstructuredThreadStartFailureRemainsRetryable);
+      await check(t, testPolicyFailuresRemainWorkerErrors);
+      await check(t, testMalformedCommandEventsRemainRetryable);
+      await check(t, testRateLimitPolicyFailureRemainsRetryable);
+      await check(
+        t,
+        () => testArtifactStartupTimeoutClassification(runFixtureWorker),
+        testArtifactStartupTimeoutClassification.name,
+      );
+    }
+  });
+} finally {
+  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
+  await temporaryDirectories.cleanup();
+}
+
+async function check(
+  t: TestContext,
+  run: () => void | Promise<void>,
+  name = run.name,
+) {
+  process.stdout.write(`Running ${t.name} / ${name}\n`);
+  await t.test(name, run);
+}
+
+function testConfiguredExecutablePaths() {
   assert.equal(
     resolveCodexPath({}, "darwin"),
     path.join(process.cwd(), "codex"),
@@ -274,30 +308,6 @@ try {
       originalCwd,
     ),
     path.join(originalCwd, "codex"),
-  );
-  testOsErrorCodesRemainRetryable();
-  testTextualMissingPathErrorsRemainRetryable();
-  testWorkerErrorClassificationPreservesExplicitFailures();
-  await executorCase(testWindowsAppsCodexFallsBackToRelocatedBinary);
-  await executorCase(
-    () => testWindowsNpmPackageResolution(),
-    "testWindowsNpmPackageResolution (global)",
-  );
-  await executorCase(
-    () => testWindowsNpmPackageResolution("managed"),
-    "testWindowsNpmPackageResolution (managed)",
-  );
-  if (process.platform === "win32") {
-    await executorCase(testWindowsLongExecutableLaunches);
-    await executorCase(testWindowsRootRelativePathsStayBoundToOriginalDrive);
-    await executorCase(testWindowsWorkerEnvironmentPreservesMixedCaseKeys);
-    await executorCase(testWindowsLauncherSkipsExtensionlessNpmShim);
-  }
-} finally {
-  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  await executorCase(
-    () => temporaryDirectories.cleanup(),
-    "temporary directory cleanup",
   );
 }
 
@@ -2339,6 +2349,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 "mcp",
                 "server.mjs",
               ),
+              "mcp_servers.cs_artifacts.args.1": "--artifact-writer",
+              "mcp_servers.cs_artifacts.args.2": "--stdio",
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT":
                 path.join(fixture.root, `plugin-${index}`),
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
@@ -2969,6 +2981,63 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
   });
 }
 
+async function testReducerAttemptContext() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    const deepReducer = {
+      scanRoot: path.join(fixture.root, "scans"),
+      claimedWorkers: [
+        {
+          id: "worker-1",
+          resultPath: path.join(fixture.root, "worker", "result.json"),
+          attempt: 2,
+        },
+      ],
+    };
+    for (const resume of [false, true]) {
+      await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: deepReducer.scanRoot,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan-id",
+        },
+      }).run({
+        kind: "dedup",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal,
+        ...(resume
+          ? {
+              resumeThreadId: "fixture-existing-thread",
+              continuationPrompt: "continue the reducer\n",
+            }
+          : {}),
+        artifactContext: {
+          root: workingDirectory,
+          layout: "reducer",
+          deepReducer,
+        },
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assertConfigOverrides(invocation.argv, {
+        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
+          JSON.stringify(deepReducer),
+      });
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
@@ -3168,10 +3237,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
           return message.includes(reference);
         },
       );
-      // Truncating the long, well-formed emoji message splits a surrogate pair.
-      const persistedDiagnostic = reference.includes("\0")
-        ? message
-        : "\ufffd\n...[truncated; sha256:";
+      const persistedDiagnostic = message;
       process.env.FAKE_CODEX_ARTIFACT_EVENT = JSON.stringify({
         type: "item.completed",
         item: {
@@ -3437,16 +3503,10 @@ async function testAbortPropagation() {
 }
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
-  await executorCase(
-    () => completedWorkerSettlesWithoutWaitingForProcessExit(),
-    "completed worker (unprofiled)",
-  );
+  await completedWorkerSettlesWithoutWaitingForProcessExit();
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
-      await executorCase(
-        () => completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed),
-        `completed worker (${kind}, ${resumed ? "resumed" : "fresh"})`,
-      );
+      await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
     }
   }
 }
@@ -3647,35 +3707,6 @@ async function testMalformedCommandEventsRemainRetryable() {
       const threadId = onThreadId.mock.calls.at(-1)?.arguments[0];
       assert.equal(threadId, "fixture-thread-id");
     });
-  }
-}
-
-async function testArtifactStartupTimeoutClassification() {
-  for (const prompt of [
-    "ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_POLICY_REFUSAL",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS_WITH_POLICY_REFUSAL",
-    "OTHER_MCP_STARTUP_TIMEOUT",
-    "OTHER_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "CATALOG_AUTH_ONLY",
-    "SYNC_AUTH_ONLY",
-  ]) {
-    await assert.rejects(
-      runFixtureWorker(prompt),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error",
-      `${prompt} should remain retryable`,
-    );
   }
 }
 
@@ -3951,75 +3982,71 @@ async function testWorkerCancellation() {
       "COMPLETE_THEN_HANG",
       "FAIL_THEN_HANG",
     ]) {
-      await executorCase(async () => {
-        await writeFile(promptPath, `${prompt}\n`);
-        const controller = new AbortController();
-        const cancellation = new Error(
-          "coordinator canceled its remaining workers",
+      await writeFile(promptPath, `${prompt}\n`);
+      const controller = new AbortController();
+      const cancellation = new Error(
+        "coordinator canceled its remaining workers",
+      );
+      // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
+      cancelDuringCleanup =
+        prompt === "COMPLETE_THEN_HANG"
+          ? () => controller.abort(cancellation)
+          : undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${prompt} worker did not settle`)),
+          10_000,
         );
-        // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
-        cancelDuringCleanup =
-          prompt === "COMPLETE_THEN_HANG"
-            ? () => controller.abort(cancellation)
-            : undefined;
-        const deadline = new Promise<never>((_, reject) => {
-          timeout = setTimeout(
-            () => reject(new Error(`${prompt} worker did not settle`)),
-            10_000,
-          );
-        });
-        const execution = Promise.race([
-          run(controller, () => {
-            if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
-          }),
+      });
+      const execution = Promise.race([
+        run(controller, () => {
+          if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
+        }),
+        deadline,
+      ]);
+      if (prompt === "BLOCK_AFTER_START") {
+        await assert.rejects(
+          execution,
+          (error: Error) =>
+            error?.name === "AbortError" ||
+            /abort|SIGTERM/i.test(error?.message ?? ""),
+        );
+        assert(workerSignal);
+        assert.equal(workerSignal.aborted, true);
+        assert.equal(workerSignal.reason, cancellation);
+      } else {
+        if (prompt === "FAIL_THEN_HANG") {
+          await assert.rejects(execution, /fixture worker failed/);
+          controller.abort(cancellation);
+        } else {
+          const result = await execution;
+          assert.equal(result.threadId, "fixture-thread-id");
+        }
+        assert.equal(controller.signal.aborted, true);
+        assert(workerSignal);
+        assert.equal(workerSignal.aborted, false);
+      }
+      assert.equal(
+        (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
+        false,
+      );
+      assert.notEqual(workerSignal, controller.signal);
+      const currentWorker = worker as ChildProcess | undefined;
+      assert(currentWorker);
+      assert.equal(currentWorker.killed, true);
+      if (
+        currentWorker.exitCode === null &&
+        currentWorker.signalCode === null
+      ) {
+        await Promise.race([
+          new Promise<void>((resolve) =>
+            worker!.once("close", () => resolve()),
+          ),
           deadline,
         ]);
-        if (prompt === "BLOCK_AFTER_START") {
-          await assert.rejects(
-            execution,
-            (error: Error) =>
-              error?.name === "AbortError" ||
-              /abort|SIGTERM/i.test(error?.message ?? ""),
-          );
-          assert(workerSignal);
-          assert.equal(workerSignal.aborted, true);
-          assert.equal(workerSignal.reason, cancellation);
-        } else {
-          if (prompt === "FAIL_THEN_HANG") {
-            await assert.rejects(execution, /fixture worker failed/);
-            controller.abort(cancellation);
-          } else {
-            const result = await execution;
-            assert.equal(result.threadId, "fixture-thread-id");
-          }
-          assert.equal(controller.signal.aborted, true);
-          assert(workerSignal);
-          assert.equal(workerSignal.aborted, false);
-        }
-        assert.equal(
-          (await readdir(fixture.root)).some((name) =>
-            name.startsWith("scope-"),
-          ),
-          false,
-        );
-        assert.notEqual(workerSignal, controller.signal);
-        const currentWorker = worker as ChildProcess | undefined;
-        assert(currentWorker);
-        assert.equal(currentWorker.killed, true);
-        if (
-          currentWorker.exitCode === null &&
-          currentWorker.signalCode === null
-        ) {
-          await Promise.race([
-            new Promise<void>((resolve) =>
-              worker!.once("close", () => resolve()),
-            ),
-            deadline,
-          ]);
-        }
-        clearTimeout(timeout);
-        cancelDuringCleanup = undefined;
-      }, `worker cancellation (${prompt})`);
+      }
+      clearTimeout(timeout);
+      cancelDuringCleanup = undefined;
     }
   } finally {
     clearTimeout(timeout);
