@@ -5790,7 +5790,9 @@ export function classifyConnectionFailure(
     return "network_error";
   }
   if (
-    /(?<![\w./\\-])(?:timed?[._ -]out|timeout)(?!\.?[\w/\\-])/iu.test(message)
+    /(?<![\w./\\-])(?:request[.-])?(?:timed?[._ -]out|timeout)(?!\.?[\w/\\-])/iu.test(
+      message,
+    )
   )
     return "timeout";
   return "unknown";

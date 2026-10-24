@@ -1549,6 +1549,9 @@ process.stdout.write(JSON.stringify({
       (
         [
           ["response_code=401", "Authentication failed."],
+          ["response.status=401", "Authentication failed."],
+          ["response.status_code=401", "Authentication failed."],
+          ["http.response.status_code=401", "Authentication failed."],
           ["HTTP 401: model 'gpt-5' not found", "Authentication failed."],
           [
             "response-code=403",
@@ -1648,6 +1651,9 @@ process.stdout.write(JSON.stringify({
           ["sqlite3.OperationalError: timeout waiting for lock", false],
           ["workbench request timed-out waiting for lock", false],
           ["database network_error reading local state", false],
+          ['{"code":"request-timed-out"}', true],
+          ['{"code":"request.timed.out"}', true],
+          ["ENOENT: open /synthetic/request-timed-out/result.json", false],
           ["request timed_out", true],
           ["network.error", true],
           ["ECONNABORTED", true],
@@ -1886,6 +1892,7 @@ process.stdout.write(JSON.stringify({
     ["could not open responseStatus=401/cache", null],
     ["permission denied opening C:\\synthetic\\response_code=403\\cache", null],
     ["could not open /synthetic/status_code=429/cache", null],
+    ["could not open /synthetic/http.response.status_code=401/cache", null],
     ["401 Unauthorized", "Authentication failed"],
     ["403 Forbidden", "selected model is unavailable"],
     ["429 Too Many Requests", "rate limited"],

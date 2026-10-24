@@ -1077,6 +1077,7 @@ interface ScanArguments extends ResolvedScanSettings {
 
 interface ScanOutcome {
   exitCode: number;
+  patchReviewCanceled?: true;
   data?: Record<string, unknown>;
   error?: string;
 }
@@ -2044,15 +2045,14 @@ export async function main(
     }
     return incurError({ code, message: outcome.error, exitCode });
   };
-  const finishSavedScan: typeof finishScan = (
+  const finishScanCommand: typeof finishScan = (
     outcome,
     format,
     incurError,
     code,
   ) => {
     if (
-      (outcome.error === undefined ||
-        (outcome.exitCode === 130 && outcome.data !== undefined)) &&
+      (outcome.error === undefined || outcome.patchReviewCanceled) &&
       format === "toon" &&
       !argv.some((argument) => OUTPUT_OPTION.test(argument))
     ) {
@@ -2641,7 +2641,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishSavedScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2660,7 +2660,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        return finishSavedScan(outcome, format, incurError);
+        return finishScanCommand(outcome, format, incurError);
       },
     })
     .command("rerun", {
@@ -2714,7 +2714,7 @@ export async function main(
           const message = errorMessage(error);
           if (exitCode === 0)
             errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishSavedScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2762,7 +2762,7 @@ export async function main(
               format: importFormat,
               parentScanId,
             });
-            return finishSavedScan(
+            return finishScanCommand(
               outcome,
               format,
               incurError,
@@ -2798,7 +2798,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishSavedScan(
+          return finishScanCommand(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2817,7 +2817,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        return finishSavedScan(outcome, format, incurError);
+        return finishScanCommand(outcome, format, incurError);
       },
     })
     .command("match", {
@@ -4485,17 +4485,9 @@ export async function main(
           outcome = { exitCode: 2, error: message };
         }
 
-        if (
-          (outcome.error === undefined ||
-            (outcome.exitCode === 130 && outcome.data !== undefined)) &&
-          !options.dryRun &&
-          format === "toon" &&
-          !argv.some((argument) => OUTPUT_OPTION.test(argument))
-        ) {
-          exitCode = outcome.exitCode;
-          return;
-        }
-        return finishScan(outcome, format, incurError);
+        return options.dryRun
+          ? finishScan(outcome, format, incurError)
+          : finishScanCommand(outcome, format, incurError);
       },
     })
     .command("install-hook", {
@@ -9075,7 +9067,7 @@ export function skillCommandFailure(
     ? ""
     : diagnosticDetail;
   const classificationDetail = adviceDetail.replace(
-    /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
+    /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
   );
   const classification = classifyConnectionFailure(classificationDetail);
@@ -10286,7 +10278,7 @@ async function executeScan(
     const message =
       "Patch review canceled by Ctrl-C. Saved scan results were kept.";
     errorOutput.write(`codex-security: ${message}\n`);
-    return finishResult(130, message);
+    return { ...finishResult(130, message), patchReviewCanceled: true };
   }
 
   let patches: FindingPatch[] = [];
