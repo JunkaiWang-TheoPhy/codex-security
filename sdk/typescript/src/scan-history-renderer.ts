@@ -1,6 +1,10 @@
 import { basename, join, relative } from "node:path";
 import stringWidth from "string-width";
 import type { JsonObject } from "./config.js";
+import {
+  formatCoverageScopeParts,
+  type CoverageSummary,
+} from "./coverage-presentation.js";
 
 export type HistoryCommand =
   "list" | "show" | "compare" | "match-all" | "findings" | "finding";
@@ -95,11 +99,17 @@ export function renderScanHistory(
     `  ${accent("━".repeat(width - 4))}`,
   ];
 
-  const wrap = (value: string, indent: number, prefix?: string): void => {
+  const wrap = (
+    value: string | readonly string[],
+    indent: number,
+    prefix?: string,
+  ): void => {
     const available = width - indent - 2;
     let line = "";
     let lineWidth = 0;
-    for (const word of clean(value).split(/\s+/)) {
+    const words =
+      typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
+    for (const word of words) {
       if (line.length > 0 && lineWidth + stringWidth(word) + 1 > available) {
         lines.push(`${prefix || " ".repeat(indent)}${line}`);
         prefix = undefined;
@@ -735,6 +745,14 @@ export function renderScanHistory(
     } else if (typeof result["updatedAt"] === "string") {
       lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
     }
+    const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
+    if (canonicalCoverage) {
+      wrap(
+        formatCoverageScopeParts(canonicalCoverage),
+        11,
+        `  ${strong("SCOPE")}  `,
+      );
+    }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
@@ -774,7 +792,9 @@ export function renderScanHistory(
     const recipe = result["recipe"] as JsonObject | undefined;
     const target = recipe?.["target"] as JsonObject | undefined;
     if (target) {
-      lines.push(`  ${strong("SCOPE")}  ${clean(JSON.stringify(target))}`);
+      lines.push(
+        `  ${strong("SAVED SCOPE")}  ${clean(JSON.stringify(target))}`,
+      );
     }
     const deepScan = recipe?.["deepScan"] as JsonObject | undefined;
     if (deepScan) {
