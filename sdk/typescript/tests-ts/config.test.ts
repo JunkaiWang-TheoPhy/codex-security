@@ -1,4 +1,12 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
@@ -800,7 +808,74 @@ describe("Codex configuration", () => {
         );
       const evidence = join(artifacts, "previous-SECURITY.md");
       await writeFile(evidence, "original");
+      const trace = process.env["CI_POLICY_STARTUP_TRACE"];
+      const capture = async (
+        phase: string,
+        result?: ReturnType<typeof sandbox>,
+      ) => {
+        if (process.platform !== "win32" || !trace) return;
+        const capturedAt = new Date().toISOString();
+        const native = await sandboxFailureDetails(codexHome, "");
+        const acl = Bun.spawnSync(
+          [
+            join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "icacls.exe",
+            ),
+            workspace,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        await appendFile(
+          trace,
+          JSON.stringify({
+            phase,
+            capturedAt,
+            workspace,
+            canonical: await realpath(workspace).catch(() => null),
+            isDirectory: await stat(workspace).then(
+              (value) => value.isDirectory(),
+              () => false,
+            ),
+            aclExit: acl.exitCode,
+            acl: new TextDecoder().decode(acl.stdout),
+            aclError: new TextDecoder().decode(acl.stderr),
+            nativeReadAcl: native
+              .split(/\r?\n/u)
+              .filter((line) =>
+                /read-acl-only mode: applying|read ACL run completed|read ACL helper already running|read ACL setup already active/iu.test(
+                  line,
+                ),
+              ),
+            exit: result?.exitCode,
+            output: result && new TextDecoder().decode(result.stdout),
+            error: result && new TextDecoder().decode(result.stderr),
+          }) + "\n",
+        );
+      };
+      const observe = (phase: string, result?: ReturnType<typeof sandbox>) =>
+        capture(phase, result).catch((error) => {
+          console.warn(
+            `Could not observe private workspace at ${phase}`,
+            error,
+          );
+        });
+      await observe("before first read");
       const read = sandbox("read", evidence);
+      let control: ReturnType<typeof sandbox> | undefined;
+      if (process.platform === "win32" && trace) {
+        await observe("first read returned", read);
+        try {
+          await waitForWindowsSandboxSetup();
+          await observe("after native mutex check");
+          control = sandbox("read", evidence);
+          await observe("paired read returned", control);
+        } catch (error) {
+          if (read.exitCode === 0) throw error;
+          console.warn("Paired read setup or execution failed", error);
+        }
+      }
       if (read.exitCode !== 0) {
         const details = new TextDecoder().decode(read.stderr);
         if (
@@ -819,6 +894,13 @@ describe("Codex configuration", () => {
         );
       }
       expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      if (process.platform === "win32" && trace) {
+        expect(
+          control?.exitCode,
+          "paired read after the native mutex check",
+        ).toBe(0);
+        expect(new TextDecoder().decode(control?.stdout)).toBe("original");
+      }
       for (const path of ambientCredentials)
         await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       const inspected = sandbox("read", sourceFile);
