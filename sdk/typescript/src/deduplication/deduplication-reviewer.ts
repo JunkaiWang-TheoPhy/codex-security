@@ -72,7 +72,11 @@ export function validateReview(
 ): DuplicateDecision {
   const result = parseDecision(reviewSchema, value);
   if (result.decision !== "SAME") return result;
-  const finding = requireFinding(result.mergedFinding, detailedErrors);
+  const finding = requireFinding(
+    result.mergedFinding,
+    detailedErrors,
+    "decision",
+  );
   if (finding.findingId !== result.canonicalFindingId)
     throw new InvalidDeduplicationDecision(
       "Every SAME decision requires the canonical finding's identity.",

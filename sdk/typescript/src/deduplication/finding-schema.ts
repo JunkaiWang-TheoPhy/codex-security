@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
+import { InvalidDeduplicationDecision } from "./decision-error.js";
 export class InvalidFindingError extends Error {
   readonly legacyMessage =
     "Record must satisfy the Finding schema, including provenance.";
@@ -26,7 +27,11 @@ export function findingSchema(): object {
   });
 }
 
-export function requireFinding(value: unknown, collectErrors = false): Finding {
+export function requireFinding(
+  value: unknown,
+  collectErrors = false,
+  failureKind: "record" | "decision" = "record",
+): Finding {
   let validator = validators.get(collectErrors);
   if (!validator) {
     validator = new Ajv2020({
@@ -35,18 +40,28 @@ export function requireFinding(value: unknown, collectErrors = false): Finding {
     }).compile<Finding>(findingSchema());
     validators.set(collectErrors, validator);
   }
-  if (!validator(value))
-    throw new InvalidFindingError(
-      "Record must satisfy the Finding schema, including provenance." +
-        (collectErrors
-          ? " " +
-            (validator.errors ?? [])
-              .map(
-                ({ instancePath, message }) =>
-                  `${instancePath || "/"}: ${message ?? "invalid value"}`,
-              )
-              .join("; ")
-          : ""),
-    );
-  return value;
+  try {
+    if (!validator(value)) {
+      const failure = new InvalidFindingError(
+        "Record must satisfy the Finding schema, including provenance." +
+          (collectErrors
+            ? " " +
+              (validator.errors ?? [])
+                .map(
+                  ({ instancePath, message }) =>
+                    `${instancePath || "/"}: ${message ?? "invalid value"}`,
+                )
+                .join("; ")
+            : ""),
+      );
+      if (failureKind === "decision")
+        throw new InvalidDeduplicationDecision(failure.message, {
+          cause: failure,
+        });
+      throw failure;
+    }
+    return value;
+  } finally {
+    validator.errors = null;
+  }
 }

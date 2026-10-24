@@ -7,7 +7,7 @@ import { validateReview } from "../src/deduplication/deduplication-reviewer.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -958,28 +958,37 @@ test("review options remain cloneable for worker-backed adapters", async () => {
   expect(result.status).toBe("completed");
 });
 
-test.each(["preflight", "final"])(
-  "%s preserves adapter Zod errors",
-  async (stage) => {
-    const fault = new z.ZodError([]);
-    const candidate = Object.defineProperty({}, "decisions", {
-      enumerable: true,
-      get() {
-        throw fault;
+test.each([
+  ["preflight", "Zod"],
+  ["final", "Zod"],
+  ["preflight", "import"],
+  ["final", "import"],
+])("%s preserves adapter %s errors", async (stage, kind) => {
+  let fault: unknown = new z.ZodError([]);
+  if (kind === "import") {
+    try {
+      requireFinding({});
+    } catch (error) {
+      fault = error;
+    }
+  }
+  const candidate = Object.defineProperty({}, "decisions", {
+    enumerable: true,
+    get() {
+      throw fault;
+    },
+  });
+  const result = await deduplicateRecords(input(), {
+    throwReviewErrors: true,
+    reviewRunner: {
+      async run(_request, options) {
+        if (stage === "preflight") options!.validate!(candidate);
+        return candidate;
       },
-    });
-    const result = await deduplicateRecords(input(), {
-      throwReviewErrors: true,
-      reviewRunner: {
-        async run(_request, options) {
-          if (stage === "preflight") options!.validate!(candidate);
-          return candidate;
-        },
-      },
-    }).catch((error: unknown) => error);
-    expect(result).toBe(fault);
-  },
-);
+    },
+  }).catch((error: unknown) => error);
+  expect(result).toBe(fault);
+});
 
 test.each([false, true])(
   "preflight permits correction without changing final acceptance (throw errors: %s)",
@@ -1012,5 +1021,54 @@ test.each([false, true])(
     ).toEqual([["a", "b"], ["c", "neighbor"], ["d"]]);
     expect(calls).toBe(6);
     expect(preflights).toBe(calls);
+  },
+);
+
+test("detailed finding feedback releases cached Ajv errors after formatting", () => {
+  const script = `
+    import Ajv from ${JSON.stringify(import.meta.resolve("ajv/dist/2020.js"))};
+    const compiled = [];
+    const compile = Ajv.prototype.compile;
+    Ajv.prototype.compile = function (...args) {
+      const validate = compile.apply(this, args);
+      compiled.push(validate);
+      return validate;
+    };
+    const { requireFinding } = await import(${JSON.stringify(new URL("../src/deduplication/finding-schema.ts", import.meta.url).href)});
+    try { requireFinding({}, true); } catch (error) {
+      console.log(JSON.stringify({ message: error.message, errors: compiled.at(-1).errors }));
+    }
+  `;
+  const child = spawnSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+  });
+  expect(child.status).toBe(0);
+  const result = JSON.parse(child.stdout);
+  expect(result.message).toContain("locations");
+  expect(result.errors).toBeNull();
+});
+
+test.each(["empty", "cancelled"])(
+  "%s calls do not initialize a lazy review provider",
+  async (kind) => {
+    let reads = 0;
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    if (kind === "cancelled") controller.abort(reason);
+    const result = await deduplicateRecords(
+      kind === "empty"
+        ? { version: 1, observations: [], candidateRelationships: [] }
+        : input(),
+      {
+        signal: controller.signal,
+        get reviewRunner(): never {
+          reads++;
+          throw new Error("Synthetic provider unavailable");
+        },
+      },
+    ).catch((error: unknown) => error);
+    expect(reads).toBe(0);
+    if (kind === "cancelled") expect(result).toBe(reason);
+    else expect(result).toHaveProperty("status", "completed");
   },
 );

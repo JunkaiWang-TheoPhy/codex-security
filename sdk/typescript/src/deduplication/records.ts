@@ -102,8 +102,10 @@ export async function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
 ): Promise<DeduplicateRecordsResult> {
-  const { signal, reviewRunner, throwReviewErrors } = options;
+  const { signal } = options;
   signal?.throwIfAborted();
+  const { throwReviewErrors } = options;
+  let reviewRunner: DeduplicationReviewRunner | undefined;
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -157,19 +159,12 @@ export async function deduplicateRecords(
         detailedErrors = throwReviewErrors,
       ): T => {
         signal?.throwIfAborted();
-        try {
-          return validate(value, detailedErrors);
-        } catch (error) {
-          if (error instanceof InvalidFindingError)
-            throw new InvalidDeduplicationDecision(error.message, {
-              cause: error,
-            });
-          throw error;
-        }
+        return validate(value, detailedErrors);
       };
       try {
         return await abortable(async () => {
           signal?.throwIfAborted();
+          reviewRunner ??= options.reviewRunner;
           return validateDecision(
             await reviewRunner.run(
               {
