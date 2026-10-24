@@ -3,6 +3,8 @@ name: node-release-pr
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "27 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -15,7 +17,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: node-release-pr
+  # A new push can replace a pending push. Each requested refresh keeps its own slot.
+  group: node-release-pr-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -23,7 +26,7 @@ jobs:
     if: >-
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
-      (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
+      (github.event_name == 'push' && vars.RELEASE_PR_ENABLED != 'true'))
     name: preview release PR
     runs-on: ubuntu-latest
     env:
@@ -56,6 +59,9 @@ jobs:
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED == 'true'))
     name: maintain release PR
     runs-on: ubuntu-latest
+    concurrency:
+      group: node-release-pr
+      queue: max
     permissions:
       contents: write
       pull-requests: write

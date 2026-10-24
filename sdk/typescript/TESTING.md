@@ -43,6 +43,11 @@ executor receipts. To rerun just the installed-package check, use
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
 
+The SDK shards in `node-ci` use the workflow run number as their seed, so
+rerunning a job repeats its test order. To replay a shard locally, use its
+platform, shard selector, and seed, for example
+`node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native
 credential and document checks. `test:ci` writes `reports/junit.xml` and
@@ -151,7 +156,7 @@ Source qualification runs the full Bun suite once per OS under Node 22: six
 file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
 as separate jobs; each job uses Bun's default serial runner. The other selected
 Node versions run the installed-package checks instead of repeating the same
-Bun suite. MCP tests run in three required jobs using Node's native file sharding,
+Bun suite. MCP tests run in two required jobs using Node's native file sharding,
 with two isolated test file processes per job. Local and release `test:mcp`
 commands still run the full suite. Python tests run separately and use four
 isolated pytest-xdist workers with work stealing; worker crashes fail the run
