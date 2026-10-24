@@ -38,9 +38,9 @@ export function requireFinding(
       strict: false,
       allErrors: collectErrors,
     }).compile<Finding>(findingSchema());
-    // Detailed validators also own nested $ref error arrays; do not retain them.
-    if (!collectErrors) validators.set(collectErrors, validator);
+    validators.set(collectErrors, validator);
   }
+  let valid = false;
   try {
     if (!validator(value)) {
       const failure = new InvalidFindingError(
@@ -61,8 +61,11 @@ export function requireFinding(
         });
       throw failure;
     }
+    valid = true;
     return value;
   } finally {
     validator.errors = null;
+    // Failed detailed checks can leave diagnostics on compiled $ref validators.
+    if (collectErrors && !valid) validators.delete(collectErrors);
   }
 }

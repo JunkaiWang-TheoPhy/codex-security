@@ -1043,10 +1043,20 @@ test("detailed finding feedback releases root and nested validator state", () =>
     const rejected = compiled.at(-1);
     requireFinding(valid, true);
     const detailedWasReplaced = rejected !== compiled.at(-1);
+    const detailed = compiled.at(-1);
+    requireFinding(valid, true);
+    const detailedReused = detailed === compiled.at(-1);
+    const fault = new Error("Synthetic adapter failure");
+    const throwing = structuredClone(valid);
+    Object.defineProperty(throwing, "title", { get() { throw fault; } });
+    let preserved;
+    try { requireFinding(throwing, true); } catch (error) { preserved = error === fault; }
+    requireFinding(valid, true);
+    const replacedAfterThrow = detailed !== compiled.at(-1);
     requireFinding(valid);
     const legacy = compiled.at(-1);
     requireFinding(valid);
-    console.log(JSON.stringify({ message, detailedWasReplaced, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
+    console.log(JSON.stringify({ message, detailedWasReplaced, detailedReused, preserved, replacedAfterThrow, legacyReused: legacy === compiled.at(-1), rootErrors: rejected.errors }));
   `;
   const child = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
@@ -1056,6 +1066,9 @@ test("detailed finding feedback releases root and nested validator state", () =>
   expect(result.message).toContain("/attackPath/dataFlow/transformations");
   expect(result.rootErrors).toBeNull();
   expect(result.detailedWasReplaced).toBe(true);
+  expect(result.detailedReused).toBe(true);
+  expect(result.preserved).toBe(true);
+  expect(result.replacedAfterThrow).toBe(true);
   expect(result.legacyReused).toBe(true);
 });
 
