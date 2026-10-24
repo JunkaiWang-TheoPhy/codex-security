@@ -134,6 +134,7 @@ test("the final CI gate executes selected container failures and permits unselec
     const classified = {
       ...needs,
       "classify-changes": { result: "success", outputs },
+      "action-ci": { result: "success", outputs: { passed: "true" } },
     };
     for (const result of ["success", "failure", "cancelled", "skipped"]) {
       const execution = spawnSync(
