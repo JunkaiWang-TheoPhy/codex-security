@@ -49,6 +49,11 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+const withCompletedEvidence = (finding: FixtureFinding) => ({
+  ...finding,
+  ...completedFindingEvidence(finding.locations[0]!.path),
+});
+
 for (const layout of ["standard", "diff", "deep"] as const) {
   for (const variant of [
     "one",
@@ -243,7 +248,10 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
     const f = await fixture(t, layout);
     for (const candidate of ["first", "second", "third"])
-      await f.write({ ...f.draft(), findings: [findingFor(candidate)] });
+      await f.write({
+        ...f.draft(),
+        findings: [withCompletedEvidence(findingFor(candidate))],
+      });
     await f.write(f.draft({}, true));
     const saved = JSON.parse(
       await readFile(
@@ -2432,7 +2440,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         }),
       );
       const reported = {
-        ...old,
+        ...withCompletedEvidence(old),
         provenance: { source: "local_plugin", candidateId: "review" },
       };
       const input = { ...f.draft({}, true), findings: [reported] };
@@ -2520,9 +2528,7 @@ for (const additional of ["none", "surface", "task", "completed-surface"]) {
     const finding = findingFor("candidate-review");
     await f.write({
       ...f.draft({}, true),
-      findings: [
-        { ...finding, ...completedFindingEvidence(finding.locations[0]!.path) },
-      ],
+      findings: [withCompletedEvidence(finding)],
     });
     const { importSource } = await import("./import-module.ts");
     const { validateDiscoveryArtifacts } = await importSource(
