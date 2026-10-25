@@ -4974,27 +4974,103 @@ describe("CodexSecurity orchestration", () => {
     "preserves the requested post-scan turn when Deep Scan routing fails with %p",
     async (postScanPrompt) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
-      const prompts: string[] = [];
+      const target = ["api", "notes.md"];
+      await mkdir(join(repository, "api"));
+      await writeFile(join(repository, "notes.md"), "fixture");
+      const turns: Array<{ prompt: string; paths: string[] }> = [];
+      const warnings: string[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         canRunDirectDeepScan: () => false,
         readDeepScanParentConfig: async () =>
           fail("native configuration failed"),
-        createCodex: codexFactory(async (prompt) => {
-          prompts.push(prompt);
-          return { events: completedEvents() };
-        }),
+        createCodex: async ({ env }) =>
+          codexFactory(async (prompt: string) => {
+            const pathsFile = env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+            if (!pathsFile) throw new Error("Missing scope file location");
+            turns.push({
+              prompt,
+              paths: JSON.parse(await readFile(pathsFile, "utf8")),
+            });
+            return { events: completedEvents() };
+          })(),
       });
       try {
         await expect(
-          client.run(repository, { mode: "deep", postScanPrompt }),
+          client.run(repository, {
+            mode: "deep",
+            target,
+            postScanPrompt,
+            onWarning: (warning) => warnings.push(warning),
+          }),
         ).rejects.toThrow("native configuration failed");
-        expect(prompts).toEqual(postScanPrompt ? [postScanPrompt] : []);
+        expect(warnings).toEqual([]);
+        expect(turns).toEqual(
+          postScanPrompt ? [{ prompt: postScanPrompt, paths: target }] : [],
+        );
       } finally {
         await client.close();
       }
     },
   );
+
+  test("checks the resumed budget before routing a Deep Scan failure follow-up", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const scanId = "scan_example_001";
+    const threadId = "thread-1";
+    await writeUsageSession(
+      codexHome,
+      threadId,
+      {
+        input_tokens: 2_000,
+        output_tokens: 0,
+        total_tokens: 2_000,
+      },
+      { cwd: scanDir },
+    );
+    const readConfig = mock(rejecting("native configuration failed"));
+    const runStreamed = mock(async () => ({
+      events: completedEvents(threadId),
+    }));
+    const thread = { id: threadId, runStreamed };
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      canRunDirectDeepScan: () => false,
+      readDeepScanParentConfig: readConfig,
+      createCodex: () => ({
+        startThread: () => thread,
+        resumeThread: () => thread,
+      }),
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+        if (args[0] === "get-cli-scan-resume")
+          return {
+            scanId,
+            scanDir,
+            threadId,
+            targetId: "target_sha256_example",
+            targetRevision: "deadbeef",
+            recipe: { repository, target: { kind: "repository", paths: [] } },
+            contract: { target: { allowedKinds: ["git_revision"] } },
+          };
+        return mockWorkbench(args, input);
+      },
+    });
+    try {
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+          maxCostUsd: 0.004,
+          postScanPrompt: "Summarize the failed scan.",
+        }),
+      ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+      expect(readConfig).not.toHaveBeenCalled();
+      expect(runStreamed).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
+  });
 
   test.each([
     ["a completed scan with scope notes", "completed", false, false],

@@ -2883,6 +2883,25 @@ export class CodexSecurity {
           );
         return client.resumeThread(id, threadOptions);
       };
+      if (typeof resumeThreadId === "string") {
+        tracker.start(resumeThreadId);
+        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
+        await tracker.refresh().catch(reportTrackingError);
+      }
+      checkOpen();
+      if (normalized.kind === "paths" && targetPathsFile !== null) {
+        await writeFile(
+          targetPathsFile,
+          `${jsonForPrompt(normalized.paths)}\n`,
+          {
+            flag: "wx",
+            mode: 0o400,
+            signal,
+          },
+        );
+        await chmod(targetPathsFile, 0o400);
+        checkOpen();
+      }
       let parentCodex = codex;
       const pluginServers =
         mode === "deep" && !directDeepScan && !this.#dependencies.hostedScan
@@ -2939,25 +2958,8 @@ export class CodexSecurity {
         }
         runPostScan = null;
       }
+      checkOpen();
       const thread = openThread(parentCodex, resumeThreadId);
-      if (typeof resumeThreadId === "string") {
-        tracker.start(resumeThreadId);
-        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
-        await tracker.refresh().catch(reportTrackingError);
-        checkOpen();
-      }
-      const serializedPaths =
-        normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
-      checkOpen();
-      if (serializedPaths !== null && targetPathsFile !== null) {
-        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
-          flag: "wx",
-          mode: 0o400,
-          signal,
-        });
-        await chmod(targetPathsFile, 0o400);
-      }
-      checkOpen();
       let scanThreadId = thread.id;
       if (postScanPrompt?.trim()) {
         runPostScan = () => {
