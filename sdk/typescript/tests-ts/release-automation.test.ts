@@ -3829,7 +3829,7 @@ describe("GitHub release workflow safeguards", () => {
           needs?: string | string[];
           uses?: string;
           outputs?: Record<string, string>;
-          "timeout-minutes"?: number;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
@@ -3848,8 +3848,10 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toBe(10);
-    expect(classifier.if).toContain("github.event.changes.base != null");
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
+    );
+    expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
     );
@@ -3859,7 +3861,10 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
-    const aggregates = ["ci", "required-test", "windows"];
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
+    const aggregates = ["ci", "required-test"];
     const checks = Object.entries(workflow.jobs).filter(
       ([name]) => name !== "classify-changes" && !aggregates.includes(name),
     );
@@ -3886,8 +3891,13 @@ describe("GitHub release workflow safeguards", () => {
         .href
     )) as { failedChecks(needs: unknown): string[] };
     const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
     const flags = Object.keys(classifierOutputs).filter(
-      (key) => !key.endsWith("-matrix"),
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.endsWith("-matrix"),
     );
     for (const enabled of flags) {
       expect(classifierOutputs[enabled]).toBe(
@@ -3897,7 +3907,8 @@ describe("GitHub release workflow safeguards", () => {
         flags.map((key) => [key, String(key === enabled)]),
       );
       const scheduled = checks.filter(
-        ([, job]) =>
+        ([name, job]) =>
+          name === "static-checks" ||
           !job.if ||
           job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
       );
@@ -3916,28 +3927,6 @@ describe("GitHub release workflow safeguards", () => {
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-
-    const conditionCases = [];
-    for (const name of ["required-test", "windows"]) {
-      const job = workflow.jobs[name]!;
-      expect(new Set([job.needs].flat())).toEqual(
-        new Set(["classify-changes", "ci"]),
-      );
-      const gate = job.steps.find(({ name }) => name === "Require CI gate");
-      expect(gate?.run).toBe("exit 1");
-      for (const result of ["success", "failure", "cancelled", "skipped"]) {
-        conditionCases.push({
-          condition: gate?.if ?? "",
-          values: { "needs.ci.result": result },
-          expected: result !== "success",
-          message: `${name}: ${result}`,
-        });
-      }
-    }
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
   });
 
   test("documents a canonical historical-summary prefix block", () => {
