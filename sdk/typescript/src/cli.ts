@@ -3811,14 +3811,17 @@ export async function main(
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
+          const input = resolveInputPath(
+            args.scanDir,
+            dependencies.currentDirectory(),
+          );
           const destination = publicationDestination(
             options,
             dependencies.environment,
           );
-          const directory = await resolveParentTraversal(
-            resolveInputPath(args.scanDir, dependencies.currentDirectory()),
-            { allowMissing: true },
-          );
+          const directory = await resolveParentTraversal(input, {
+            allowMissing: true,
+          });
           const result = await (
             dependencies.checkScanPublication ?? checkScanPublication
           )(directory, { ...destination, signal: controller.signal });
