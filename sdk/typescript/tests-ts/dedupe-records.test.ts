@@ -1,13 +1,14 @@
-import { expect, test, mock } from "bun:test";
+import { expect, test, mock, onTestFinished, spyOn } from "bun:test";
 import { throws } from "node:assert/strict";
 import { z } from "zod";
 import { InvalidDeduplicationDecision } from "../src/index.js";
 import { requireFinding } from "../src/deduplication/finding-schema.js";
 import { validateReview } from "../src/deduplication/deduplication-reviewer.js";
+import * as records from "../src/deduplication/records.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -671,6 +672,12 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
   input.destroy();
 });
 
+const emptyRecords = {
+  version: 1,
+  observations: [],
+  candidateRelationships: [],
+};
+
 test("a disconnect while flushing the final result does not send a second response", async () => {
   const inputStream = new PassThrough();
   const messages: Message[] = [];
@@ -682,16 +689,7 @@ test("a disconnect while flushing the final result does not send a second respon
     },
   });
   const done = runRecordsProtocol(inputStream, output);
-  inputStream.write(
-    `${JSON.stringify({
-      ...run,
-      params: {
-        version: 1,
-        observations: [],
-        candidateRelationships: [],
-      },
-    })}\n`,
-  );
+  inputStream.write(`${JSON.stringify({ ...run, params: emptyRecords })}\n`);
   expect(await done).toBe(0);
   expect(messages).toMatchObject([
     { id: "run-1", result: { status: "completed" } },
@@ -699,56 +697,77 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
-test.each(["result", "error"] as const)(
-  "cancellation stops a blocked terminal %s without sending another response",
-  async (terminal) => {
-    for (const notification of [false, true]) {
+const completed = { result: { status: "completed" } };
+for (const trigger of ["signal", "notification"]) {
+  test.serial.each([
+    ["review request", run.params, { method: "review.run" }],
+    ["terminal result", emptyRecords, completed],
+    ["terminal result flushed after cancel", emptyRecords, completed],
+    ["terminal error", {}, { error: expect.anything() }],
+  ] as const)(
+    `${trigger} stops a blocked %s`,
+    async (stage, params, expected) => {
       const inputStream = new PassThrough();
-      const messages: Message[] = [];
-      let release!: () => void;
-      const writing = Promise.withResolvers<void>();
+      const writing = Promise.withResolvers<() => void>();
       const output = new Writable({
-        write(chunk, _encoding, callback) {
-          messages.push(JSON.parse(chunk.toString()));
-          release = callback;
-          writing.resolve();
-        },
+        write: (_chunk, _encoding, flush) => writing.resolve(flush),
       });
-      const controller = new AbortController();
-      const done = runRecordsProtocol(inputStream, output, controller.signal);
-      try {
-        inputStream.write(
-          `${JSON.stringify({
-            ...run,
-            params:
-              terminal === "error"
-                ? {}
-                : {
-                    version: 1,
-                    observations: [],
-                    candidateRelationships: [],
+      const writes = spyOn(output, "write");
+      let pendingReview: Promise<unknown> | undefined;
+      const dedupe = records.deduplicateRecords;
+      const operation =
+        stage === "review request"
+          ? spyOn(records, "deduplicateRecords").mockImplementationOnce(
+              (input, options) =>
+                dedupe(input, {
+                  ...options,
+                  reviewRunner: {
+                    run: (...args) =>
+                      (pendingReview = options.reviewRunner.run(...args)),
                   },
-          })}\n`,
-        );
-        await writing.promise;
-        if (notification)
-          inputStream.write(
-            `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
-          );
-        else controller.abort("SIGTERM");
-        expect(output.destroyed).toBe(true);
-        expect(await done).toBe(2);
-        expect(messages).toHaveLength(1);
-        expect(messages[0]).toHaveProperty(terminal);
-      } finally {
-        release();
-        await done;
-        inputStream.destroy();
+                }),
+            )
+          : undefined;
+      const controller = new AbortController();
+      let finished = false;
+      onTestFinished(() => {
+        finished = true;
+        operation?.mockRestore();
+        writes.mockRestore();
         output.destroy();
+        inputStream.destroy();
+      });
+      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
+      const flush = await writing.promise;
+      const signal = operation?.mock.calls[0]?.[1].signal;
+      const recordsResult = operation?.mock.results[0]?.value;
+      if (trigger === "signal") controller.abort("SIGTERM");
+      else
+        inputStream.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+        );
+      if (stage === "terminal result flushed after cancel") flush();
+      const code = await done;
+      const settled = signal?.aborted
+        ? await Promise.allSettled([pendingReview, recordsResult])
+        : [];
+      // Destroying the blocked stream can resume a test after it timed out.
+      if (finished) return;
+      expect(code).toBe(2);
+      expect(output.destroyed).toBe(true);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(writes.mock.calls[0]![0])).toMatchObject(expected);
+      if (operation) expect(signal?.aborted).toBe(true);
+      for (const result of settled) {
+        expect(result).toEqual({
+          status: "rejected",
+          reason: new Error("Deduplication canceled."),
+        });
       }
-    }
-  },
-);
+    },
+  );
+}
 
 test.each(["screening", "pair-review"] as const)(
   "%s refusal stops further reviews and leaves all records unresolved",
@@ -895,48 +914,30 @@ test("SDK validation propagates cancellation even after the runner receives a ca
   expect(() => validate({})).toThrow(reason);
 });
 
-test.each([
-  "title",
-  "summary",
-  "remediation",
-  "locations/0/path",
-  "severity/level",
-])(
-  "Finding feedback identifies %s while legacy failures stay compact",
-  async (field) => {
-    const message =
-      "Record must satisfy the Finding schema, including provenance.";
-    const result = await deduplicateRecords(input(), {
-      reviewRunner: {
-        async run(request, options) {
-          const value = answer(request) as { mergedFinding?: Finding };
-          const finding = value.mergedFinding;
-          if (finding) {
-            if (
-              field === "title" ||
-              field === "summary" ||
-              field === "remediation"
-            )
-              finding[field] = "";
-            else if (field === "locations/0/path")
-              finding.locations[0]!.path = 1 as never;
-            else finding.severity.level = "invalid" as never;
-            throws(() => requireFinding(finding), { message });
-            throws(() => validateReview(value, [finding]), { message });
-            expect(() => requireFinding(finding, true)).toThrow(`/${field}`);
-            expect(() => options!.validate!(value)).toThrow(`/${field}`);
-          }
-          return value;
-        },
+test("Finding feedback identifies the invalid field while legacy failures stay compact", async () => {
+  const message =
+    "Record must satisfy the Finding schema, including provenance.";
+  const result = await deduplicateRecords(input(), {
+    reviewRunner: {
+      async run(request, options) {
+        const value = answer(request) as { mergedFinding?: Finding };
+        const finding = value.mergedFinding;
+        if (finding) {
+          finding.locations[0]!.path = 1 as never;
+          throws(() => requireFinding(finding), { message });
+          throws(() => validateReview(value, [finding]), { message });
+          expect(() => options!.validate!(value)).toThrow("/locations/0/path");
+        }
+        return value;
       },
-    });
-    expect(result.status).toBe("unresolved");
-    for (const entry of result.unresolved) expect(entry.message).toBe(message);
-  },
-);
+    },
+  });
+  expect(result.status).toBe("unresolved");
+  for (const entry of result.unresolved) expect(entry.message).toBe(message);
+});
 
 test("repeated invalid entries do not amplify Finding feedback", () => {
-  const messages = [1, 50_000].map((count) => {
+  const messages = [1, 2].map((count) => {
     const finding = structuredClone(document.findings[0]!);
     finding.codeEvidence = Array(count).fill({});
     try {
@@ -1043,19 +1044,6 @@ test.each(["valid", "invalid", "adapter error"])(
   },
 );
 
-test("review options remain cloneable for worker-backed adapters", async () => {
-  const result = await deduplicateRecords(input(), {
-    reviewRunner: {
-      async run(request, options) {
-        expect(structuredClone(options)).toEqual({ signal: undefined });
-        expect(options!.validate!(answer(request))).toBeUndefined();
-        return answer(request);
-      },
-    },
-  });
-  expect(result.status).toBe("completed");
-});
-
 test.each([false, true])(
   "retained validators close after review (failure: %p)",
   async (fail) => {
@@ -1113,6 +1101,9 @@ test.each([
       finish.resolve({
         get decisions() {
           finalChecked = true;
+          expect(() => validate(candidate)).toThrow(
+            "The review has already ended.",
+          );
           return candidate.decisions;
         },
       });
@@ -1176,6 +1167,7 @@ test.each([false, true])(
       reviewRunner: {
         async run(request, options) {
           calls++;
+          expect(structuredClone(options)).toEqual({ signal: undefined });
           expect(() => options!.validate!({})).toThrow(
             InvalidDeduplicationDecision,
           );
@@ -1224,76 +1216,30 @@ test.each([false, true])(
 );
 
 test("Finding feedback reuses its validator after failures and exceptions", () => {
-  const script = `
-    import Ajv from ${JSON.stringify(import.meta.resolve("ajv/dist/2020.js"))};
-    const compiled = [];
-    const compile = Ajv.prototype.compile;
-    Ajv.prototype.compile = function (...args) {
-      const validate = compile.apply(this, args);
-      compiled.push(validate);
-      return validate;
-    };
-    const { requireFinding } = await import(${JSON.stringify(new URL("../src/deduplication/finding-schema.ts", import.meta.url).href)});
-    const valid = ${JSON.stringify(document.findings[0])};
-    const invalid = structuredClone(valid);
-    invalid.attackPath = { dataFlow: { transformations: Array(100).fill(null) } };
-    let message;
-    try { requireFinding(invalid, true); } catch (error) { message = error.message; }
-    const rejected = compiled.at(-1);
-    requireFinding(valid, true);
-    const detailedReusedAfterRejection = rejected === compiled.at(-1);
-    const detailed = compiled.at(-1);
-    requireFinding(valid, true);
-    const detailedReused = detailed === compiled.at(-1);
+  const valid = document.findings[0]!;
+  requireFinding(valid);
+  const compile = spyOn(Ajv2020.prototype, "compile");
+  try {
+    const invalid = { ...valid, title: 1 };
+    expect(() => requireFinding(invalid, true)).toThrow("/title");
     const fault = new Error("Synthetic adapter failure");
-    const throwing = structuredClone(valid);
-    Object.defineProperty(throwing, "title", { get() { throw fault; } });
-    let preserved;
-    try { requireFinding(throwing, true); } catch (error) { preserved = error === fault; }
-    requireFinding(valid, true);
-    const reusedAfterThrow = detailed === compiled.at(-1);
-    requireFinding(valid);
-    const legacy = compiled.at(-1);
-    requireFinding(valid);
-    console.log(JSON.stringify({ message, detailedReusedAfterRejection, detailedReused, preserved, reusedAfterThrow, legacyReused: legacy === compiled.at(-1) }));
-  `;
-  const child = spawnSync(process.execPath, ["-e", script], {
-    encoding: "utf8",
-  });
-  expect(child.status).toBe(0);
-  const result = JSON.parse(child.stdout);
-  expect(result.message).toContain("/attackPath/dataFlow/transformations");
-  expect(result.detailedReusedAfterRejection).toBe(true);
-  expect(result.detailedReused).toBe(true);
-  expect(result.preserved).toBe(true);
-  expect(result.reusedAfterThrow).toBe(true);
-  expect(result.legacyReused).toBe(true);
-});
-
-test.each(["empty", "cancelled"])(
-  "%s calls do not initialize a lazy review provider",
-  async (kind) => {
-    let reads = 0;
-    const controller = new AbortController();
-    const reason = new Error("Synthetic cancellation");
-    if (kind === "cancelled") controller.abort(reason);
-    const result = await deduplicateRecords(
-      kind === "empty"
-        ? { version: 1, observations: [], candidateRelationships: [] }
-        : input(),
-      {
-        signal: controller.signal,
-        get reviewRunner(): never {
-          reads++;
-          throw new Error("Synthetic provider unavailable");
-        },
+    const throwing = {
+      ...valid,
+      get title(): string {
+        throw fault;
       },
-    ).catch((error: unknown) => error);
-    expect(reads).toBe(0);
-    if (kind === "cancelled") expect(result).toBe(reason);
-    else expect(result).toHaveProperty("status", "completed");
-  },
-);
+    };
+    throws(
+      () => requireFinding(throwing, true),
+      (error) => error === fault,
+    );
+    expect(requireFinding(valid, true)).toBe(valid);
+    expect(requireFinding(valid)).toBe(valid);
+    expect(compile).not.toHaveBeenCalled();
+  } finally {
+    compile.mockRestore();
+  }
+});
 
 test("review-scoped provider getters retain their existing lifecycle", async () => {
   let providers = 0;

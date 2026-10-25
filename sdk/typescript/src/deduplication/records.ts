@@ -30,39 +30,28 @@ function reviewValidation<T>(
   signal: AbortSignal | undefined,
   detailedErrors: boolean | undefined,
 ) {
-  let aborted = false;
-  let abortReason: unknown;
-  let ended = false;
-  const result = (value: unknown, detailed = detailedErrors): T => {
-    if (aborted) throw abortReason;
-    signal?.throwIfAborted();
-    if (!validator) throw new Error("The review has already ended.");
+  let cancellation: { reason: unknown } | undefined;
+  const check = (value: unknown, final: boolean): T => {
+    if (cancellation) throw cancellation.reason;
+    const currentSignal = signal;
+    currentSignal?.throwIfAborted();
+    const validate = validator;
+    if (!validate) throw new Error("The review has already ended.");
+    if (final) validator = undefined;
     try {
-      return validator(value, detailed);
+      return validate(value, final ? detailedErrors : true);
     } finally {
-      if (aborted) throw abortReason;
-      signal?.throwIfAborted();
+      currentSignal?.throwIfAborted();
     }
   };
   return {
-    result: (value: unknown): T => {
-      ended = true;
-      return result(value);
-    },
+    result: (value: unknown) => check(value, true),
     preflight: (value: unknown): void => {
-      if (ended) {
-        if (aborted) throw abortReason;
-        signal?.throwIfAborted();
-        throw new Error("The review has already ended.");
-      }
-      result(value, true);
+      check(value, false);
     },
     close: () => {
-      if (!validator) return;
-      ended = true;
+      if (signal?.aborted) cancellation = { reason: signal.reason };
       validator = undefined;
-      aborted = signal?.aborted ?? false;
-      if (aborted) abortReason = signal?.reason;
       signal = undefined;
     },
   };

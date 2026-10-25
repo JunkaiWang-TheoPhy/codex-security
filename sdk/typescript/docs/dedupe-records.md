@@ -26,6 +26,20 @@ const result = await deduplicateRecords(input, {
 The entry point validates the input structure, unique identities, and candidate
 references before any review.
 
+### SDK validation feedback
+
+A custom review runner can check a proposed answer before closing its review.
+Call `options.validate(candidate)` on the original options object. Cloning or
+spreading it omits this callback. A valid candidate returns normally.
+
+When `InvalidDeduplicationDecision` is thrown, send its `message` back to the
+same open review and request a correction within the runner’s attempt and time
+budgets. Propagate other errors. Stop accepting submissions before resolving
+`run`. The SDK validates the returned answer again.
+
+By default a failed review produces an unresolved batch. Set `throwReviewErrors`
+to `true` to receive the original exception, including a typed invalid decision.
+
 ## Input and identities
 
 Send one UTF-8 JSON object per line, using JSON-RPC 2.0. Keep stdin open until the
@@ -175,29 +189,6 @@ and rationale only. Pair-review SAME decisions require a canonical identity and
 a complete merged finding.
 Codex Security validates these contracts and all assigned ID references after
 receiving the answer. A completed remote model turn alone is insufficient.
-
-### SDK validation feedback
-
-Custom `reviewRunner.run(request, options)` implementations receive an optional
-`options.validate(candidate)` callback using the same dedupe validators as the final
-answer, identifying the first failing finding field. It returns void on success and throws
-`InvalidDeduplicationDecision` for a rejected decision. Other exceptions propagate.
-Access it on the original options object; the callback is non-enumerable and omitted
-when options are cloned or spread.
-The SDK revokes the callback when it observes runner settlement or cancellation.
-Handlers registered by the runner may run before the SDK observes settlement.
-Adapters must stop accepting submissions before settling their runner; preflight
-success does not prove that a remote review is still active.
-
-Set `throwReviewErrors: true` on `deduplicateRecords` to receive typed decision
-failures and preserve other review errors instead of returning an unresolved batch.
-This changes failure reporting, not the existing validation and normalization rules.
-For example, pair review still strips extra fields. Final answers are always validated.
-
-The callback performs no inference or retries. Runners own correction limits and
-existing deadline/cost budgets. Validation checks an already-aborted signal; a
-synchronous check cannot be interrupted by a pending cancellation timer. Validation
-does not guarantee semantic model correctness. The hosted CLI protocol is unchanged.
 
 For failure or an inconclusive review, send an explicit error:
 

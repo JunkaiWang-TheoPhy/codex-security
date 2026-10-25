@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { InvalidDeduplicationDecision } from "./decision-error.js";
+import { InvalidDeduplicationDecision } from "../errors.js";
 import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";

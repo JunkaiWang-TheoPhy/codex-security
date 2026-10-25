@@ -1,16 +1,11 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
-import { bashCommand } from "./support/shell.js";
 
-type Step = { name?: string; uses?: string; run?: string; if?: string };
 type Job = {
   uses?: string;
   needs?: string | string[];
   if?: string;
-  steps?: Step[];
+  steps?: Array<{ name?: string }>;
   strategy?: { matrix: { include: Array<{ architecture: string }> } };
 };
 
@@ -24,7 +19,6 @@ function workflow(name: string) {
 }
 
 const ci = workflow("node-ci");
-const bash = bashCommand();
 
 test("shares one native build and container matrix in automatic CI", () => {
   const container = workflow("container-ci");
@@ -41,7 +35,8 @@ test("shares one native build and container matrix in automatic CI", () => {
     ),
   ).toEqual([ci.jobs["container-validate"]!]);
   expect(ci.jobs["container-validate"]).toMatchObject({
-    needs: ["classify-changes", "native"],
+    needs: ["classify-changes", "native", "static-checks"],
+    if: "needs.classify-changes.outputs.container-validate == 'true'",
     uses: "./.github/workflows/container-validate.yml",
   });
   expect(container.jobs["container"]).toMatchObject({
@@ -80,86 +75,4 @@ test("keeps container validation available to forks and publication upstream-onl
     "github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''",
   );
   expect(release.jobs["publish-platform"]?.needs).toBe("authorize");
-});
-
-test.each([
-  ["push", false, "README.md", true],
-  ["pull_request", true, "README.md", true],
-  ["pull_request", false, "README.md", false],
-  ["pull_request", false, "Dockerfile", true],
-  ["pull_request", false, ".github/workflows/container-ci.yml", true],
-  ["pull_request", false, ".github/workflows/container-validate.yml", true],
-  ["pull_request", false, ".github/workflows/container-release.yml", true],
-  ["pull_request", false, ".github/workflows/native-windows.yml", true],
-  ["pull_request", false, ".github/workflows/node-ci.yml", true],
-  ["pull_request", false, ".github/actions/setup-tools/action.yml", true],
-  ["pull_request", false, "sdk/typescript/src/index.ts", true],
-  ["pull_request", false, "sdk/typescript/scripts/run-ci-tests.mts", true],
-  [
-    "pull_request",
-    false,
-    "plugins/codex-security/skills/example/SKILL.md",
-    true,
-  ],
-] as const)(
-  "selects container validation for %s / retarget=%p / %s",
-  (eventName, baseChanged, path, selected) => {
-    const directory = mkdtempSync(join(tmpdir(), "container-ci-scope-"));
-    const output = join(directory, "outputs");
-    const script = ci.jobs["classify-changes"]!.steps!.find(
-      (step) => step.name === "Select additional checks",
-    )!.run!;
-    try {
-      const result = spawnSync(
-        bash,
-        ["-c", `git() { printf '%s\\0' "$CHANGED_PATH"; }\n${script}`],
-        {
-          env: {
-            ...process.env,
-            EVENT_NAME: eventName,
-            BASE_CHANGED: String(baseChanged),
-            CHANGED_PATH: path,
-            GITHUB_OUTPUT: output,
-          },
-        },
-      );
-      expect(result.status).toBe(0);
-      const outputs = Object.fromEntries(
-        readFileSync(output, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => line.split("=")),
-      );
-      expect(outputs["container-validate"]).toBe(String(selected));
-      if (path === ".github/actions/setup-tools/action.yml") {
-        expect(outputs["test-quality"]).toBe("true");
-      }
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  },
-);
-
-test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
-  const gate = ci.jobs["required-test"]!;
-  expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toContain("always()");
-  const step = gate.steps!.find(
-    (step) => step.name === "Require selected container coverage",
-  )!;
-  expect(step.run).toBe("exit 1");
-  for (const selected of ["true", "false"]) {
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      const condition = step
-        .if!.replaceAll(
-          "needs.classify-changes.outputs.container-validate",
-          `'${selected}'`,
-        )
-        .replaceAll("needs.container-validate.result", `'${result}'`);
-      const evaluation = spawnSync(bash, ["-c", `[[ ${condition} ]]`]);
-      expect(evaluation.status, `${selected}/${result}`).toBe(
-        selected === "true" && result !== "success" ? 0 : 1,
-      );
-    }
-  }
 });

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
-import { InvalidDeduplicationDecision } from "./decision-error.js";
+import { InvalidDeduplicationDecision } from "../errors.js";
 let schema: object | undefined;
 let validator: ValidateFunction<Finding> | undefined;
 
