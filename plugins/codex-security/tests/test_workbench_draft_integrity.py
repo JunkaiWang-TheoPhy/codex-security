@@ -7,7 +7,7 @@ import re
 import sqlite3
 from itertools import permutations
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from test_workbench_standard_deep_results import (
@@ -22,6 +22,8 @@ from workbench_test_support import (
     saved_draft,
     start_saved_scan,
     start_workspace_scan,
+    upsert_deep_worker,
+    worker_paths,
     write_checkpoint,
     write_completed_contract,
 )
@@ -129,14 +131,58 @@ def test_recovered_parent_checkpoint_preserves_scope_filter(
             (scan_dir / name).unlink()
     stop_draft(tmp_path, state, home, scan_id, retry=retry)
     scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-    # Existing canonical documents are authoritative on their first publication.
-    retained = location.startswith("src/") or (parent == "canonical" and not retry)
+    # Frozen replay preserves the same authoritative canonical document.
+    retained = location.startswith("src/") or parent == "canonical"
     assert scan["findingCount"] == int(retained)
     if retained:
         assert scan["findings"][0]["locations"][0]["path"] == location
     else:
         assert any("out-of-scope" in warning for warning in scan["warnings"])
     assert not scan["resultsRecoveryNeeded"]
+
+
+@pytest.mark.parametrize("earlier_history", [None, 1])
+def test_stopped_scan_keeps_history_after_an_opaque_checkpoint(tmp_path: Path, earlier_history):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    (finding,) = document["findings"]
+    finding["provenance"]["previousFindings"] = earlier_history
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[finding]))
+    history = [{"summary": "Earlier observation"}]
+    finding["provenance"]["previousFindings"] = history
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id)
+
+    (sealed,) = json.loads(path.read_text())["findings"]
+    assert sealed["provenance"]["previousFindings"] == history
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert [row["occurrenceId"] for row in scan["findings"]] == [sealed["occurrenceId"]]
+
+
+def test_stopped_scan_retains_a_distinct_checkpoint_identity(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    (parent,) = document["findings"]
+    parent["provenance"]["candidateId"] = "shared"
+    checkpoint = copy.deepcopy(parent)
+    del checkpoint["identity"]
+    earlier = {"anchor": "earlier-alias"}
+    checkpoint["provenance"]["preservedIdentity"] = earlier
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[checkpoint]))
+    parent["provenance"]["previousFindings"] = [{"summary": "Earlier observation"}]
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id)
+    (saved,) = json.loads(path.read_text())["findings"]
+    assert saved["identity"] == parent["identity"]
+    assert any(
+        row.get("provenance", {}).get("preservedIdentity") == earlier
+        for row in saved["provenance"]["previousFindings"]
+    )
 
 
 def test_checkpoint_history_recovery_reuses_repeated_observations(tmp_path: Path):
@@ -165,14 +211,14 @@ def test_checkpoint_history_recovery_reuses_repeated_observations(tmp_path: Path
             case / "count.py",
             state,
             home,
-            "import atexit, pathlib\n"
+            "import atexit, pathlib\nfrom workbench import retained_coverage\n"
             "calls = 0\n"
-            "original = workbench_saved_results._recover_unsealed_findings\n"
+            "original = retained_coverage._recover_unsealed_findings\n"
             "def counted(*args, **kwargs):\n"
             "    global calls\n"
             "    calls += 1\n"
             "    return original(*args, **kwargs)\n"
-            "workbench_saved_results._recover_unsealed_findings = counted\n"
+            "retained_coverage._recover_unsealed_findings = counted\n"
             f"atexit.register(lambda: pathlib.Path({str(count_path)!r}).write_text(str(calls)))\n",
             "fail-scan",
             "--scan-id",
@@ -186,7 +232,7 @@ def test_checkpoint_history_recovery_reuses_repeated_observations(tmp_path: Path
         assert not scan["resultsRecoveryNeeded"]
         calls.append(int(count_path.read_text()))
     # Doubling the retained history must not repeatedly validate its shared prefix.
-    assert calls[1] <= 2 * calls[0]
+    assert 0 < calls[0] <= calls[1] <= 2 * calls[0]
 
 
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan", "recover"])
@@ -401,7 +447,7 @@ def test_worker_report_identities_survive_new_worker_uuid_order(
     assert published[0] == published[1]
 
 
-def test_canonical_missing_identity_remains_malformed_on_publication_retry(tmp_path: Path):
+def test_stopped_parent_recovers_an_unidentified_sibling_on_publication_retry(tmp_path: Path):
     observed = []
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     for retry in (False, True):
@@ -410,22 +456,47 @@ def test_canonical_missing_identity_remains_malformed_on_publication_retry(tmp_p
             write_completed_contract(scan_dir, scan_id, tmp_path / "target", relative_path="app.py")
         path = scan_dir / "findings.json"
         document = json.loads(path.read_text())
-        malformed = json.loads(json.dumps(document["findings"][0]))
-        malformed.pop("identity")
-        malformed["title"] = "Malformed missing identity"
-        document["findings"].append(malformed)
+        sibling = copy.deepcopy(document["findings"][0])
+        sibling.pop("identity")
+        sibling["title"] = "Recovered draft finding"
+        document["findings"].append(sibling)
         path.write_text(json.dumps(document))
 
         stop_draft(tmp_path, state, home, scan_id, retry=retry)
 
         scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-        assert scan["findingCount"] == 1
+        assert scan["findingCount"] == 2
         assert not scan["resultsRecoveryNeeded"]
-        assert any("identity" in warning for warning in scan["warnings"])
         saved = json.loads(path.read_text())["findings"]
-        assert len(saved) == 1
-        observed.append((saved[0]["findingId"], saved[0]["identity"], scan["warnings"]))
+        assert saved[1]["identity"] == {"anchor": "recovered-draft-finding"}
+        assert saved[0]["findingId"] != saved[1]["findingId"]
+        observed.append([(finding["findingId"], finding["identity"]) for finding in saved])
     assert observed[0] == observed[1]
+
+
+def test_stopped_scan_keeps_distinct_identities_restored_from_history(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    template = document["findings"].pop()
+    del template["identity"]
+    template["provenance"]["candidateId"] = "shared"
+    cases = (("First report", "one", "low"), ("Second report", "two", "high"))
+    for summary, anchor, level in cases:
+        finding = copy.deepcopy(template)
+        finding["summary"] = summary
+        finding["severity"]["level"] = level
+        previous = {**copy.deepcopy(finding), "identity": {"anchor": anchor}}
+        finding["provenance"]["previousFindings"] = [previous]
+        document["findings"].append(finding)
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert sorted((row["summary"], row["identity"]["anchor"]) for row in saved) == [
+        ("First report", "one"),
+        ("Second report", "two"),
+    ]
 
 
 def test_legacy_checkpoint_keeps_its_published_identity(tmp_path: Path):
@@ -480,6 +551,69 @@ def test_stopped_finding_keeps_explicit_identity_across_line_move(
         previous["locations"][0]["startLine"] == 1
         for previous in findings[0]["provenance"]["previousFindings"]
     )
+
+
+def test_completion_rejects_duplicate_authored_identity_across_candidates(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    original = document["findings"][0]
+    original["identity"]["instance"] = "first"
+    original["provenance"]["candidateId"] = "candidate-a"
+    duplicate = copy.deepcopy(original)
+    duplicate["provenance"]["candidateId"] = "candidate-b"
+    document["findings"].append(duplicate)
+    path.write_text(json.dumps(document))
+
+    result = run_workbench(
+        state,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=False,
+        environment={"CODEX_HOME": str(home)},
+    )
+
+    assert result["returncode"] == 1
+    assert "duplicate occurrence identity" in result["stderr"]
+    assert json.loads(path.read_text()) == document
+
+
+@pytest.mark.parametrize("coexist", [False, True], ids=["revision", "siblings"])
+def test_checkpoint_reconciles_relabelled_authored_finding(tmp_path: Path, coexist: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    original = document["findings"][0]
+    original["provenance"]["candidateId"] = "candidate-a"
+    path.write_text(json.dumps(document))
+    revised = copy.deepcopy(original)
+    revised["summary"] = "Revised observation"
+    revised["provenance"]["candidateId"] = "candidate-b"
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[original, revised] if coexist else [revised], complete=True),
+    )
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(100, 100))
+    os.utime(checkpoint, ns=(120, 120))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=True)
+    findings = json.loads(path.read_text())["findings"]
+    if coexist:
+        assert {row["provenance"]["candidateId"] for row in findings} == {
+            "candidate-a",
+            "candidate-b",
+        }
+        assert len({row["findingId"] for row in findings}) == 2
+    else:
+        (finding,) = findings
+        assert finding["identity"] == original["identity"]
+        assert finding["summary"] == revised["summary"]
+        assert finding["provenance"]["candidateId"] == "candidate-b"
+        (previous,) = finding["provenance"]["previousFindings"]
+        assert previous["summary"] == original["summary"]
+        assert previous["provenance"]["candidateId"] == "candidate-a"
 
 
 @pytest.mark.parametrize("retry", [False, True])
@@ -843,9 +977,11 @@ def test_tied_parent_checkpoint_keeps_identityless_semantic_rows(tmp_path: Path,
 
 
 @pytest.mark.parametrize("checkpoint_stronger", [False, True])
-@pytest.mark.parametrize("canonical_duplicate", [False, True])
+@pytest.mark.parametrize(
+    "canonical_duplicate, checkpoint_complete", [(False, True), (True, True), (True, False)]
+)
 def test_tied_parent_completion_coalesces_only_distinct_observations(
-    tmp_path: Path, checkpoint_stronger: bool, canonical_duplicate: bool
+    tmp_path: Path, checkpoint_stronger: bool, canonical_duplicate: bool, checkpoint_complete: bool
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"
@@ -860,11 +996,14 @@ def test_tied_parent_completion_coalesces_only_distinct_observations(
     if canonical_duplicate:
         duplicate = copy.deepcopy(original)
         duplicate["summary"] = "Repeated canonical observation."
+        if not checkpoint_complete:
+            duplicate["locations"][0]["startLine"] += 1
+            duplicate["locations"][0].pop("endLine", None)
         document["findings"].append(duplicate)
     path.write_text(json.dumps(document))
     checkpoint = write_checkpoint(
         scan_dir / "checkpoints",
-        saved_draft(scan_id, findings=[checkpoint_finding], complete=True),
+        saved_draft(scan_id, findings=[checkpoint_finding], complete=checkpoint_complete),
     )
     head = scan_dir / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
@@ -888,7 +1027,8 @@ def test_tied_parent_completion_coalesces_only_distinct_observations(
 
     if canonical_duplicate:
         assert result["returncode"] != 0
-        assert "duplicate occurrence identity" in result["stderr"]
+        expected = "duplicate occurrence identity" if checkpoint_complete else "draft is incomplete"
+        assert expected in result["stderr"]
         assert json.loads(path.read_text()) == document
         return
     scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
@@ -1050,6 +1190,59 @@ def test_retained_identityless_worker_source_is_not_republished(
     findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
     assert len(findings) == 1
     assert findings[0]["identity"] == reduced["identity"]
+
+
+def test_reduced_source_history_does_not_replace_another_workers_finding(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    findings_path = scan_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    original = document["findings"][0]
+
+    def record_worker(name, finding):
+        worker_id = str(uuid4())
+        prompt, output, result = worker_paths(scan_dir, name)
+        upsert_deep_worker(
+            state,
+            scan_id,
+            worker_id,
+            "discovery",
+            "running",
+            str(prompt),
+            str(output),
+            "--attempt",
+            "1",
+            environment={"CODEX_HOME": str(home)},
+        )
+        result.write_text(json.dumps(saved_draft(scan_id, complete=True, findings=[finding])))
+        return worker_id
+
+    source_a = {**original, "extensions": {"candidateId": "local"}}
+    worker_a = record_worker("discovery-a", source_a)
+    reference = f"{worker_a}:0"
+    reduced = {
+        **original,
+        "identity": {"anchor": "reduced-a"},
+        "severity": {"level": "low"},
+        "provenance": {
+            **original["provenance"],
+            "sourceFindingIds": [reference],
+            "sourceFindings": [{"id": reference, "finding": source_a}],
+        },
+    }
+    findings_path.write_text(json.dumps({**document, "findings": [reduced]}))
+    source_b = {**original, "provenance": {**original["provenance"], "candidateId": "local"}}
+    worker_b = record_worker("discovery-b", source_b)
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True)
+
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["findingCount"] == 2
+    by_anchor = {row["identity"]["anchor"]: row for row in scan["findings"]}
+    assert by_anchor["reduced-a"]["severity"]["level"] == "low"
+    retained = by_anchor[source_b["identity"]["anchor"]]
+    assert retained["severity"]["level"] == "high"
+    assert retained["provenance"]["workerId"] == worker_b
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -1410,7 +1603,7 @@ def test_restored_identity_keeps_an_independent_identityless_observation(
         }
         assert observed == {
             "reviewed-anchor": ("Stronger reviewed finding.", "high"),
-            "synthetic-finding": ("Independent weaker observation.", "low"),
+            "candidate-a": ("Independent weaker observation.", "low"),
         }
         published.append(observed)
     assert published[0] == published[1]
@@ -1558,7 +1751,10 @@ def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(
         result_path.write_text(json.dumps(worker))
     else:
         reviewed["provenance"]["previousFindings"] = [historical]
-        write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical]))
+        checkpoint = write_checkpoint(
+            scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical])
+        )
+        os.utime(checkpoint, ns=(100, 100))
     path.write_text(json.dumps(document))
     stop_draft(tmp_path, state, home, scan_id, deep=history == "worker source", retry=retry)
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
@@ -1633,9 +1829,75 @@ def test_same_candidate_siblings_do_not_borrow_identities(
         stop_draft(root, state, home, scan_id, deep=source == "worker", retry=retry)
         findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
         assert {finding["title"]: finding["identity"] for finding in findings} == {
-            "Alpha": {"anchor": "alpha"},
+            "Alpha": {"anchor": "shared-candidate"},
             "Beta": {"anchor": "beta"},
         }
+
+
+def test_recovered_observation_keeps_the_worker_that_reported_it(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    weak = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    del weak["identity"]
+    weak["severity"]["level"] = "low"
+    weak["provenance"].update(candidateId="candidate-a", workerId="worker-a")
+    strong = copy.deepcopy(weak)
+    strong["severity"]["level"] = "high"
+    del strong["provenance"]["workerId"]
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / name).unlink()
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[weak, strong]))
+    stop_draft(tmp_path, state, home, scan_id, retry=True)
+    (finding,) = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert finding["severity"]["level"] == "high"
+    assert "workerId" not in finding["provenance"]
+    assert any(
+        earlier["provenance"].get("workerId") == "worker-a"
+        for earlier in finding["provenance"]["previousFindings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("instance", "report_field"),
+    [
+        ("finding", None),
+        ("separate-report", None),
+        ("finding", "reportId"),
+        ("finding", "ledgerRowId"),
+    ],
+)
+def test_unlabelled_checkpoint_observation_respects_authored_instance(
+    tmp_path: Path, instance: str, report_field: str | None
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    known = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    known.update(title="Finding", identity={"anchor": "finding", "instance": instance})
+    known["severity"]["level"] = "low"
+    known["provenance"]["candidateId"] = "candidate-a"
+    unknown = copy.deepcopy(known)
+    del unknown["identity"], unknown["provenance"]["candidateId"]
+    unknown["severity"]["level"] = "high"
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / name).unlink()
+    observations = [known, unknown]
+    if report_field:
+        observations.append(
+            {**unknown, "severity": known["severity"], "extensions": {report_field: "report-b"}}
+        )
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=observations))
+    stop_draft(tmp_path, state, home, scan_id, retry=True)
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    (retained,) = [row for row in findings if row["provenance"].get("candidateId") == "candidate-a"]
+    assert retained["identity"] == known["identity"]
+    if instance == "finding" and not report_field:
+        assert len(findings) == 1
+        assert retained["severity"]["level"] == "high"
+    else:
+        assert len(findings) == (3 if report_field else 2)
+        assert retained["severity"]["level"] == "low"
+        (stronger,) = [row for row in findings if row["severity"]["level"] == "high"]
+        assert "candidateId" not in stronger["provenance"]
+        if report_field:
+            assert any(row["identity"].get("instance") == "report-b" for row in findings)
 
 
 @pytest.mark.parametrize("source", ["parent", "worker"])
@@ -1726,7 +1988,7 @@ def test_restored_history_uses_normalized_identity(
 def test_candidate_less_identity_preserves_ambiguous_candidates(
     tmp_path: Path, candidate_count: int, candidate_scope: str
 ):
-    observed = []
+    observed = {}
     for order in permutations(range(candidate_count + 1)):
         for retry in (False, True):
             root = tmp_path / f"{order}-{retry}"
@@ -1779,8 +2041,17 @@ def test_candidate_less_identity_preserves_ambiguous_candidates(
             assert (
                 len({json.dumps(identity, sort_keys=True) for identity, _ in current.values()}) == 3
             )
-            observed.append(current)
-    assert all(current == observed[0] for current in observed)
+            if candidate_scope == "worker":
+                # Normal publication gives equal candidate anchors their suffixes in input order.
+                ordered_workers = [known[index] for index in order if index < candidate_count]
+                for owner, instance in zip(
+                    ordered_workers, ("synthetic-finding", "synthetic-finding-2"), strict=True
+                ):
+                    assert current[owner][0] == {"anchor": "candidate", "instance": instance}
+            assert current == observed.setdefault(order, current)
+    if observed and candidate_scope == "candidate":
+        first = next(iter(observed.values()))
+        assert all(current == first for current in observed.values())
 
 
 @pytest.mark.parametrize("worker_history", [False, True])
@@ -2447,7 +2718,12 @@ def test_stronger_checkpoint_keeps_restored_published_identity(
     os.utime(later, ns=(300, 300))
     stop_draft(tmp_path, state, home, scan_id, retry=retry)
     scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-    retained = next(row for row in scan["findings"] if row["summary"] == stronger["summary"])
+    [retained] = scan["findings"]
+    assert retained["summary"] == finding["summary"]
+    assert any(
+        previous["summary"] == stronger["summary"]
+        for previous in retained["provenance"]["previousFindings"]
+    )
     assert retained["identity"]["anchor"] == "published-original"
     ids = retained["findingId"], retained["occurrenceId"]
     run_workbench(
@@ -2464,7 +2740,8 @@ def test_stronger_checkpoint_keeps_restored_published_identity(
     )
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     replayed = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
-    retained = next(row for row in replayed if row["summary"] == stronger["summary"])
+    [retained] = replayed
+    assert retained["summary"] == finding["summary"]
     assert (retained["findingId"], retained["occurrenceId"]) == ids
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         triage = connection.execute(

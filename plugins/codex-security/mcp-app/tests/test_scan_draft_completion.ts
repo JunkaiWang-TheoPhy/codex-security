@@ -30,6 +30,7 @@ for (const mode of ["standard", "diff"]) {
     "more evidence",
     "repeated inferred",
     "repeated mixed",
+    "mixed siblings",
     "explicit duplicates",
   ]) {
     test(`${mode}: normal completion after candidate identity reuse, ${variant}`, async (t) => {
@@ -155,13 +156,23 @@ for (const mode of ["standard", "diff"]) {
           : {}),
       };
       const observations =
-        variant === "explicit duplicates"
-          ? [explicit, structuredClone(explicit)]
-          : variant === "repeated inferred"
-            ? [generated, structuredClone(generated)]
-            : variant === "reversed"
-              ? [explicit, generated]
-              : [generated, explicit];
+        variant === "mixed siblings"
+          ? [
+              explicit,
+              {
+                ...explicit,
+                identity: { ...explicit.identity, instance: "second" },
+              },
+              generated,
+              { ...generated, severity: { level: "high" } },
+            ]
+          : variant === "explicit duplicates"
+            ? [explicit, structuredClone(explicit)]
+            : variant === "repeated inferred"
+              ? [generated, structuredClone(generated)]
+              : variant === "reversed"
+                ? [explicit, generated]
+                : [generated, explicit];
       const writes =
         variant.startsWith("repeated") || variant === "explicit duplicates"
           ? 2
@@ -192,12 +203,23 @@ for (const mode of ["standard", "diff"]) {
       }
       await complete();
       const { findings } = await readJson(scan.scanDir, "findings.json");
+      if (variant === "mixed siblings") {
+        assert.deepEqual(
+          findings
+            .slice(0, 2)
+            .map((row: typeof explicit) => row.identity.instance),
+          ["original", "second"],
+        );
+        assert.equal(findings.length, 3);
+        assert.equal(findings[2].severity.level, "high");
+        return;
+      }
       assert.equal(findings.length, 1);
       assert.deepEqual(
         findings[0].identity,
         variant === "repeated inferred"
           ? {
-              anchor: "synthetic-review-finding",
+              anchor: "shared-candidate",
               instance: "synthetic-review-finding",
             }
           : explicit.identity,
