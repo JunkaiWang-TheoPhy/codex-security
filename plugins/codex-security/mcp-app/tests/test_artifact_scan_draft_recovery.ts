@@ -1,4 +1,5 @@
 import { readJson, writeJson } from "./support/json.ts";
+import { dateDraftFiles } from "./scan-identity-recovery-fixture.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -2784,6 +2785,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         { ...f.draft({}, true), findings: added ? [later] : [] },
         false,
       );
+      if (layout === "worker") await dateDraftFiles(f.root, 100);
       const result = await f.write(
         f.draft({
           surfaces: [
@@ -3495,7 +3497,7 @@ for (const layout of ["standard", "diff"] as const) {
           const observations = [first, second].map((metadata, index) => {
             const finding: ReturnType<typeof findingFor> & {
               identity?: { anchor: string; instance?: string };
-            } = findingFor("candidate-a");
+            } = findingFor("synthetic-review-finding");
             if (metadata === "none")
               Reflect.deleteProperty(finding.provenance, "candidateId");
             if (metadata === "explicit")

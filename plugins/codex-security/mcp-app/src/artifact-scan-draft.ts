@@ -889,8 +889,28 @@ async function preserveScanDraft(
   }
 
   const reopenedSurfaces = new Set<JsonObject>();
+  // A raw terminal checkpoint can share the last published progress timestamp.
+  const tiedProgress =
+    retainedFinal &&
+    context.layout === "worker" &&
+    !coverageHasOutstandingWork(retainedFinal.input.coverage)
+      ? savedSources.find(
+          (source) =>
+            source.input.complete === false &&
+            (source.head || source.input === previous) &&
+            source.attempt === retainedFinal.attempt &&
+            source.modifiedMs === retainedFinal.modifiedMs,
+        )
+      : undefined;
+  const tiedFindingIds =
+    tiedProgress?.input.findings
+      .map(findingCandidateId)
+      .filter((id): id is string => id !== undefined) ?? [];
   if (retainedFinal) {
-    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    const terminalOutcomeIds = new Set([
+      ...completedCandidateIds(retainedFinal.input),
+      ...tiedFindingIds,
+    ]);
     for (const surface of result.coverage.surfaces) {
       if (
         terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
@@ -1075,7 +1095,7 @@ async function preserveScanDraft(
   };
   // Reconcile the observations each batch would publish. Keep untouched rows
   // raw so reconciliation can restore their previously published identities.
-  if (context.mode !== "deep") {
+  if (context.layout === "scan" && context.mode !== "deep") {
     for (const draft of [result, ...sources]) {
       const raw = draft.findings;
       if (raw.length > 1 && raw.some((row) => row.identity === undefined))
@@ -1294,6 +1314,7 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
+        ...tiedFindingIds,
         ...dispositions
           .filter((item) => !keepsGenericWork(item))
           .map((item) => item.candidateId ?? item.id),

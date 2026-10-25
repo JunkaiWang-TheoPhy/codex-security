@@ -2099,15 +2099,17 @@ def merge_saved_results(
             candidate = finding_candidate_id(value)
             scopes = [scope]
             identity = _semantic_identity_key(value, _finding_identity(value))
-            scoped_identity = owner, identity, _identity_candidate(value), _report_ids(value)
+            report_ids = _report_ids(value)
+            scoped_identity = owner, identity, _identity_candidate(value), report_ids
             if scoped_identity not in ambiguous_scoped_identities:
                 if candidate:
                     scopes.append((scope[0], candidate))
                 elif (
-                    isinstance(value.get("identity"), dict)
+                    any(report_ids)
+                    and isinstance(value.get("identity"), dict)
                     and explicit_identity_counts[identity] == 1
                 ):
-                    scopes.append((owner, identity, _report_ids(value)))
+                    scopes.append((owner, identity, report_ids))
             publication_identity = (
                 _finding_identity(
                     value if "identity" in value else terminal_findings[relative][index]
