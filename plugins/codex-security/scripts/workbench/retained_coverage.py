@@ -2098,18 +2098,22 @@ def merge_saved_results(
             scope = raw_scope(value)
             candidate = finding_candidate_id(value)
             scopes = [scope]
-            identity = _semantic_identity_key(value, _finding_identity(value))
+            authored_identity = _finding_identity(value)
+            identity = _semantic_identity_key(value, authored_identity)
             report_ids = _report_ids(value)
+            unqualified_worker_anchor = False
             scoped_identity = owner, identity, _identity_candidate(value), report_ids
             if scoped_identity not in ambiguous_scoped_identities:
                 if candidate:
                     scopes.append((scope[0], candidate))
                 elif (
-                    any(report_ids)
-                    and isinstance(value.get("identity"), dict)
+                    isinstance(value.get("identity"), dict)
                     and explicit_identity_counts[identity] == 1
                 ):
                     scopes.append((owner, identity, report_ids))
+                    unqualified_worker_anchor = (
+                        source_owner is not None and not authored_identity.get("instance")
+                    )
             publication_identity = (
                 _finding_identity(
                     value if "identity" in value else terminal_findings[relative][index]
@@ -2123,6 +2127,11 @@ def merge_saved_results(
                     key: group
                     for saved_scope in scopes
                     for key, group in logical_rows.get(saved_scope, {}).items()
+                    # Two worker checkpoints can reuse a bare anchor at different sites.
+                    # A parent or reducer observation can still tie them to a reviewed finding.
+                    if not unqualified_worker_anchor
+                    or saved_scope == scope
+                    or None in group["observations"]
                 }.values()
                 if same_owner(owner, group["owner"])
                 and unambiguous_owner(value, owner, group)
