@@ -30,6 +30,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse as parsePath,
   posix,
   relative,
   resolve,
@@ -127,7 +128,7 @@ import {
   type ScanSettings,
   type ScanPromptSettings,
 } from "./scan-settings.js";
-import { resolveScanPrompts } from "./prompt-files.js";
+import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
   readScanTimeBudgetPolicy,
   renderScanTimeBudgetPolicy,
@@ -310,7 +311,6 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
-  deepScanPluginUsesDefaultMcpFile?: boolean;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
@@ -2884,12 +2884,13 @@ export class CodexSecurity {
         return client.resumeThread(id, threadOptions);
       };
       let parentCodex = codex;
-      if (
-        mode === "deep" &&
-        !directDeepScan &&
-        !this.#dependencies.hostedScan &&
-        session.deepScanPluginUsesDefaultMcpFile
-      ) {
+      const pluginServers =
+        mode === "deep" && !directDeepScan && !this.#dependencies.hostedScan
+          ? await readInstalledDeepScanPluginServers(
+              runtime.plugin.installedRoot,
+            )
+          : undefined;
+      if (pluginServers !== undefined) {
         // The scan is already registered when native routing is inspected.
         if (postScanPrompt?.trim()) {
           runPostScan = () =>
@@ -2907,14 +2908,25 @@ export class CodexSecurity {
             await this.#providerPreflightCommand(effectiveConfig),
           scanDir,
           signal,
+          ...(pluginServers === "native" && {
+            plugin: {
+              marketplacePath: join(
+                runtime.plugin.marketplaceRoot,
+                ".agents",
+                "plugins",
+                "marketplace.json",
+              ),
+              pluginName: runtime.plugin.name,
+            },
+          }),
         });
-        const pluginServers = await readDeepScanPluginServers(
-          runtime.plugin.installedRoot,
-        );
         const overrides =
-          pluginServers === undefined
+          parentConfig === undefined
             ? []
-            : deepScanParentToolOverrides(parentConfig, pluginServers);
+            : deepScanParentToolOverrides(
+                parentConfig,
+                pluginServers === "native" ? {} : pluginServers,
+              );
         if (overrides.length > 0) {
           // Only the coordinator turn needs to keep its MCP call outside a yielding cell.
           parentCodex = await this.#dependencies.createCodex({
@@ -4133,9 +4145,7 @@ export class CodexSecurity {
         );
       }
       const runtime = this.#runtime;
-      const mcpSource = deepScan
-        ? (await requireCurrentDeepScanPlugin(runtime))["mcpServers"]
-        : null;
+      if (deepScan) await requireCurrentDeepScanPlugin(runtime);
       const effectiveConfig = await scanSkillConfig(
         scanCyberAccessConfig(requestedConfig, options.cyberAccessProgram),
         runtime.plugin,
@@ -4253,11 +4263,6 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
-        // Leave other plugin declarations under the caller's native routing policy.
-        deepScanPluginUsesDefaultMcpFile:
-          mcpSource === undefined ||
-          mcpSource === "./.mcp.json" ||
-          mcpSource === ".mcp.json",
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
@@ -6183,7 +6188,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
 
 async function requireCurrentDeepScanPlugin(
   runtime: PreparedRuntime,
-): Promise<Record<string, unknown>> {
+): Promise<void> {
   const manifest: unknown = JSON.parse(
     await readFile(
       join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
@@ -6201,7 +6206,6 @@ async function requireCurrentDeepScanPlugin(
       "Deep Scan requires the current plugin's direct engine and isolated worker runtime support. Update the custom plugin or use the bundled plugin.",
     );
   }
-  return manifest;
 }
 
 function selectedWorkerRuntimeConfig(
@@ -6260,6 +6264,45 @@ function selectedWorkerRuntimeConfig(
       : { environment: providerEnvironment }),
     ...(isRecord(providers) ? { model_providers: providers } : {}),
   };
+}
+
+/** Read the declaration selected by the installed Codex plugin manifest. */
+async function readInstalledDeepScanPluginServers(
+  installedRoot: string,
+): Promise<Record<string, unknown> | "native" | undefined> {
+  const read = async (path: string): Promise<unknown> =>
+    JSON.parse(
+      await readRegularInputFile(join(installedRoot, path), installedRoot),
+    );
+  try {
+    const portable = await read("plugin.json").catch(() => undefined);
+    // A portable manifest owns MCP. Its legacy overlay only forwards environment variables.
+    if (
+      isRecord(portable) &&
+      typeof portable["$schema"] === "string" &&
+      portable["$schema"].startsWith("https://agent-plugins.org/schemas/")
+    )
+      return "native";
+    const manifest = await read(".codex-plugin/plugin.json");
+    if (!isRecord(manifest)) return;
+    let source = manifest["mcpServers"];
+    if (!isRecord(source)) {
+      const path =
+        typeof source === "string" && source.startsWith("./")
+          ? source.slice(2)
+          : "";
+      // Native Codex ignores invalid selectors and uses the installed default.
+      const valid =
+        path &&
+        !parsePath(path).root &&
+        !path.split(sep === "\\" ? /[/\\]/u : "/").includes("..");
+      source = await read(valid ? path : ".mcp.json");
+    }
+    if (!isRecord(source)) return;
+    return isRecord(source["mcpServers"]) ? source["mcpServers"] : source;
+  } catch {
+    return undefined;
+  }
 }
 
 async function readDeepScanPluginServers(

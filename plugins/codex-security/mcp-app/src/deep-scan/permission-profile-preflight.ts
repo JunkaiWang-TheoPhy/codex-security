@@ -60,8 +60,11 @@ type PreflightContext = "helper" | "parent-config";
 
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
-  options: RuntimeConfigReadOptions & { readonly configCwd?: string },
-): Promise<JsonRecord> {
+  options: RuntimeConfigReadOptions & {
+    readonly configCwd?: string;
+    readonly plugin?: { marketplacePath: string; pluginName: string };
+  },
+): Promise<JsonRecord | undefined> {
   return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
       cwd: options.configCwd ?? options.cwd,
@@ -69,7 +72,30 @@ export async function readDeepScanRuntimeConfig(
     });
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
-    return config;
+    if (!options.plugin) return config;
+    // Portable plugins expose their admitted server names through native discovery.
+    // Preserve native routing if the selected Codex cannot provide that metadata.
+    const detail = await client
+      .request("plugin/read", options.plugin)
+      .catch(() => undefined);
+    options.signal.throwIfAborted();
+    const plugin = record(detail?.plugin);
+    const summary = record(plugin?.summary);
+    const servers = plugin?.mcpServers;
+    if (
+      summary?.installed !== true ||
+      summary.enabled !== true ||
+      !Array.isArray(servers) ||
+      !servers.every((name) => typeof name === "string")
+    )
+      return undefined;
+    return {
+      ...config,
+      mcp_servers: {
+        ...Object.fromEntries(servers.map((name) => [name, {}])),
+        ...record(config.mcp_servers),
+      },
+    };
   });
 }
 

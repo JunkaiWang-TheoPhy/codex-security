@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -126,6 +126,12 @@ test("native MCP registrations take precedence over the selected plugin's names 
   );
 });
 
+const parentWithNode = {
+  dependencyNode: null,
+  runtimeNode: "selected runtime",
+  route: "parent",
+} as const;
+
 test.each([
   {
     name: "inherited Node override",
@@ -182,11 +188,42 @@ test.each([
     directOmitted: true,
   },
   {
-    name: "alternate MCP declaration selected by the plugin",
-    dependencyNode: null,
-    runtimeNode: "selected runtime",
-    route: "parent",
-    alternateMcpSource: "./other-servers.json",
+    ...parentWithNode,
+    name: "inline MCP declaration allowing direct calls",
+    declaration: "inline",
+    pluginOmit: [],
+  },
+  {
+    ...parentWithNode,
+    name: "inline MCP declaration excluding direct calls",
+    declaration: "inline",
+    pluginOmit: ["direct"],
+    directOmitted: true,
+  },
+  {
+    ...parentWithNode,
+    name: "alternate MCP declaration allowing direct calls",
+    declaration: "alternate",
+    pluginOmit: [],
+  },
+  {
+    ...parentWithNode,
+    name: "alternate MCP declaration excluding direct calls",
+    declaration: "alternate",
+    pluginOmit: ["direct"],
+    directOmitted: true,
+  },
+  {
+    ...parentWithNode,
+    name: "the installed default when an alternate MCP selector contains a parent component",
+    declaration: "invalid",
+    pluginOmit: ["direct"],
+  },
+  {
+    ...parentWithNode,
+    name: "an alternate MCP file reached through a link outside the installed plugin",
+    declaration: "outside",
+    pluginOmit: [],
     directOmitted: true,
   },
   {
@@ -205,35 +242,55 @@ test.each([
   await mkdir(codexHome);
   await mkdir(scanDir, { mode: 0o700 });
   const runtime = preparedRuntime(codexHome);
-  if (scenario.alternateMcpSource) {
-    const selected = join(root, "selected-plugin");
-    await cp(PLUGIN_ROOT, selected, { recursive: true, dereference: true });
-    const path = join(selected, ".codex-plugin", "plugin.json");
-    const manifest = JSON.parse(await readFile(path, "utf8"));
-    await writeFile(
-      path,
-      JSON.stringify({ ...manifest, mcpServers: scenario.alternateMcpSource }),
-    );
-    await writeFile(
-      join(selected, scenario.alternateMcpSource),
-      JSON.stringify({
-        mcpServers: { "codex-security": { omit_tools_from: ["direct"] } },
-      }),
-    );
-    runtime.plugin.pluginRoot = selected;
-    runtime.plugin.installedRoot = selected;
-  }
   if (scenario.pluginOmit) {
-    runtime.plugin.installedRoot = join(root, "installed-plugin");
-    await mkdir(runtime.plugin.installedRoot);
-    await writeFile(
-      join(runtime.plugin.installedRoot, ".mcp.json"),
-      JSON.stringify({
-        mcpServers: {
-          "codex-security": { omit_tools_from: scenario.pluginOmit },
-        },
-      }),
+    const installed = join(root, "installed-plugin");
+    await mkdir(join(installed, ".codex-plugin"), { recursive: true });
+    const manifest = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf8"),
     );
+    const servers = (omit: readonly string[]) => ({
+      "codex-security": { command: "fixture", omit_tools_from: omit },
+    });
+    const declared = servers(scenario.pluginOmit);
+    let defaults = declared;
+    if ("declaration" in scenario) {
+      // Only the installed manifest selects this declaration.
+      defaults = servers(scenario.directOmitted ? [] : ["direct"]);
+      if (scenario.declaration === "inline") {
+        manifest.mcpServers = declared;
+      } else {
+        manifest.mcpServers = "./routing/servers.json";
+        const routing = join(installed, "routing");
+        const linked = scenario.declaration === "outside";
+        const directory = linked ? join(root, "outside-plugin") : routing;
+        await mkdir(directory);
+        if (scenario.declaration === "invalid") {
+          await mkdir(join(directory, "nested"));
+          manifest.mcpServers = "./routing/nested/../servers.json";
+          defaults = servers([]);
+        }
+        if (linked) {
+          await symlink(
+            directory,
+            routing,
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        }
+        await writeFile(
+          join(directory, "servers.json"),
+          JSON.stringify({ mcpServers: declared }),
+        );
+      }
+    }
+    await writeFile(
+      join(installed, ".mcp.json"),
+      JSON.stringify({ mcpServers: defaults }),
+    );
+    await writeFile(
+      join(installed, ".codex-plugin", "plugin.json"),
+      JSON.stringify(manifest),
+    );
+    runtime.plugin.installedRoot = installed;
   }
   const selectedNode =
     scenario.runtimeNode === null
@@ -378,27 +435,81 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
   );
 });
 
-test("parent configuration launches from the caller and reads the scan directory", async () => {
+test("parent configuration reads the scan settings and selected plugin from the caller", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
   const script = join(home, "config-reader.mjs");
+  const log = join(home, "requests.json");
   await writeFile(
     script,
-    `import { createInterface } from "node:readline";
+    `import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const [log, replies] = process.argv.slice(2);
+const responses = JSON.parse(replies);
+const calls = [];
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, method, params } = JSON.parse(line);
   if (id === undefined) continue;
-  const result = method === "config/read"
-    ? { config: { launcherCwd: process.cwd(), configCwd: params.cwd } }
-    : {};
-  console.log(JSON.stringify({ id, result }));
+  if (method !== "initialize") {
+    calls.push({ method, params });
+    writeFileSync(log, JSON.stringify({ cwd: process.cwd(), calls }));
+  }
+  console.log(JSON.stringify({ id, ...(responses[method] ?? { result: {} }) }));
 }`,
   );
-  const config = await readDeepScanParentConfig({
-    codexOptions: { env: { CODEX_HOME: home } },
-    preflightCommand: { command: process.execPath, args: [script] },
-    scanDir,
-    signal: new AbortController().signal,
+  const plugin = {
+    marketplacePath: join(home, "marketplace.json"),
+    pluginName: "selected-security",
+  };
+  const owner = "codex-security";
+  const alias = "codex.security";
+  const noDirect = { omit_tools_from: ["direct"] };
+  const config = { mcp_servers: { [owner]: noDirect } };
+  const read = (
+    detail: JsonObject,
+    settings: JsonObject = { result: { config } },
+  ) =>
+    readDeepScanParentConfig({
+      codexOptions: { env: { CODEX_HOME: home } },
+      preflightCommand: {
+        command: process.execPath,
+        args: [
+          script,
+          log,
+          JSON.stringify({ "config/read": settings, "plugin/read": detail }),
+        ],
+      },
+      scanDir,
+      signal: new AbortController().signal,
+      plugin,
+    });
+  const requests = async () => JSON.parse(await readFile(log, "utf8"));
+  const configRead = {
+    method: "config/read",
+    params: { cwd: scanDir, includeLayers: false },
+  };
+  const detail = {
+    result: {
+      plugin: {
+        summary: { installed: true, enabled: true },
+        mcpServers: [owner, alias],
+      },
+    },
+  };
+  expect(await read(detail)).toEqual({
+    mcp_servers: { [owner]: noDirect, [alias]: {} },
   });
-  expect(config).toEqual({ launcherCwd: process.cwd(), configCwd: scanDir });
+  expect(await requests()).toEqual({
+    cwd: process.cwd(),
+    calls: [configRead, { method: "plugin/read", params: plugin }],
+  });
+  expect(
+    await read({ error: { code: -32601, message: "Method not found" } }),
+  ).toBeUndefined();
+  await expect(
+    read(detail, { error: { code: -32602, message: "invalid configuration" } }),
+  ).rejects.toThrow(
+    /Could not read the Deep Scan parent configuration[\s\S]*invalid configuration/u,
+  );
+  expect((await requests()).calls).toEqual([configRead]);
 });

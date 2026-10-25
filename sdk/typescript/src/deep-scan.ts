@@ -40,8 +40,8 @@ export async function readDeepScanParentConfig(
   options: Pick<
     DirectDeepScanOptions,
     "codexOptions" | "preflightCommand" | "scanDir" | "signal"
-  >,
-): Promise<JsonObject> {
+  > & { plugin?: { marketplacePath: string; pluginName: string } },
+): Promise<JsonObject | undefined> {
   const { codexOptions, preflightCommand: command } = options;
   const native = await nativePermissionPreflight();
   const config = codexOptions.config ?? {};
@@ -67,6 +67,7 @@ export async function readDeepScanParentConfig(
       env: environment,
       signal: options.signal,
       context: "parent-config",
+      plugin: options.plugin,
     }),
   );
 }
