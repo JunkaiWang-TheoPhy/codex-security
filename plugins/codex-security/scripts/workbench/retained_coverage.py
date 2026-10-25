@@ -840,16 +840,6 @@ def merge_saved_results(
             result["id"] = surface_id(original, index)
             if not receipts_resolved and (origin := projection_origins.get(id(original))):
                 result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
-            previous = retained_coverage_record("surfaces", result)
-            if previous is not None and isinstance(previous.get("id"), str):
-                result["id"] = previous["id"]
-            else:
-                surfaces = coverage.get("surfaces", [])
-                if any(
-                    isinstance(row, dict) and row.get("id") == result["id"]
-                    for row in (surfaces if isinstance(surfaces, list) else [])
-                ):
-                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
@@ -899,6 +889,27 @@ def merge_saved_results(
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
                 ]
+        # Live publication records the worker on its surfaces and linked tasks.
+        # Keep that form when replaying the very same accepted source.
+        if (
+            (field == "surfaces" or (field == "deferred" and result.get("surfaceIds")))
+            and id(source) in accepted_coverage_sources
+            and "workerId" not in result
+        ):
+            published = {**result, "workerId": worker["id"]}
+            if canonical_coverage_record(field, published) in _coverage_rows(coverage, field):
+                return published
+        if field == "surfaces":
+            previous = retained_coverage_record("surfaces", result)
+            if previous is not None and isinstance(previous.get("id"), str):
+                result["id"] = previous["id"]
+            else:
+                surfaces = coverage.get("surfaces", [])
+                if any(
+                    isinstance(row, dict) and row.get("id") == result["id"]
+                    for row in (surfaces if isinstance(surfaces, list) else [])
+                ):
+                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
