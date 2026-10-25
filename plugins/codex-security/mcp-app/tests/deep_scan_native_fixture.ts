@@ -27,7 +27,8 @@ const writeFileSync = (path, value) => { const pending = path + "." + process.pi
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { parse } from ${JSON.stringify(import.meta.resolve("smol-toml"))};
-const completionMarkerPath = ${JSON.stringify(completionMarkerPath)};
+let invocationMarkerPath;
+let completionMarkerPath;
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
@@ -70,7 +71,7 @@ function capture() {
   }
   const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
   const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-  writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({
+  writeFileSync(invocationMarkerPath, JSON.stringify({
     ...environment, deepConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : undefined, ...(scopeInput === undefined ? {} : { scopeInput }), rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
     mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment,
     originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
@@ -186,6 +187,10 @@ async function handle(message) {
     login = message; result = { type: 'apiKey' };
   } else if (message.method === 'thread/start' || message.method === 'thread/resume') {
     thread = message; threadId = message.params.threadId ?? 'fixture-thread-id';
+    invocationMarkerPath = process.env.FAKE_CODEX_MARKER;
+    completionMarkerPath = invocationMarkerPath === ${JSON.stringify(markerPath)}
+      ? ${JSON.stringify(completionMarkerPath)}
+      : invocationMarkerPath + ".phase";
     result = { thread: { id: threadId, ephemeral: false }, model: message.params.model ?? 'fixture-model' };
     capture();
     if (process.env.FAKE_CODEX_HOLD_THREAD_START === 'true') { sequence.push('thread-pending'); writeFileSync(completionMarkerPath, 'thread-pending\\n'); capture(); return; }
