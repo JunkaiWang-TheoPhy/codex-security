@@ -75,6 +75,84 @@ export async function readDeepScanParentConfig(
   );
 }
 
+/** Keep direct dispatch scoped to the original SDK coordinator turn and MCP server. */
+export function deepScanParentToolOverrides(
+  config: JsonObject,
+  pluginServers: Record<string, unknown>,
+): string[] {
+  const features = config["features"] ?? {};
+  if (!isRecord(features)) return [];
+  const mode = features["code_mode"];
+  if (mode !== undefined && typeof mode !== "boolean" && !isRecord(mode))
+    return [];
+  const direct =
+    (isRecord(mode) ? mode["direct_only_tool_namespaces"] : undefined) ?? [];
+  if (!Array.isArray(direct)) return [];
+
+  const owner = "codex-security";
+  const bare = "codex_security";
+  const prefixed = "mcp__codex_security";
+  let required = [prefixed, bare];
+  const overrides: string[] = [];
+  const configured = config["mcp_servers"];
+  // Native registrations take precedence over the selected plugin's entries.
+  const servers: Record<string, unknown> = {
+    ...pluginServers,
+    ...(isRecord(configured) ? configured : {}),
+  };
+  const ownerConfig = servers[owner];
+  if (!isRecord(ownerConfig) || ownerConfig["enabled"] === false) return [];
+  const omitted = ownerConfig["omit_tools_from"];
+  if (Array.isArray(omitted) && omitted.includes("direct")) return [];
+  const option = features["non_prefixed_mcp_tool_names"];
+  const enabled =
+    option === true || (isRecord(option) && option["enabled"] === true);
+  const selected = isRecord(option) ? option["server_names"] : undefined;
+  function namespace(server: string): string {
+    const name = server.replace(/[-.:@/]/gu, "_");
+    const omitPrefix =
+      enabled && (!Array.isArray(selected) || selected.includes(server));
+    return omitPrefix || name.startsWith("mcp__") ? name : `mcp__${name}`;
+  }
+  const occupied = new Set(
+    Object.entries(servers)
+      .filter(
+        ([server, settings]) =>
+          server !== owner &&
+          isRecord(settings) &&
+          settings["enabled"] !== false,
+      )
+      .map(([server]) => namespace(server)),
+  );
+  const current = namespace(owner);
+  if (occupied.has(current)) {
+    // Move only this raw server into a free namespace. Preserve an explicit
+    // naming policy and avoid making the other server inherit a direct slot.
+    if (
+      current === bare ||
+      occupied.has(bare) ||
+      direct.includes(current) ||
+      (option != null && !enabled)
+    )
+      return [];
+    overrides.push(
+      `features.non_prefixed_mcp_tool_names=${inlineToml({
+        enabled: true,
+        server_names: [...(Array.isArray(selected) ? selected : []), owner],
+      })}`,
+    );
+    required = [bare];
+  } else if (occupied.has(prefixed) || occupied.has(bare)) {
+    required = [current];
+  }
+  if (!required.every((name) => direct.includes(name))) {
+    overrides.push(
+      `features.code_mode.direct_only_tool_namespaces=${inlineToml([...new Set([...direct, ...required])])}`,
+    );
+  }
+  return overrides;
+}
+
 // The direct coordinator records context but never calls a model itself.
 export const DIRECT_DEEP_SCAN_CONTROL_USAGE = {
   input_tokens: 0,

@@ -1,8 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
+import type { JsonObject, JsonValue } from "../src/config.js";
 import {
+  deepScanParentToolOverrides,
   readDeepScanParentConfig,
   type DirectDeepScanOptions,
 } from "../src/deep-scan.js";
@@ -17,6 +20,102 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test("a colliding MCP server leaves only the original coordinator's namespace direct", () => {
+  const owner = "codex-security";
+  const alias = "codex.security";
+  const bare = "codex_security";
+  const prefixed = "mcp__codex_security";
+  const servers = { [owner]: { enabled: true }, [alias]: { enabled: true } };
+  const selected = (...names: string[]) => ({
+    enabled: true,
+    server_names: names,
+  });
+  const direct = (...names: string[]) => ({
+    direct_only_tool_namespaces: names,
+  });
+  const overrides = (
+    prefix?: JsonValue,
+    existing: string[] = ["audit"],
+    registrations: JsonObject = servers,
+  ) => {
+    const config = {
+      mcp_servers: registrations,
+      features: {
+        ...(prefix === undefined
+          ? {}
+          : { non_prefixed_mcp_tool_names: prefix }),
+        code_mode: direct(...existing),
+      },
+    };
+    return parse(deepScanParentToolOverrides(config, {}).join("\n"))[
+      "features"
+    ];
+  };
+
+  expect(overrides()).toEqual({
+    non_prefixed_mcp_tool_names: selected(owner),
+    code_mode: direct("audit", bare),
+  });
+  expect(overrides(selected("retained-tools"))).toEqual({
+    non_prefixed_mcp_tool_names: selected("retained-tools", owner),
+    code_mode: direct("audit", bare),
+  });
+  expect(overrides(selected(alias))).toEqual({
+    code_mode: direct("audit", prefixed),
+  });
+  expect(overrides(selected(owner))).toEqual({
+    code_mode: direct("audit", bare),
+  });
+  expect(
+    overrides(undefined, ["audit"], {
+      ...servers,
+      [alias]: { enabled: false },
+    }),
+  ).toEqual({
+    code_mode: direct("audit", prefixed, bare),
+  });
+
+  expect(overrides(false)).toBeUndefined();
+  expect(overrides(true)).toBeUndefined();
+  expect(overrides(undefined, [prefixed])).toBeUndefined();
+  expect(
+    overrides(undefined, [], { ...servers, [owner]: { enabled: false } }),
+  ).toBeUndefined();
+  expect(
+    overrides(selected(bare), [], { ...servers, [bare]: { enabled: true } }),
+  ).toBeUndefined();
+});
+
+test("native MCP registrations take precedence over the selected plugin's names and opt-outs", () => {
+  const owner = "codex-security";
+  const alias = "codex.security";
+  const plugin = { [owner]: {}, [alias]: {} };
+  const noDirect = { omit_tools_from: ["direct"] };
+  const overrides = (servers: JsonObject, selected: JsonObject) =>
+    parse(
+      deepScanParentToolOverrides({ mcp_servers: servers }, selected).join(
+        "\n",
+      ),
+    )["features"];
+  const isolated = {
+    non_prefixed_mcp_tool_names: { enabled: true, server_names: [owner] },
+    code_mode: { direct_only_tool_namespaces: ["codex_security"] },
+  };
+
+  expect(overrides({}, plugin)).toEqual(isolated);
+  expect(overrides({ [alias]: { enabled: false } }, plugin)).toEqual({
+    code_mode: {
+      direct_only_tool_namespaces: ["mcp__codex_security", "codex_security"],
+    },
+  });
+  expect(overrides({}, { [alias]: {} })).toBeUndefined();
+  expect(overrides({}, { ...plugin, [owner]: noDirect })).toBeUndefined();
+  expect(overrides({ [owner]: noDirect }, plugin)).toBeUndefined();
+  expect(overrides({ [owner]: {} }, { ...plugin, [owner]: noDirect })).toEqual(
+    isolated,
+  );
+});
 
 test.each([
   {
@@ -50,6 +149,38 @@ test.each([
     route: "direct",
   },
   {
+    name: "installed plugin excludes the direct surface",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    pluginOmit: ["direct"],
+    directOmitted: true,
+  },
+  {
+    name: "configured server permits direct use despite the installed plugin exclusion",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    pluginOmit: ["direct"],
+    configuredOmit: [],
+  },
+  {
+    name: "configured server excludes the direct surface",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    configuredOmit: ["direct"],
+    directOmitted: true,
+  },
+  {
+    name: "alternate MCP declaration selected by the plugin",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    alternateMcpSource: "./other-servers.json",
+    directOmitted: true,
+  },
+  {
     name: "invalid code mode supplied by the caller",
     dependencyNode: null,
     runtimeNode: "selected runtime",
@@ -64,6 +195,37 @@ test.each([
   await mkdir(repository);
   await mkdir(codexHome);
   await mkdir(scanDir, { mode: 0o700 });
+  const runtime = preparedRuntime(codexHome);
+  if (scenario.alternateMcpSource) {
+    const selected = join(root, "selected-plugin");
+    await cp(PLUGIN_ROOT, selected, { recursive: true, dereference: true });
+    const path = join(selected, ".codex-plugin", "plugin.json");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(
+      path,
+      JSON.stringify({ ...manifest, mcpServers: scenario.alternateMcpSource }),
+    );
+    await writeFile(
+      join(selected, scenario.alternateMcpSource),
+      JSON.stringify({
+        mcpServers: { "codex-security": { omit_tools_from: ["direct"] } },
+      }),
+    );
+    runtime.plugin.pluginRoot = selected;
+    runtime.plugin.installedRoot = selected;
+  }
+  if (scenario.pluginOmit) {
+    runtime.plugin.installedRoot = join(root, "installed-plugin");
+    await mkdir(runtime.plugin.installedRoot);
+    await writeFile(
+      join(runtime.plugin.installedRoot, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "codex-security": { omit_tools_from: scenario.pluginOmit },
+        },
+      }),
+    );
+  }
   const selectedNode =
     scenario.runtimeNode === null
       ? undefined
@@ -106,6 +268,16 @@ test.each([
   const client = new TestClient(
     {
       codexOverrides: {
+        ...(scenario.configuredOmit === undefined
+          ? {}
+          : {
+              mcp_servers: {
+                "codex-security": {
+                  command: "test-server",
+                  omit_tools_from: [...scenario.configuredOmit],
+                },
+              },
+            }),
         model: "gpt-6.1-sol",
         model_reasoning_effort: "high",
         features: {
@@ -126,7 +298,7 @@ test.each([
             }),
       },
       prepareRuntime: async () => ({
-        ...preparedRuntime(codexHome),
+        ...runtime,
         environment: runtimeEnvironment,
       }),
       // Keep the host's Bun fallback and account advisory out of this check.
@@ -144,7 +316,9 @@ test.each([
       value.startsWith("features.code_mode.direct_only_tool_namespaces="),
     );
     expect(overrides).toEqual(
-      scenario.route === "parent" && typeof codeMode !== "string"
+      scenario.route === "parent" &&
+        typeof codeMode !== "string" &&
+        !scenario.directOmitted
         ? [
             'features.code_mode.direct_only_tool_namespaces=["existing_tools","mcp__codex_security","codex_security"]',
           ]

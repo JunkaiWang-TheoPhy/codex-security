@@ -8261,6 +8261,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 createCodex: (options: CodexOptions) => {
                   const codex = new Codex(options);
                   return {
+                    resumeThread: codex.resumeThread.bind(codex),
                     startThread: (threadOptions: ThreadOptions) => {
                       const thread = codex.startThread(threadOptions);
                       return {

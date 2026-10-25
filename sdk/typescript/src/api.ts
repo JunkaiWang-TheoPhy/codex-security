@@ -106,6 +106,7 @@ import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
 } from "./deep-scan.js";
@@ -309,6 +310,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  deepScanPluginUsesDefaultMcpFile?: boolean;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
@@ -2866,7 +2868,8 @@ export class CodexSecurity {
       if (
         mode === "deep" &&
         !directDeepScan &&
-        !this.#dependencies.hostedScan
+        !this.#dependencies.hostedScan &&
+        session.deepScanPluginUsesDefaultMcpFile
       ) {
         const parentConfig = await (
           this.#dependencies.readDeepScanParentConfig ??
@@ -2879,14 +2882,20 @@ export class CodexSecurity {
           scanDir,
           signal,
         });
-        const override = deepScanParentToolOverride(parentConfig);
-        if (override !== undefined) {
+        const pluginServers = await readDeepScanPluginServers(
+          runtime.plugin.installedRoot,
+        );
+        const overrides =
+          pluginServers === undefined
+            ? []
+            : deepScanParentToolOverrides(parentConfig, pluginServers);
+        if (overrides.length > 0) {
           // Only the coordinator turn needs to keep its MCP call outside a yielding cell.
           parentCodex = await this.#dependencies.createCodex({
             ...codexOptions,
             configOverrides: [
               ...(codexOptions.configOverrides ?? []),
-              override,
+              ...overrides,
             ],
           });
         }
@@ -4119,7 +4128,9 @@ export class CodexSecurity {
         );
       }
       const runtime = this.#runtime;
-      if (deepScan) await requireCurrentDeepScanPlugin(runtime);
+      const mcpSource = deepScan
+        ? (await requireCurrentDeepScanPlugin(runtime))["mcpServers"]
+        : null;
       const effectiveConfig = await scanSkillConfig(
         scanCyberAccessConfig(requestedConfig, options.cyberAccessProgram),
         runtime.plugin,
@@ -4237,6 +4248,11 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
+        // Leave other plugin declarations under the caller's native routing policy.
+        deepScanPluginUsesDefaultMcpFile:
+          mcpSource === undefined ||
+          mcpSource === "./.mcp.json" ||
+          mcpSource === ".mcp.json",
         safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
@@ -5851,20 +5867,6 @@ export function classifyConnectionFailure(
   return "unknown";
 }
 
-function deepScanParentToolOverride(config: JsonObject): string | undefined {
-  const features = config["features"] ?? {};
-  if (!isRecord(features)) return undefined;
-  const mode = features["code_mode"];
-  if (mode !== undefined && typeof mode !== "boolean" && !isRecord(mode))
-    return undefined;
-  const direct =
-    (isRecord(mode) ? mode["direct_only_tool_namespaces"] : undefined) ?? [];
-  if (!Array.isArray(direct)) return undefined;
-  const required = ["mcp__codex_security", "codex_security"];
-  if (required.every((name) => direct.includes(name))) return undefined;
-  return `features.code_mode.direct_only_tool_namespaces=${inlineToml([...new Set([...direct, ...required])])}`;
-}
-
 export function scanRuntimeCodexConfig(
   config: JsonObject,
   protectedCredentialHome?: string,
@@ -6176,26 +6178,25 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
 
 async function requireCurrentDeepScanPlugin(
   runtime: PreparedRuntime,
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const manifest: unknown = JSON.parse(
     await readFile(
       join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
       "utf8",
     ),
   );
-  const capabilities = isRecord(manifest)
-    ? manifest["codexSecurity"]
-    : undefined;
   if (
     runtime.deepScanConfigPath === undefined ||
-    !isRecord(capabilities) ||
-    capabilities["directDeepScanEngine"] !== 1 ||
-    capabilities["workerProviderSnapshot"] !== 4
+    !isRecord(manifest) ||
+    !isRecord(manifest["codexSecurity"]) ||
+    manifest["codexSecurity"]["directDeepScanEngine"] !== 1 ||
+    manifest["codexSecurity"]["workerProviderSnapshot"] !== 4
   ) {
     throw new CodexSecurityError(
       "Deep Scan requires the current plugin's direct engine and isolated worker runtime support. Update the custom plugin or use the bundled plugin.",
     );
   }
+  return manifest;
 }
 
 function selectedWorkerRuntimeConfig(
@@ -6256,23 +6257,29 @@ function selectedWorkerRuntimeConfig(
   };
 }
 
+async function readDeepScanPluginServers(
+  pluginRoot: string,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const configuration: unknown = JSON.parse(
+      await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
+    );
+    const servers = isRecord(configuration)
+      ? configuration["mcpServers"]
+      : undefined;
+    return isRecord(servers) ? servers : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function pluginSupportsIsolatedDeepScanConfig(
   pluginRoot: string,
 ): Promise<boolean> {
-  let configuration: unknown;
-  try {
-    configuration = JSON.parse(
-      await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
-    );
-  } catch {
-    return false;
-  }
-  if (!isRecord(configuration)) return false;
-  const servers = configuration["mcpServers"];
-  if (!isRecord(servers)) return false;
-  const server = servers["codex-security"];
-  if (!isRecord(server)) return false;
-  const environment = server["env_vars"];
+  const server = (await readDeepScanPluginServers(pluginRoot))?.[
+    "codex-security"
+  ];
+  const environment = isRecord(server) ? server["env_vars"] : undefined;
   return (
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
