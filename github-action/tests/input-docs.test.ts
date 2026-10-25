@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-test('input docs preserve backslashes and escape adjacent table delimiters', async (t) => {
+test('input docs preserve escaped table values and reject reversed reference markers', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'action-input-docs-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const action = join(root, 'github-action');
@@ -47,4 +47,13 @@ test('input docs preserve backslashes and escape adjacent table delimiters', asy
   execFileSync(process.execPath, [script]);
   assert.match(await readFile(readme, 'utf8'), /name: updated repository/);
   execFileSync(process.execPath, [script, '--check']);
+
+  for (const [section, label] of [['action-reference', 'action reference'], ['action-workflow:repository', 'repository workflow'], ['action-workflow:pull-request', 'pull-request workflow']]) {
+    const start = `<!-- ${section}:start -->`;
+    const end = `<!-- ${section}:end -->`;
+    const reversed = markers.replace(`${start}\n${end}`, `${end}\nContributor notes\n${start}`);
+    await writeFile(readme, reversed);
+    assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }), new RegExp(`README must contain ${label} markers in order`));
+    assert.equal(await readFile(readme, 'utf8'), reversed);
+  }
 });
