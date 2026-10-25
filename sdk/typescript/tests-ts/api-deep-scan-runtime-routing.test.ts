@@ -76,6 +76,15 @@ test("a colliding MCP server leaves only the original coordinator's namespace di
     code_mode: direct("audit", prefixed, bare),
   });
 
+  expect(
+    overrides(false, ["audit"], { ...servers, [alias]: { enabled_tools: [] } }),
+  ).toEqual({ code_mode: direct("audit", prefixed, bare) });
+  expect(
+    overrides(false, ["audit"], {
+      ...servers,
+      [alias]: { enabled_tools: ["peer_ping"] },
+    }),
+  ).toBeUndefined();
   expect(overrides(false)).toBeUndefined();
   expect(overrides(true)).toBeUndefined();
   expect(overrides(undefined, [prefixed])).toBeUndefined();

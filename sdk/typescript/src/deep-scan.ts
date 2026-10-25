@@ -116,7 +116,9 @@ export function deepScanParentToolOverrides(
         ([server, settings]) =>
           server !== owner &&
           isRecord(settings) &&
-          settings["enabled"] !== false,
+          settings["enabled"] !== false &&
+          (!Array.isArray(settings["enabled_tools"]) ||
+            settings["enabled_tools"].length > 0),
       )
       .map(([server]) => namespace(server)),
   );
