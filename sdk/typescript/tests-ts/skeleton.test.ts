@@ -641,15 +641,20 @@ describe("TypeScript package skeleton", () => {
       ["node-ci.yml", "static-checks", "pnpm"],
       ["node-release.yml", "verify", "sfw pnpm"],
     ] as const) {
-      const steps = (await workflow(filename)).jobs[job]!.steps!;
-      const index = steps.findIndex((step) => step.id === "sdk-audit");
-      expect(index).toBeGreaterThanOrEqual(0);
-      expect(steps[index]).toMatchObject({
+      const audits = (await workflow(filename)).jobs[job]!.steps!.filter(
+        (step) =>
+          step.id === "sdk-audit" ||
+          step.name === "Audit MCP production dependencies",
+      );
+      expect(audits).toHaveLength(2);
+      const [sdk, mcp] = audits;
+      expect(sdk).toMatchObject({
+        id: "sdk-audit",
         "working-directory": "sdk/typescript",
         run: `${launcher} run audit:prod --config.lockfile-dir=.`,
       });
-      expect(steps[index]).not.toHaveProperty("continue-on-error");
-      const mcp = steps[index + 1]!;
+      expect(sdk).not.toHaveProperty("if");
+      expect(sdk).not.toHaveProperty("continue-on-error");
       expect(mcp).toMatchObject({
         if: "${{ !cancelled() && (steps.sdk-audit.outcome == 'success' || steps.sdk-audit.outcome == 'failure') }}",
         "working-directory": "plugins/codex-security/mcp-app",
