@@ -32,6 +32,8 @@ jobs:
   native:
     if: ${{ !inputs.native-artifacts-ready }}
     uses: ./.github/workflows/native-artifacts.yml
+    with:
+      reuse-verified: ${{ !inputs.compare-layouts }}
 
   runner:
     needs: native
@@ -128,8 +130,7 @@ jobs:
         run: pnpm --dir sdk/typescript run build:plugin
       - name: Install ripgrep
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get install --yes ripgrep
+        run: .github/scripts/install-ripgrep.sh
       - name: Test shard layout
         if: inputs.compare-layouts
         working-directory: sdk/typescript
