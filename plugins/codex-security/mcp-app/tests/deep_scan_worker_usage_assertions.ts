@@ -10,6 +10,17 @@ import {
   runCoordinator,
 } from "./deep_scan_coordinator_fixture.ts";
 
+export function workerUsage(completedTurns: number) {
+  return {
+    input_tokens: 10 * completedTurns,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 2 * completedTurns,
+    reasoning_output_tokens: completedTurns,
+    total_tokens: 12 * completedTurns,
+  };
+}
+
 export function withCumulativeUsage(
   executor: FakeExecutor,
   workerUsageDirectory: string | undefined,
@@ -20,14 +31,7 @@ export function withCumulativeUsage(
     const completedTurns = request.resumeThreadId ? 2 : 1;
     return {
       ...(await originalRun(request)),
-      usage: {
-        input_tokens: 10 * completedTurns,
-        cached_input_tokens: 0,
-        cache_write_input_tokens: 0,
-        output_tokens: 2 * completedTurns,
-        reasoning_output_tokens: completedTurns,
-        total_tokens: 12 * completedTurns,
-      },
+      usage: workerUsage(completedTurns),
     };
   };
 }
@@ -43,9 +47,15 @@ export async function testWorkerUsageWithoutHostDirectory() {
   });
   assert.equal(terminal?.status, "succeeded");
   assert.ok(events.some((event) => event.event === "worker_usage_unavailable"));
-  await assert.rejects(
-    readdir(join(fixture.run.scanDir, "artifacts", "deep_discovery", "usage")),
-    { code: "ENOENT" },
+  await assertNoArtifactUsage(fixture.run.scanDir);
+}
+
+export function assertNoArtifactUsage(scanDir: string) {
+  return assert.rejects(
+    readdir(join(scanDir, "artifacts", "deep_discovery", "usage")),
+    {
+      code: "ENOENT",
+    },
   );
 }
 

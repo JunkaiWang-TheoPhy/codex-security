@@ -2,10 +2,12 @@ import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.
 import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import {
+  assertNoArtifactUsage,
   assertWorkerRetryReceipts,
   assertCanceledWorkerReceipts,
   testWorkerUsageWithoutHostDirectory,
   withCumulativeUsage,
+  workerUsage,
 } from "./deep_scan_worker_usage_assertions.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -1306,12 +1308,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   ]);
   assert.equal(new Set(executor.discoveryThreadIds).size, 1);
   await assertWorkerRetryReceipts(fixture.run.workerUsageDirectory!, events);
-  await assert.rejects(
-    readdir(
-      path.join(fixture.run.scanDir, "artifacts", "deep_discovery", "usage"),
-    ),
-    { code: "ENOENT" },
-  );
+  await assertNoArtifactUsage(fixture.run.scanDir);
   if (withToolFailure) {
     const message = executor.options.discoveryDiagnostics![0].message;
     assert.ok(
@@ -2048,18 +2045,7 @@ async function testCancellationDropsUnvalidatedDiscoveryResult(
   });
   coordinator.start();
   await executor.discoveryArtifactsWritten.promise;
-  if (usageReported)
-    await reportUsage?.(
-      {
-        input_tokens: 10,
-        cached_input_tokens: 0,
-        cache_write_input_tokens: 0,
-        output_tokens: 2,
-        reasoning_output_tokens: 1,
-        total_tokens: 12,
-      },
-      "synthetic-turn",
-    );
+  if (usageReported) await reportUsage?.(workerUsage(1), "synthetic-turn");
   const worker = [...store.workers.values()].find(
     (candidate) => candidate.kind === "discovery",
   );
