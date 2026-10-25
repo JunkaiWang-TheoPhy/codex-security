@@ -138,6 +138,8 @@ describe("CodexSecurity finding validation", () => {
     }
   }
 
+  let fixturePython: Promise<string> | undefined;
+
   async function validationClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       validationEvents(),
@@ -234,6 +236,42 @@ describe("CodexSecurity finding validation", () => {
         telemetryEnabled = true;
       },
     };
+  }
+
+  async function persistedValidationClient(
+    events?: Parameters<typeof validationClient>[0],
+    pluginRoot = PLUGIN_ROOT,
+    fixtureRoot?: string,
+    environmentOverrides?: Record<string, string>,
+  ) {
+    const python = await (fixturePython ??= resolvePluginPython());
+    const fixture = await validationClient(
+      events,
+      pluginRoot,
+      python,
+      fixtureRoot,
+      environmentOverrides,
+    );
+    fixture.workbench.mockImplementation(runWorkbench);
+    async function bindWorkflow(
+      id: string,
+      environment: NodeJS.ProcessEnv = {
+        CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
+      },
+    ) {
+      const workflow = new FindingWorkflow(
+        id,
+        environment,
+        runWorkbench,
+        python,
+        {
+          workbenchOptions: { python, pluginRoot: PLUGIN_ROOT, environment },
+        },
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      return id;
+    }
+    return { ...fixture, python, bindWorkflow };
   }
 
   test.each(
@@ -664,11 +702,9 @@ describe("CodexSecurity finding validation", () => {
           await writeFile(join(repository, "source.txt"), "Changed source.\n");
         yield* validationEvents();
       }
-      const python = await resolvePluginPython();
-      const fixture = await validationClient(
+      const fixture = await persistedValidationClient(
         events,
         PLUGIN_ROOT,
-        python,
         root,
         {
           CODEX_HOME: join(root, "ambient-home"),
@@ -721,14 +757,8 @@ describe("CodexSecurity finding validation", () => {
         }
         return await runWorkbench(options, args, input);
       });
-      const workflow = new FindingWorkflow(
-        "native-sqlite-validation",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
-      );
-      await workflow.bind({ repositoryPath: repository });
-      const request = { ...fixture.options, workflowId: workflow.id };
+      const workflowId = await fixture.bindWorkflow("native-sqlite-validation");
+      const request = { ...fixture.options, workflowId };
       const first = await client.validate(request);
       expect(first.disposition).toBe("reportable");
       expect(modelCalls).toBe(1);
@@ -763,7 +793,6 @@ describe("CodexSecurity finding validation", () => {
   ])(
     "checks saved validation evidence before cache reuse: %s",
     async (change) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events(): AsyncGenerator<ThreadEvent> {
         modelCalls++;
@@ -779,7 +808,7 @@ describe("CodexSecurity finding validation", () => {
         );
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       let unbound = change === "unbound";
       fixture.workbench.mockImplementation(async (options, args, input) => {
@@ -793,17 +822,11 @@ describe("CodexSecurity finding validation", () => {
         }
         return await runWorkbench(options, args, input);
       });
-      const workflow = new FindingWorkflow(
-        "validation-evidence",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
-      );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const workflowId = await fixture.bindWorkflow("validation-evidence");
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
@@ -840,7 +863,6 @@ describe("CodexSecurity finding validation", () => {
   );
 
   test("reuses explicit validation output without overwriting changed evidence", async () => {
-    const python = await resolvePluginPython();
     let modelCalls = 0;
     async function* events(): AsyncGenerator<ThreadEvent> {
       modelCalls++;
@@ -850,20 +872,15 @@ describe("CodexSecurity finding validation", () => {
       );
       yield* validationEvents();
     }
-    const fixture = await validationClient(events, PLUGIN_ROOT, python);
+    const fixture = await persistedValidationClient(events);
     fixture.enableTelemetry();
     await using client = fixture.client;
-    fixture.workbench.mockImplementation(runWorkbench);
-    const workflow = new FindingWorkflow(
+    const workflowId = await fixture.bindWorkflow(
       "explicit-validation-evidence",
-      { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-      runWorkbench,
-      python,
     );
-    await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
     const request = {
       ...fixture.options,
-      workflowId: workflow.id,
+      workflowId,
       outputDir: join(fixture.stateDirectory, "telemetry"),
     };
     const first = await client.validate(request);
@@ -910,7 +927,6 @@ describe("CodexSecurity finding validation", () => {
   test.each(["empty", "nonempty"])(
     "respects a different explicit validation output directory that is %s",
     async (contents) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events(): AsyncGenerator<ThreadEvent> {
         modelCalls++;
@@ -920,17 +936,12 @@ describe("CodexSecurity finding validation", () => {
         );
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "validation-output-destination",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
-      const request = { ...fixture.options, workflowId: workflow.id };
+      const request = { ...fixture.options, workflowId };
       const first = await client.validate(request);
       const outputDir = join(fixture.root, "other-validation");
       await mkdir(outputDir, { mode: 0o700 });
@@ -964,7 +975,6 @@ describe("CodexSecurity finding validation", () => {
   test.each(["unavailable", "aborted"] as const)(
     "handles %s evidence fingerprints without caching an invalid result",
     async (mode) => {
-      const python = await resolvePluginPython();
       const controller = new AbortController();
       let modelCalls = 0;
       let saved = 0;
@@ -972,7 +982,7 @@ describe("CodexSecurity finding validation", () => {
         modelCalls++;
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       fixture.workbench.mockImplementation(async (options, args, input) => {
         if (args[0] === "finding-workflow" && input !== undefined) {
@@ -985,17 +995,13 @@ describe("CodexSecurity finding validation", () => {
         }
         return await runWorkbench(options, args, input);
       });
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "optional-validation-evidence",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
         signal: controller.signal,
       };
       if (mode === "aborted") {
@@ -1027,7 +1033,6 @@ describe("CodexSecurity finding validation", () => {
   }
 
   test("resumes workflow validation from persisted assessments across clients", async () => {
-    const python = await resolvePluginPython();
     let modelCalls = 0;
     let targetChanged = false;
     async function* events() {
@@ -1035,18 +1040,11 @@ describe("CodexSecurity finding validation", () => {
       if (modelCalls === 2) throw new Error("Second assessment failed.");
       yield* validationEvents();
     }
-    const original = await validationClient(events, PLUGIN_ROOT, python);
+    const original = await persistedValidationClient(events);
     original.enableTelemetry();
     usePersistedValidationWorkbench(original, () => targetChanged);
     await using originalClient = original.client;
-    await new FindingWorkflow(
-      "validation-retry",
-      {
-        CODEX_SECURITY_STATE_DIR: original.stateDirectory,
-      },
-      runWorkbench,
-      python,
-    ).bind({ repositoryPath: original.options.repositoryPath });
+    await original.bindWorkflow("validation-retry");
     const finished: Readonly<OperationTelemetryEvent>[] = [];
     const request = {
       ...original.options,
@@ -1064,10 +1062,9 @@ describe("CodexSecurity finding validation", () => {
     ).rejects.toThrow("Second assessment failed.");
     await originalClient.close();
 
-    const resumed = await validationClient(
+    const resumed = await persistedValidationClient(
       events,
       PLUGIN_ROOT,
-      python,
       original.root,
     );
     resumed.enableTelemetry();
@@ -1096,21 +1093,15 @@ describe("CodexSecurity finding validation", () => {
   });
 
   test("separates persisted validation by model and access program across clients", async () => {
-    const python = await resolvePluginPython();
     let modelCalls = 0;
     async function* events() {
       modelCalls += 1;
       yield* validationEvents();
     }
-    const original = await validationClient(events, PLUGIN_ROOT, python);
+    const original = await persistedValidationClient(events);
     usePersistedValidationWorkbench(original);
     await using originalClient = original.client;
-    await new FindingWorkflow(
-      "validation-settings",
-      { CODEX_SECURITY_STATE_DIR: original.stateDirectory },
-      runWorkbench,
-      python,
-    ).bind({ repositoryPath: original.options.repositoryPath });
+    await original.bindWorkflow("validation-settings");
     const request = {
       ...original.options,
       outputDir: undefined,
@@ -1121,10 +1112,9 @@ describe("CodexSecurity finding validation", () => {
     await originalClient.validate(request);
     await originalClient.close();
 
-    const resumed = await validationClient(
+    const resumed = await persistedValidationClient(
       events,
       PLUGIN_ROOT,
-      python,
       original.root,
     );
     usePersistedValidationWorkbench(resumed);
@@ -1159,23 +1149,17 @@ describe("CodexSecurity finding validation", () => {
   });
 
   test("separates persisted validation by safety identifier across clients", async () => {
-    const python = await resolvePluginPython();
     let modelCalls = 0;
     async function* events() {
       modelCalls += 1;
       yield* validationEvents();
     }
-    const original = await validationClient(events, PLUGIN_ROOT, python);
+    const original = await persistedValidationClient(events);
     original.client.config.codexOverrides!["model"] =
       "changed-validation-model";
     usePersistedValidationWorkbench(original);
     await using originalClient = original.client;
-    await new FindingWorkflow(
-      "validation-safety-identifier",
-      { CODEX_SECURITY_STATE_DIR: original.stateDirectory },
-      runWorkbench,
-      python,
-    ).bind({ repositoryPath: original.options.repositoryPath });
+    await original.bindWorkflow("validation-safety-identifier");
     const request = {
       ...original.options,
       outputDir: undefined,
@@ -1186,10 +1170,9 @@ describe("CodexSecurity finding validation", () => {
     const first = await originalClient.validate(request);
     await originalClient.close();
 
-    const resumed = await validationClient(
+    const resumed = await persistedValidationClient(
       events,
       PLUGIN_ROOT,
-      python,
       original.root,
     );
     usePersistedValidationWorkbench(resumed);
@@ -1216,7 +1199,6 @@ describe("CodexSecurity finding validation", () => {
   });
 
   test("invalidates cached validation when inline instructions change", async () => {
-    const python = await resolvePluginPython();
     let modelCalls = 0;
     let instructions = "Original standalone validation instructions.";
     const instructionPath = join(
@@ -1236,20 +1218,13 @@ describe("CodexSecurity finding validation", () => {
         modelCalls += 1;
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
-        "validation-instructions",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
-      );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const workflowId = await fixture.bindWorkflow("validation-instructions");
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       expect(await client.validate(request)).toEqual(first);
@@ -1295,21 +1270,15 @@ describe("CodexSecurity finding validation", () => {
           }),
         );
       }
-      const python = await resolvePluginPython();
-      const fixture = await validationClient(events, pluginRoot, python);
+      const fixture = await persistedValidationClient(events, pluginRoot);
       await using client = fixture.client;
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "additional-validation-reference",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       if (changed) await writeFile(reference, "Updated synthetic guidance.");
@@ -1329,7 +1298,6 @@ describe("CodexSecurity finding validation", () => {
 
   for (const changed of [true, false]) {
     test(`preserves system-configured validation instructions: changed=${changed}`, async () => {
-      const python = await resolvePluginPython();
       const root = await temporaryDirectory("native-system-validation-");
       const instructions = join(root, "instructions.md");
       const nativeConfig = join(root, "config.toml");
@@ -1352,22 +1320,16 @@ describe("CodexSecurity finding validation", () => {
           }),
         );
       }
-      const fixture = await validationClient(
+      const fixture = await persistedValidationClient(
         events,
         PLUGIN_ROOT,
-        python,
         undefined,
         { ProgramData: root },
       );
       await using client = fixture.client;
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "system-validation-instructions",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const nativePath =
         process.platform === "win32"
           ? join(root, "OpenAI", "Codex", "config.toml")
@@ -1384,7 +1346,7 @@ describe("CodexSecurity finding validation", () => {
         const request = {
           ...fixture.options,
           outputDir: undefined,
-          workflowId: workflow.id,
+          workflowId,
         };
         const first = await client.validate(request);
         if (changed)
@@ -1420,8 +1382,7 @@ describe("CodexSecurity finding validation", () => {
           }),
         );
       }
-      const python = await resolvePluginPython();
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       if (setting === "top-level") {
         client.config.codexOverrides!["model_instructions_file"] = instructions;
@@ -1431,18 +1392,11 @@ describe("CodexSecurity finding validation", () => {
           selected: { model_instructions_file: instructions },
         };
       }
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
-        "file-backed-validation",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
-      );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const workflowId = await fixture.bindWorkflow("file-backed-validation");
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       expect(modelCalls).toBe(1);
@@ -1523,10 +1477,9 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "retains supplied knowledge context for workflow validation; change=%s, snapshot=%p",
     async (change, snapshot) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       const normalizedPaths: string[] = [];
-      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      let fixture: Awaited<ReturnType<typeof persistedValidationClient>>;
       async function* events() {
         modelCalls += 1;
         const path =
@@ -1539,22 +1492,15 @@ describe("CodexSecurity finding validation", () => {
           JSON.stringify({ ...assessment, report: context }),
         );
       }
-      fixture = await validationClient(events, PLUGIN_ROOT, python);
+      fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       const document = join(fixture.root, "policy.md");
       await writeFile(document, "Original synthetic policy.");
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
-        "knowledge-validation",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
-      );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const workflowId = await fixture.bindWorkflow("knowledge-validation");
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
         knowledgeBasePaths: [document],
         ...(snapshot
           ? {
@@ -1611,30 +1557,24 @@ describe("CodexSecurity finding validation", () => {
     .each(["workflow", "file-backed workflow", "no workflow"] as const)(
     "validates an ignored FIFO without requiring a cache snapshot: %s",
     async (mode) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events() {
         modelCalls += 1;
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       const repository = fixture.options.repositoryPath;
       execFileSync("git", ["init", "-q", repository]);
       await writeFile(join(repository, ".gitignore"), "ignored-pipe\n");
-      execFileSync(python, [
+      execFileSync(fixture.python, [
         "-c",
         "import os,sys; os.mkfifo(sys.argv[1])",
         join(repository, "ignored-pipe"),
       ]);
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "unsupported-validation-snapshot",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: repository });
       if (mode === "file-backed workflow") {
         const instructions = join(fixture.root, "instructions.md");
         await writeFile(instructions, "Synthetic validation instructions.");
@@ -1643,7 +1583,7 @@ describe("CodexSecurity finding validation", () => {
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        ...(mode === "no workflow" ? {} : { workflowId: workflow.id }),
+        ...(mode === "no workflow" ? {} : { workflowId }),
       };
       await client.validate(request);
       await client.validate(request);
@@ -1657,13 +1597,12 @@ describe("CodexSecurity finding validation", () => {
     .each(["file", "directory"] as const)(
     "validates unreadable ignored cache entries: %s",
     async (kind) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events() {
         modelCalls += 1;
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       const repository = fixture.options.repositoryPath;
       execFileSync("git", ["init", "-q", repository]);
@@ -1674,18 +1613,13 @@ describe("CodexSecurity finding validation", () => {
         await writeFile(join(entry, "cache.txt"), "Synthetic cache data.");
       } else await writeFile(entry, "Synthetic cache data.");
       const mode = (await stat(entry)).mode;
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "unreadable-validation-cache",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: repository });
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       await chmod(entry, 0);
       try {
@@ -1710,11 +1644,10 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "rechecks native guidance created while cached evidence is fingerprinted: %s",
     async (scope) => {
-      const python = await resolvePluginPython();
       const stateRoot = await temporaryDirectory("validation-guidance-race-");
       execFileSync("git", ["init", "-q", stateRoot]);
       const guide = join(stateRoot, scope);
-      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      let fixture: Awaited<ReturnType<typeof persistedValidationClient>>;
       let modelCalls = 0;
       async function* events() {
         modelCalls++;
@@ -1731,9 +1664,14 @@ describe("CodexSecurity finding validation", () => {
           }),
         );
       }
-      fixture = await validationClient(events, PLUGIN_ROOT, python, undefined, {
-        CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
-      });
+      fixture = await persistedValidationClient(
+        events,
+        PLUGIN_ROOT,
+        undefined,
+        {
+          CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
+        },
+      );
       await using client = fixture.client;
       client.config.codexOverrides!["project_doc_fallback_filenames"] = [
         "REVIEW.md",
@@ -1763,17 +1701,13 @@ describe("CodexSecurity finding validation", () => {
         }
         return await pending;
       });
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "native-guidance-during-evidence",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       expect(await client.validate(request)).toEqual(first);
@@ -1803,14 +1737,13 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "preserves native validation guidance: %p",
     async ({ scope, changed }) => {
-      const python = await resolvePluginPython();
       const stateRoot = await temporaryDirectory("native-validation-guidance-");
       if (
         scope === "output worktree" ||
         scope === "output project configuration"
       )
         execFileSync("git", ["init", "-q", stateRoot]);
-      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      let fixture: Awaited<ReturnType<typeof persistedValidationClient>>;
       let guide: string | undefined;
       let modelCalls = 0;
       async function* events() {
@@ -1842,9 +1775,14 @@ describe("CodexSecurity finding validation", () => {
           }),
         );
       }
-      fixture = await validationClient(events, PLUGIN_ROOT, python, undefined, {
-        CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
-      });
+      fixture = await persistedValidationClient(
+        events,
+        PLUGIN_ROOT,
+        undefined,
+        {
+          CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
+        },
+      );
       await using client = fixture.client;
       guide =
         scope === "home"
@@ -1863,18 +1801,13 @@ describe("CodexSecurity finding validation", () => {
             : "Original synthetic guidance.",
         );
       }
-      fixture.workbench.mockImplementation(runWorkbench);
-      const workflow = new FindingWorkflow(
+      const workflowId = await fixture.bindWorkflow(
         "native-validation-guidance",
-        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
-        runWorkbench,
-        python,
       );
-      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        workflowId: workflow.id,
+        workflowId,
       };
       const first = await client.validate(request);
       if (changed)
@@ -1901,13 +1834,12 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "rechecks %s after reading a saved validation assessment",
     async (change) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events() {
         modelCalls += 1;
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       const repository = fixture.options.repositoryPath;
       const source = join(repository, "source.ts");
@@ -1915,7 +1847,11 @@ describe("CodexSecurity finding validation", () => {
       const environment = {
         CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
       };
-      const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
+      const workbenchOptions = {
+        python: fixture.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment,
+      };
       const scanDir = join(fixture.root, "scan");
       await mkdir(scanDir, { mode: 0o700 });
       const registration = await runWorkbench(workbenchOptions, [
@@ -1933,12 +1869,7 @@ describe("CodexSecurity finding validation", () => {
         }),
       ]);
       const workflowId = "cached-validation-recheck";
-      await new FindingWorkflow(
-        workflowId,
-        environment,
-        runWorkbench,
-        python,
-      ).bind({ repositoryPath: repository });
+      await fixture.bindWorkflow(workflowId, environment);
       let readSavedAssessment = false;
       fixture.workbench.mockImplementation(async (options, args, input) => {
         const response = await runWorkbench(options, args, input);
@@ -1993,7 +1924,6 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "rechecks %s validation %s after reading %s evidence",
     async (phase, change, evidence) => {
-      const python = await resolvePluginPython();
       let modelCalls = 0;
       async function* events() {
         modelCalls++;
@@ -2003,7 +1933,7 @@ describe("CodexSecurity finding validation", () => {
         );
         yield* validationEvents();
       }
-      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      const fixture = await persistedValidationClient(events);
       await using client = fixture.client;
       const repository = fixture.options.repositoryPath;
       const source = join(repository, "source.ts");
@@ -2014,7 +1944,7 @@ describe("CodexSecurity finding validation", () => {
       const scanDir = join(fixture.root, "scan");
       await mkdir(scanDir, { mode: 0o700 });
       const registration = await runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
+        { python: fixture.python, pluginRoot: PLUGIN_ROOT, environment },
         [
           "register-cli-scan",
           "--repository",
@@ -2031,12 +1961,7 @@ describe("CodexSecurity finding validation", () => {
         ],
       );
       const workflowId = "evidence-validation-recheck";
-      await new FindingWorkflow(
-        workflowId,
-        environment,
-        runWorkbench,
-        python,
-      ).bind({ repositoryPath: repository });
+      await fixture.bindWorkflow(workflowId, environment);
       let changeDuringEvidence = false;
       let changed = false;
       let savedReviews = 0;
@@ -2141,11 +2066,9 @@ describe("CodexSecurity finding validation", () => {
         ],
         { cwd: repository },
       );
-      const python = await resolvePluginPython();
-      const fixture = await validationClient(
+      const fixture = await persistedValidationClient(
         undefined,
         PLUGIN_ROOT,
-        python,
         root,
         {
           PATH: kind === "canonical" ? tools : alias,
@@ -2160,7 +2083,7 @@ describe("CodexSecurity finding validation", () => {
       const scanDir = join(root, "scan");
       await mkdir(scanDir, { mode: 0o700 });
       const registration = await runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
+        { python: fixture.python, pluginRoot: PLUGIN_ROOT, environment },
         [
           "register-cli-scan",
           "--repository",
@@ -2177,13 +2100,7 @@ describe("CodexSecurity finding validation", () => {
         ],
       );
       const workflowId = "git-tool-validation";
-      await new FindingWorkflow(
-        workflowId,
-        environment,
-        runWorkbench,
-        python,
-      ).bind({ repositoryPath: repository });
-      fixture.workbench.mockImplementation(runWorkbench);
+      await fixture.bindWorkflow(workflowId, environment);
       const request = {
         ...fixture.options,
         outputDir: undefined,

@@ -1690,7 +1690,7 @@ function forceTerminatePublicationProcess(
   terminatePublicationProcessGroup(child, "SIGKILL");
 }
 
-function terminatePublicationProcessGroup(
+export function terminatePublicationProcessGroup(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals,
 ): void {
