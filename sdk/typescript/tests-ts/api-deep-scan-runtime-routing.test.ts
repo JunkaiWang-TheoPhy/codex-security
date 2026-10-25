@@ -402,7 +402,7 @@ test.each([
   }
 });
 
-test("parent configuration reads inherited namespaces and preserves dotted SDK override order", async () => {
+test("older app-servers retain supplied routing without starting in the caller project", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
   await writeFile(
@@ -419,23 +419,22 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
   const expected = (name: string) => ({
     features: { code_mode: { direct_only_tool_namespaces: [name] } },
   });
-  expect(await read({})).toMatchObject(expected("inherited_tools"));
+  expect(
+    await read({ model_instructions_file: "missing-in-caller.md" }),
+  ).toEqual({});
   expect(
     await read({
       features: { "code_mode.direct_only_tool_namespaces": ["first"] },
       "features.code_mode.direct_only_tool_namespaces": ["last"],
       model_auto_compact_token_limit: 2 ** 53,
     }),
-  ).toMatchObject({
-    ...expected("last"),
-    model_auto_compact_token_limit: 2 ** 53,
+  ).toEqual(expected("last"));
+  expect(await read({ "features.code_mode": "invalid" })).toEqual({
+    features: { code_mode: "invalid" },
   });
-  await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow(
-    /Could not read the Deep Scan parent configuration[\s\S]*code_mode/u,
-  );
 });
 
-test("parent configuration reads the scan settings and selected plugin from the caller", async () => {
+test("a capable app-server launches from the caller and reads the scan settings and selected plugin", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
   const script = join(home, "config-reader.mjs");
@@ -444,6 +443,8 @@ test("parent configuration reads the scan settings and selected plugin from the 
     script,
     `import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+if (process.argv.includes("--help")) { console.log("  -C, --cd <DIR>"); process.exit(0); }
+const startupCwd = process.argv[process.argv.indexOf("--cd") + 1];
 const [log, replies] = process.argv.slice(2);
 const responses = JSON.parse(replies);
 const calls = [];
@@ -452,7 +453,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (id === undefined) continue;
   if (method !== "initialize") {
     calls.push({ method, params });
-    writeFileSync(log, JSON.stringify({ cwd: process.cwd(), calls }));
+    writeFileSync(log, JSON.stringify({ cwd: process.cwd(), startupCwd, calls }));
   }
   console.log(JSON.stringify({ id, ...(responses[method] ?? { result: {} }) }));
 }`,
@@ -501,6 +502,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   });
   expect(await requests()).toEqual({
     cwd: process.cwd(),
+    startupCwd: scanDir,
     calls: [configRead, { method: "plugin/read", params: plugin }],
   });
   expect(

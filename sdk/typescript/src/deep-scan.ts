@@ -2,11 +2,16 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { CodexSecurityError } from "./errors.js";
 import { inlineToml, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
-import { executablePathForSpawn, type CodexCommand } from "./runtime.js";
+import {
+  executablePathForSpawn,
+  runCodexCommand,
+  type CodexCommand,
+} from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
   nativePermissionPreflight,
@@ -35,6 +40,26 @@ function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
   });
 }
 
+// Older app-servers cannot read the scan's native configuration without first
+// loading the caller's project. Keep their coordinator routing scoped to the
+// settings supplied to exec; native policy still applies to the actual turn.
+function suppliedParentRouting(
+  overrides: readonly string[],
+): JsonObject | undefined {
+  const routing = new Map<string, string>();
+  for (const override of overrides) {
+    const key = override.slice(0, override.indexOf("="));
+    if (/^(?:features|mcp_servers)(?:\.|$)/u.test(key))
+      routing.set(key, override);
+  }
+  try {
+    return parse([...routing.values()].join("\n")) as JsonObject;
+  } catch {
+    // Leave overlapping or malformed TOML for exec's own parser.
+    return undefined;
+  }
+}
+
 /** Read the same native layers and CLI overrides as the parent before adding its tool. */
 export async function readDeepScanParentConfig(
   options: Pick<
@@ -43,7 +68,6 @@ export async function readDeepScanParentConfig(
   > & { plugin?: { marketplacePath: string; pluginName: string } },
 ): Promise<JsonObject | undefined> {
   const { codexOptions, preflightCommand: command } = options;
-  const native = await nativePermissionPreflight();
   const config = codexOptions.config ?? {};
   // The provider-profile launcher emits whole top-level tables instead.
   const overrides =
@@ -56,6 +80,23 @@ export async function readDeepScanParentConfig(
       ? {}
       : { CODEX_API_KEY: codexOptions.apiKey }),
   });
+  const configOverrides = [
+    ...overrides,
+    ...(codexOptions.configOverrides ?? []),
+  ];
+  // Subcommand help does not load a project. A global --cd is ignored by
+  // older app-servers, so require support on the subcommand itself.
+  const help = await runCodexCommand(
+    command,
+    ["app-server", "--cd", options.scanDir, "--help"],
+    environment,
+    undefined,
+    options.signal,
+  );
+  if (!help.success || !/^\s*(?:-C,\s*)?--cd\s+<[^>\n]+>/mu.test(help.stdout))
+    return options.plugin ? undefined : suppliedParentRouting(configOverrides);
+
+  const native = await nativePermissionPreflight();
   return withCodexPreflightLock(environment, options.signal, () =>
     native.readDeepScanRuntimeConfig({
       codexPath: command.command,
@@ -63,7 +104,7 @@ export async function readDeepScanParentConfig(
       // The parent launcher inherits this directory and passes the scan via --cd.
       cwd: process.cwd(),
       configCwd: options.scanDir,
-      configOverrides: [...overrides, ...(codexOptions.configOverrides ?? [])],
+      configOverrides,
       env: environment,
       signal: options.signal,
       context: "parent-config",

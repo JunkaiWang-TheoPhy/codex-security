@@ -51,6 +51,7 @@ type RuntimeConfigReadOptions = Pick<
 > & {
   readonly context?: PreflightContext;
   readonly commandArgs?: readonly string[];
+  readonly configCwd?: string;
   /** Full app-server invocation for callers that already constructed its arguments. */
   readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
@@ -61,7 +62,6 @@ type PreflightContext = "helper" | "parent-config";
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
   options: RuntimeConfigReadOptions & {
-    readonly configCwd?: string;
     readonly plugin?: { marketplacePath: string; pluginName: string };
   },
 ): Promise<JsonRecord | undefined> {
@@ -350,6 +350,7 @@ class AppServerPreflightClient {
         args.push("--config", override);
       }
       args.push("app-server", "--stdio");
+      if (options.configCwd !== undefined) args.push("--cd", options.configCwd);
     }
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
