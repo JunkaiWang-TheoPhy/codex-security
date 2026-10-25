@@ -124,9 +124,8 @@ jobs:
       - name: Set up Linux test tools and sandbox
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          bash github-action/scripts/setup-ubuntu-sandbox.sh
+          .github/scripts/install-ripgrep.sh
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
