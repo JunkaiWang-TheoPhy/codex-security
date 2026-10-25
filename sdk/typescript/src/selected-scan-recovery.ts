@@ -182,7 +182,8 @@ export async function recoverSelectedScanStartup<T>(input: {
             ? target["kind"] === requested.kind &&
               [target["base"], target["baseRef"]].includes(requested.base) &&
               (requested.kind === "working_tree" ||
-                [target["head"], target["headRef"]].includes(requested.head))
+                target["head"] === requested.head ||
+                target["headRef"] === requested.head)
             : Array.isArray(requested) &&
               target["kind"] === "paths" &&
               JSON.stringify(paths) === JSON.stringify(target["paths"]);
