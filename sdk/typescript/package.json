@@ -57,7 +57,7 @@
     ]
   },
   "scripts": {
-    "audit:prod": "node scripts/audit-production.mjs",
+    "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "node --run clean && node scripts/generate-deep-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs",
     "build:ci": "tsc -p tsconfig.ci.json",

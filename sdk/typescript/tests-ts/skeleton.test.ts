@@ -1,7 +1,6 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import {
@@ -260,6 +259,9 @@ describe("TypeScript package skeleton", () => {
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
+    expect(
+      jobs["test"]?.steps?.find(({ name }) => name === "Test")?.run,
+    ).toContain("--seed=${{ github.run_number }}");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}",
@@ -422,7 +424,8 @@ describe("TypeScript package skeleton", () => {
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
       ["Check MCP formatting", "static-checks"],
-      ["Audit production dependencies", "static-checks"],
+      ["Audit SDK production dependencies", "static-checks"],
+      ["Audit MCP production dependencies", "static-checks"],
     ] as const) {
       expect(
         jobs[job]!.steps!.filter((step) => step.name === name),
@@ -499,6 +502,17 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
+    for (const trigger of ["workflow_call", "workflow_dispatch"]) {
+      expect(quality.on[trigger]).toMatchObject({
+        inputs: { "compare-layouts": { type: "boolean", default: true } },
+      });
+    }
+    expect(quality.jobs["properties"]).toMatchObject({
+      env: { CODEX_SECURITY_PROPERTY_SEED: "${{ github.run_number }}" },
+      strategy: {
+        matrix: { os: ["ubuntu-latest", "macos-latest", "windows-latest"] },
+      },
+    });
     const unixMatrix = ci.jobs["test"]!.strategy!.matrix as Record<
       string,
       unknown
@@ -567,7 +581,7 @@ describe("TypeScript package skeleton", () => {
       "working-directory": "sdk/typescript",
     });
     expect(execution?.run).toContain(
-      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }}",
+      "scripts/run-ci-tests.mts ${{ env.SHARD }}",
     );
     expect(execution?.run).toContain(
       "--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}",
@@ -586,8 +600,12 @@ describe("TypeScript package skeleton", () => {
       (step) => step.name === "Upload runner report",
     );
     expect(runnerUpload).not.toHaveProperty("continue-on-error");
-    expect(runnerUpload?.with?.["name"]).toBe(
-      "runner-${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
+    expect(runnerUpload?.with?.["name"]).toBe("runner-${{ env.REPORT_ID }}");
+    expect(runner.env?.["SHARD"]).toBe(
+      "${{ matrix.target.shard }}/${{ matrix.target.count }}",
+    );
+    expect(runner.env?.["REPORT_ID"]).toBe(
+      "${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
     );
     expect(
       quality.jobs["mutation"]?.steps!.find(
@@ -614,55 +632,29 @@ describe("TypeScript package skeleton", () => {
     );
     expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
-      "node scripts/audit-production.mjs",
+      "pnpm audit --prod --audit-level high",
     );
   });
 
-  test("blocks CI and releases when the production dependency audit fails", async () => {
-    for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
-      const { jobs } = await workflow(workflowName);
-      const audits = Object.values(jobs)
-        .flatMap((job) => job.steps ?? [])
-        .filter((step) => step.name === "Audit production dependencies");
-      expect(audits.length).toBeGreaterThan(0);
-      for (const audit of audits) {
-        expect(audit).not.toHaveProperty("continue-on-error");
-        expect(audit.run).toMatch(
-          /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
-        );
-      }
-    }
-  });
-
-  test("audits both production lockfiles even if either audit fails", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "production audits "));
-    const windows = process.platform === "win32";
-    try {
-      await writeFile(
-        join(directory, windows ? "pnpm.cmd" : "pnpm"),
-        windows
-          ? '@echo off\r\nfor %%I in ("%CD%") do @echo audited %%~nxI %*\r\nfor %%I in ("%CD%") do @if "%%~nxI"=="%FAIL_PROJECT%" exit /b 7\r\nexit /b 0\r\n'
-          : '#!/bin/sh\necho "audited ${PWD##*/} $*"\n[ "${PWD##*/}" != "$FAIL_PROJECT" ] || exit 7\n',
-        { mode: 0o755 },
-      );
-      for (const failure of ["", "typescript", "mcp-app"]) {
-        const result = await runCommand(
-          Bun.which("node")!,
-          [
-            fileURLToPath(
-              new URL("../scripts/audit-production.mjs", import.meta.url),
-            ),
-          ],
-          { env: { ...process.env, PATH: directory, FAIL_PROJECT: failure } },
-        );
-        expect(result.status, result.stderr).toBe(failure ? 7 : 0);
-        expect(result.stdout.match(/^audited .+$/gmu)).toEqual([
-          "audited typescript audit --prod --audit-level high",
-          "audited mcp-app audit --prod --audit-level high",
-        ]);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+  test("requires both production audits before CI and release verification", async () => {
+    for (const [filename, job, launcher] of [
+      ["node-ci.yml", "static-checks", "pnpm"],
+      ["node-release.yml", "verify", "sfw pnpm"],
+    ] as const) {
+      const steps = (await workflow(filename)).jobs[job]!.steps!;
+      const index = steps.findIndex((step) => step.id === "sdk-audit");
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(steps[index]).toMatchObject({
+        "working-directory": "sdk/typescript",
+        run: `${launcher} run audit:prod --config.lockfile-dir=.`,
+      });
+      expect(steps[index]).not.toHaveProperty("continue-on-error");
+      const mcp = steps[index + 1]!;
+      expect(mcp).toMatchObject({
+        "working-directory": "plugins/codex-security/mcp-app",
+        run: `${launcher} audit --prod --audit-level high --config.lockfile-dir=.`,
+      });
+      expect(mcp).not.toHaveProperty("continue-on-error");
     }
   });
 
