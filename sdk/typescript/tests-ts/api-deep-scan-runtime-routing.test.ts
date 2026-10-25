@@ -500,6 +500,12 @@ test("older app-servers retain supplied routing without starting in the caller p
   ).toEqual({
     mcp_servers: { "codex-security": { ...owner, omit_tools_from: [] } },
   });
+  const leaf = await read({}, [
+    "mcp_servers.codex-security.omit_tools_from=[]",
+  ]);
+  expect(deepScanParentToolOverrides(leaf!, {})).toEqual([
+    'mcp_servers.codex-security.omit_tools_from=["code_mode","deferred"]',
+  ]);
 });
 
 test("a capable app-server launches from the caller and reads the scan settings and selected plugin", async () => {

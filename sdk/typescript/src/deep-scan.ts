@@ -148,12 +148,13 @@ export function deepScanParentToolOverrides(
   if (!isRecord(ownerConfig) || ownerConfig["enabled"] === false) return [];
   const omitted = ownerConfig["omit_tools_from"];
   if (Array.isArray(omitted) && omitted.includes("direct")) return [];
-  // Select an explicitly configured transport by raw ID, preserving the
-  // caller's namespace lists. A plugin-only registration owns its transport.
+  // A raw transport or an existing omission leaf can be updated in place.
+  // Adding a new registration would shadow a plugin's transport and policy.
   if (
     isRecord(configured) &&
     Object.hasOwn(configured, owner) &&
-    (typeof ownerConfig["command"] === "string" ||
+    (Array.isArray(omitted) ||
+      typeof ownerConfig["command"] === "string" ||
       typeof ownerConfig["url"] === "string")
   ) {
     if (omitted != null && !Array.isArray(omitted)) return [];
