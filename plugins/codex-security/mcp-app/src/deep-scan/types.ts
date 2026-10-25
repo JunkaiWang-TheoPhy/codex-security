@@ -126,6 +126,7 @@ export interface PersistedDeepScanWorker extends Omit<
   "scanId" | "replaceableFailureKind"
 > {
   acceptedResultPath?: string;
+  acceptedResultSha256?: string;
   completionSequence?: number;
   consecutiveErrors?: number;
   mergeState: DeepScanMergeState;

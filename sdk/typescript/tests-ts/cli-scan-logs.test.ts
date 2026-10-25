@@ -409,6 +409,8 @@ test("saved logs include the privately recorded worker home after recovery", asy
       _signal,
       _python,
       _protectedRoot,
+      _gitProtectedRoots,
+      _pluginPath,
       privateSettings,
     ) => {
       privateSettingsRequested = privateSettings === true;
@@ -500,6 +502,8 @@ test("saved logs remain readable for a future workflow without admitting executi
       signal,
       _python,
       _protectedRoot,
+      _gitProtectedRoots,
+      _pluginPath,
       privateSettings,
     ) => {
       privateSettingsRequested ||= privateSettings === true;

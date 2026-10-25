@@ -11,7 +11,6 @@ import {
 import {
   aggregateSourceCoverage,
   deepReductionToScanDraft,
-  aggregateDiscoveryCoverage,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -31,12 +30,11 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
@@ -456,7 +454,7 @@ export class DeepScanCoordinator {
         error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -541,16 +539,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
@@ -1214,7 +1206,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         resultPath,
         this.state.scanId,
-        worker.artifactDir,
+        { ...this.state, artifactDir: worker.artifactDir },
       );
       recovered.push({
         id: worker.id,
@@ -1260,12 +1252,13 @@ export class DeepScanCoordinator {
       });
     for (const worker of completedReducers) {
       // A later merge claim can retain a legacy aggregate's accepted reference.
+      const retained = this.state.persistedMergeClaims?.find(
+        (claim) =>
+          claim.previousWorkerId === worker.id && claim.previousResultPath,
+      );
       const resultPath =
         worker.acceptedResultPath ??
-        this.state.persistedMergeClaims?.find(
-          (claim) =>
-            claim.previousWorkerId === worker.id && claim.previousResultPath,
-        )?.previousResultPath ??
+        retained?.previousResultPath ??
         worker.resultManifestPath;
       if (!resultPath) {
         throw new Error(
@@ -1299,6 +1292,11 @@ export class DeepScanCoordinator {
           artifacts: this.artifacts,
           artifactDir: worker.artifactDir,
           resultPath,
+          resultSha256:
+            (worker.acceptedResultPath && worker.acceptedResultSha256) ??
+            (retained?.previousResultPath === resultPath
+              ? retained.previousResultSha256
+              : undefined),
           reducerId: worker.id,
           previousReducerResultPath: claim
             ? claim.previousResultPath
@@ -1312,6 +1310,9 @@ export class DeepScanCoordinator {
           repoRoot: this.state.targetPath,
           scanId: this.state.scanId,
           layout: "reducer" as const,
+          scope: this.state.scope,
+          includePaths: this.state.includePaths,
+          filePaths: this.state.filePaths,
           deepReducer: {
             scanRoot: this.artifacts.scanDir,
             claimedWorkers: accepted.map((source) => ({

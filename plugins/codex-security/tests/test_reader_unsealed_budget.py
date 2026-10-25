@@ -11,10 +11,18 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from test_workbench_db import BUDGET_COST
 
 
+def host_checkpoint(directory, source):
+    # The draft tool names pretty-printed snapshots by their compact JSON.
+    name = hashlib.sha256(json.dumps(source, separators=(",", ":")).encode()).hexdigest()
+    path = directory / f"{name}.json"
+    path.write_text(json.dumps(source, indent=2) + "\n")
+    return path
+
+
 @pytest.fixture
 def legacy_budget(workbench_db, publication_scan):
-    def create(*, named=True, duplicate=True):
-        scan = publication_scan()
+    def create(*, named=True, duplicate=True, receipt_owner=None, scoped_checkpoint=False):
+        scan = publication_scan(scope="subdir/extract.py" if scoped_checkpoint else ".")
         worker_id = add_worker(workbench_db, scan).parent.name
         result = (
             scan.scan_dir / "artifacts/deep_discovery/workers/discovery-0001/output/result.json"
@@ -40,6 +48,13 @@ def legacy_budget(workbench_db, publication_scan):
                 "provenance": {"source": "independent-review"},
             },
         ]
+        if receipt_owner is not None:
+            shared = scan.scan_dir / "artifacts/review.md"
+            shared.write_text("Different evidence recorded at the scan root.\n")
+            for surface in surfaces:
+                surface["provenance"]["scanReceiptRefs"] = surface["receiptRefs"]
+            if receipt_owner == "scan":
+                receipt = shared
         if named:
             for index, surface in enumerate(surfaces):
                 surface["id"] = f"source-{index}"
@@ -49,11 +64,24 @@ def legacy_budget(workbench_db, publication_scan):
             "findings": scan.findings,
             "coverage": {**scan.coverage, "completeness": "partial", "surfaces": surfaces},
         }
-        contents = json.dumps(source).encode()
+        contents = (json.dumps(source, indent=2) + "\n").encode()
         digest = hashlib.sha256(contents).hexdigest()
-        accepted = result.parent / "checkpoints" / f"{digest}.json"
-        accepted.parent.mkdir()
-        accepted.write_bytes(contents)
+        checkpoints = result.parent / "checkpoints"
+        checkpoints.mkdir()
+        if receipt_owner == "scan" and not scoped_checkpoint:
+            accepted = host_checkpoint(checkpoints, source)
+        else:
+            accepted = checkpoints / f"{digest}.json"
+            accepted.write_bytes(contents)
+        if scoped_checkpoint:
+            full = copy.deepcopy(source)
+            outside = copy.deepcopy(scan.findings[0])
+            outside["locations"][0]["path"] = "unrelated.py"
+            full["findings"].append(outside)
+            if receipt_owner == "worker":
+                full["coverage"]["surfaces"][0]["provenance"]["scanReceiptRefs"] = []
+                (checkpoints / ("0" * 64 + ".json")).write_text("unfinished checkpoint")
+            host_checkpoint(checkpoints, full)
         result.write_text("Later unaccepted output must not replace the accepted checkpoint.")
         provenance = {"workerId": worker_id, "attempt": 1}
         prefix = f"{worker_id}-attempt-1"
@@ -67,6 +95,7 @@ def legacy_budget(workbench_db, publication_scan):
             item["provenance"] = {
                 **provenance,
                 **({"sourceId": surface["id"]} if named else {}),
+                **({"scanReceiptRefs": surface["receiptRefs"]} if receipt_owner else {}),
             }
             projected.append(item)
         coverage = {
@@ -168,6 +197,28 @@ def test_reader_completes_old_unsealed_budget_and_replays(
         workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
     )
     assert snapshot(workbench_db, scan) == before
+
+
+@pytest.mark.parametrize("receipt_owner", ["worker", "scan"])
+@pytest.mark.parametrize("scoped_checkpoint", [False, True])
+def test_reader_seals_evidence_from_the_accepted_receipt_owner(
+    workbench_api, workbench_db, legacy_budget, receipt_owner, scoped_checkpoint
+):
+    scan = legacy_budget(
+        duplicate=False, receipt_owner=receipt_owner, scoped_checkpoint=scoped_checkpoint
+    )
+    workbench_api["complete_budget_exhausted_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None),
+    )
+    expected = scan.receipt.relative_to(scan.scan_dir).as_posix()
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
+    assert [surface["receiptRefs"] for surface in coverage["surfaces"]] == [[expected], [expected]]
+    artifacts = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())["scan"]["artifacts"]
+    assert (
+        next(row["sha256"] for row in artifacts if row["path"] == expected)
+        == hashlib.sha256(scan.receipt.read_bytes()).hexdigest()
+    )
 
 
 def test_reader_rejects_buffered_work_outside_the_legacy_selection(

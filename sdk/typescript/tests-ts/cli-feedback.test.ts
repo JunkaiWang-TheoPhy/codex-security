@@ -204,6 +204,8 @@ for (const includeLogs of [false, true]) {
       _signal,
       _python,
       _protectedRoot,
+      _gitProtectedRoots,
+      _pluginPath,
       withExecutionSettings,
     ) => {
       expect(args).toEqual(["get-scan", "--scan-id", "scan-pre"]);

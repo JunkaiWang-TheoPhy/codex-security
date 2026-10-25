@@ -6,6 +6,7 @@ import {
 } from "./deep_scan_executor_diagnostic_cases.ts";
 import { reconstructedWorkerCases } from "./deep_scan_reconstructed_worker_cases.ts";
 import { testCapturedCustomProviderSettings } from "./captured-provider-fixture.ts";
+import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
@@ -24,7 +25,7 @@ import {
   nativeConfigOverrides,
 } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-import { mock } from "node:test";
+import { mock, test, type TestContext } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
 import childProcess, {
@@ -88,7 +89,6 @@ const {
   codexWorkerTurnError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
-  parseDeepScan,
 } = await importModule({
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
@@ -136,83 +136,198 @@ const {
 });
 
 try {
-  testCodeModeFrameDiagnosticBoundaries(appendItemDiagnostic, ipcFrameError);
-  await testLargeScopeTransport({
-    fakeCodexFixture,
-    captureDeepScanExecutionSettings,
-    workerRequest,
-    restoreEnv,
-  });
-  await testOpenAiCredentialsReachWorker();
-  await testWorkerCancellation();
-  testUsageLimitClassification();
-  await testWorkerTerminalEvents();
-  await testWorkerRuntimeSettings();
-  await testWorkerProviderSelection();
-  await testCapturedCustomProviderSettings({
-    fakeCodexFixture,
-    captureDeepScanExecutionSettings,
-    loadDeepScanExecutionSettings,
-    restoredDeepScanWorkerSettings,
-    trustedParentSandbox,
-    CodexSdkWorkerExecutor,
-  });
-  await testUnsupportedProviderSnapshotFailsBeforeLaunch();
-  await testWorkerCyberAccessSettings({
-    CodexSdkWorkerExecutor,
-    fakeCodexFixture,
-    parentSandbox: trustedParentSandbox,
-    workerRequest,
-    assertConfigOverrides,
-    assertReadOnlyWorkerPolicy,
-    assertWorkerSubagentPolicy,
-    restoreEnv,
-  });
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
-  if (process.platform !== "win32") {
-    await testRecordedWorkerCyberAccessSettings();
-    await testIsolatedReconstructedWorkers();
-    await testDeepScanContextSnapshots({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-    });
-    await testMissingParentSandboxFailsBeforeWorkerLaunch();
-    await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
-    await testRuntimePermissionProfileFallbackStopsAndDiscards();
-    await testWorkerLaunchesWithoutGlobalCodex();
-    await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
-    await testConcurrentWorkerExecutableAliases({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-      bundledCodexSdkEnvironment,
-      assertReadOnlyWorkerPolicy,
-    });
-    await testSdkInvocationAndThreadCapture();
-    await testBedrockCredentialsReachWorker();
-    await testBedrockCredentialsReachWorker("oidc");
-    await testExternalProviderCredentialsReachWorker();
-    await testArtifactServerUsesExtendedStartupTimeout();
-    await testReducerCoveragePersistenceBinding();
-    await testZeroSubagentsPreservesHostRestrictions();
-    await testSdkResumesExistingThread();
-    await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsPreserved();
-    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
-    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
-      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+  await test("Deep worker lifecycle", async (t) => {
+    await check(t, testWorkerCancellation);
+    await check(t, testWorkerTerminalEvents);
+    await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    if (process.platform !== "win32") {
+      await check(t, testStreamTerminationWithoutTerminalEventFails);
+      await check(t, testAbortPropagation);
     }
-    await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
-    await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
-    await testMalformedCommandEventsRemainRetryable();
-    await testRateLimitPolicyFailureRemainsRetryable();
-    await testArtifactStartupTimeoutClassification();
-  }
+  });
+
+  await test("Deep worker runtime settings", async (t) => {
+    await check(
+      t,
+      () =>
+        testLargeScopeTransport({
+          fakeCodexFixture,
+          captureDeepScanExecutionSettings,
+          workerRequest,
+          restoreEnv,
+        }),
+      testLargeScopeTransport.name,
+    );
+    await check(t, testOpenAiCredentialsReachWorker);
+    await check(t, testWorkerRuntimeSettings);
+    await check(t, testWorkerProviderSelection);
+    await check(
+      t,
+      () =>
+        testCapturedCustomProviderSettings({
+          fakeCodexFixture,
+          captureDeepScanExecutionSettings,
+          loadDeepScanExecutionSettings,
+          restoredDeepScanWorkerSettings,
+          trustedParentSandbox,
+          CodexSdkWorkerExecutor,
+        }),
+      testCapturedCustomProviderSettings.name,
+    );
+    await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
+    await check(
+      t,
+      () =>
+        testWorkerCyberAccessSettings({
+          restoredDeepScanWorkerSettings,
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+          workerRequest,
+          assertConfigOverrides,
+          assertReadOnlyWorkerPolicy,
+          assertWorkerSubagentPolicy,
+          restoreEnv,
+        }),
+      "cyber access settings",
+    );
+    if (process.platform !== "win32") {
+      await check(
+        t,
+        () =>
+          testDeepScanContextSnapshots({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+          }),
+        "isolated context snapshots",
+      );
+      await check(t, testMissingParentSandboxFailsBeforeWorkerLaunch);
+      await check(t, testDisallowedWorkerProfileFailsBeforeWorkerLaunch);
+      await check(t, testRuntimePermissionProfileFallbackStopsAndDiscards);
+      await check(t, testSdkInvocationAndThreadCapture);
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker(),
+        "Bedrock credentials",
+      );
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker("oidc"),
+        "Bedrock OIDC credentials",
+      );
+      await check(t, testExternalProviderCredentialsReachWorker);
+      await check(t, testArtifactServerUsesExtendedStartupTimeout);
+      await check(t, testReducerAttemptContext);
+      await check(t, testReducerCoveragePersistenceBinding);
+      await check(t, testIsolatedReconstructedWorkers);
+      await check(t, testZeroSubagentsPreservesHostRestrictions);
+      await check(t, testSdkResumesExistingThread);
+    }
+  });
+
+  await test("Deep worker executable selection", async (t) => {
+    await check(t, testConfiguredExecutablePaths);
+    if (process.platform !== "win32") {
+      await check(t, testWorkerLaunchesWithoutGlobalCodex);
+      await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+      await check(
+        t,
+        () =>
+          testConcurrentWorkerExecutableAliases({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+            bundledCodexSdkEnvironment,
+            assertReadOnlyWorkerPolicy,
+          }),
+        "concurrent executable aliases",
+      );
+    }
+    await check(t, testWindowsAppsCodexFallsBackToRelocatedBinary);
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution(),
+      "global Windows npm package resolution",
+    );
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution("managed"),
+      "managed Windows npm package resolution",
+    );
+    if (process.platform === "win32") {
+      await check(t, testWindowsLongExecutableLaunches);
+      await check(t, testWindowsRootRelativePathsStayBoundToOriginalDrive);
+      await check(t, testWindowsWorkerEnvironmentPreservesMixedCaseKeys);
+      await check(t, testWindowsLauncherSkipsExtensionlessNpmShim);
+    }
+  });
+
+  await test("Deep worker diagnostics", async (t) => {
+    await check(
+      t,
+      () =>
+        testCodeModeFrameDiagnosticBoundaries(
+          appendItemDiagnostic,
+          ipcFrameError,
+        ),
+      testCodeModeFrameDiagnosticBoundaries.name,
+    );
+    await check(t, testUsageLimitClassification);
+    await check(t, testOsErrorCodesRemainRetryable);
+    await check(t, testTextualMissingPathErrorsRemainRetryable);
+    await check(
+      t,
+      () =>
+        testWorkerErrorClassificationPreservesExplicitFailures({
+          classifyCodexWorkerError,
+          DeepScanNonRetryableError,
+          isCodexCybersecurityPolicyRefusal,
+        }),
+      testWorkerErrorClassificationPreservesExplicitFailures.name,
+    );
+    if (process.platform !== "win32") {
+      await check(t, testRetryNotificationDoesNotInterruptTurn);
+      await check(t, testSandboxNamespaceDiagnosticIsPreserved);
+      await check(t, testOwnedArtifactToolFailureDiagnosticIsPreserved);
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("discovery:\0" + "0"),
+        "artifact retry diagnostic: controls",
+      );
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("😀".repeat(1300)),
+        "artifact retry diagnostic: Unicode",
+      );
+      await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
+      await check(t, testUnstructuredConfigurationFailureRemainsRetryable);
+      await check(t, testUnstructuredThreadStartFailureRemainsRetryable);
+      await check(t, testPolicyFailuresRemainWorkerErrors);
+      await check(t, testMalformedCommandEventsRemainRetryable);
+      await check(t, testRateLimitPolicyFailureRemainsRetryable);
+      await check(
+        t,
+        () => testArtifactStartupTimeoutClassification(runFixtureWorker),
+        testArtifactStartupTimeoutClassification.name,
+      );
+    }
+  });
+} finally {
+  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
+  await temporaryDirectories.cleanup();
+}
+
+async function check(
+  t: TestContext,
+  run: () => void | Promise<void>,
+  name = run.name,
+) {
+  process.stdout.write(`Running ${t.name} / ${name}\n`);
+  await t.test(name, run);
+}
+
+function testConfiguredExecutablePaths() {
   assert.equal(
     resolveCodexPath({}, "darwin"),
     path.join(process.cwd(), "codex"),
@@ -271,25 +386,6 @@ try {
     ),
     path.join(originalCwd, "codex"),
   );
-  testOsErrorCodesRemainRetryable();
-  testTextualMissingPathErrorsRemainRetryable();
-  testWorkerErrorClassificationPreservesExplicitFailures({
-    classifyCodexWorkerError,
-    DeepScanNonRetryableError,
-    isCodexCybersecurityPolicyRefusal,
-  });
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
-  await testWindowsNpmPackageResolution();
-  await testWindowsNpmPackageResolution("managed");
-  if (process.platform === "win32") {
-    await testWindowsLongExecutableLaunches();
-    await testWindowsRootRelativePathsStayBoundToOriginalDrive();
-    await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
-    await testWindowsLauncherSkipsExtensionlessNpmShim();
-  }
-} finally {
-  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  await temporaryDirectories.cleanup();
 }
 
 function testOsErrorCodesRemainRetryable() {
@@ -2274,6 +2370,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 "mcp",
                 "server.mjs",
               ),
+              "mcp_servers.cs_artifacts.args.1": "--artifact-writer",
+              "mcp_servers.cs_artifacts.args.2": "--stdio",
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT":
                 path.join(fixture.root, `plugin-${index}`),
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
@@ -2468,208 +2566,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ]),
             ),
-          );
-        }
-      }
-    }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    for (const [name, value] of saved) restoreEnv(name, value);
-  }
-}
-
-async function testRecordedWorkerCyberAccessSettings() {
-  const cases: {
-    name: string;
-    configuration: string;
-    program?: string;
-    serviceTier?: string;
-    features?: Record<string, boolean>;
-    recorded?: boolean;
-    configPath?: string;
-    executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
-  }[] = [
-    { name: "unset", configuration: "" },
-    {
-      name: "recorded-omissions",
-      configuration:
-        'model_reasoning_summary = "detailed"\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
-      recorded: true,
-    },
-    {
-      name: "blue",
-      configuration:
-        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
-      serviceTier: "fast",
-      program: "daybreak_blue",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: true,
-      },
-    },
-    {
-      name: "explicit-false",
-      configuration:
-        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
-      serviceTier: "flex",
-      program: "daybreak_blue",
-      features: {
-        api_key_cyber_access_programs: false,
-        api_key_model_discovery: false,
-      },
-    },
-    {
-      name: "other-program",
-      configuration:
-        'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
-      serviceTier: "fast",
-      program: "standard",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: false,
-      },
-    },
-    {
-      name: "features-only",
-      configuration:
-        'service_tier = "fast"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n',
-      serviceTier: "fast",
-      features: {
-        api_key_cyber_access_programs: false,
-        api_key_model_discovery: true,
-      },
-    },
-  ];
-  const saved = [
-    "CODEX_CLI_PATH",
-    "CODEX_HOME",
-    "CODEX_SECURITY_CONFIG_PATH",
-    "OPENAI_API_KEY",
-    "CODEX_API_KEY",
-  ].map((name) => [name, process.env[name]] as const);
-  const originalSpawn = childProcess.spawn;
-  const fixture = await fakeCodexFixture();
-  const promptPath = path.join(fixture.root, "prompt.md");
-  const launches: { args: readonly string[]; markerPath: string }[] = [];
-  try {
-    delete process.env.OPENAI_API_KEY;
-    process.env.CODEX_API_KEY = "synthetic-worker-api-key";
-    process.env.CODEX_CLI_PATH = process.execPath;
-    process.env.CODEX_HOME = fixture.root;
-    await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH");
-    childProcess.spawn = ((
-      command: string,
-      args: readonly string[],
-      options: SpawnOptions,
-    ) => {
-      const markerPath = path.join(
-        fixture.root,
-        `cyber-${launches.length}.json`,
-      );
-      const environment = {
-        ...options!.env,
-        FAKE_CODEX_MARKER: markerPath,
-        FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
-      };
-      launches.push({ args, markerPath });
-      return originalSpawn(command, [fixture.executablePath, ...args], {
-        ...options,
-        env: environment,
-      });
-    }) as unknown as typeof childProcess.spawn;
-    syncBuiltinESMExports();
-    for (const testCase of cases) {
-      testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
-      await writeFile(testCase.configPath, testCase.configuration);
-      testCase.executor = new CodexSdkWorkerExecutor({
-        ...(testCase.recorded
-          ? restoredDeepScanWorkerSettings(
-              {
-                codexPath: process.execPath,
-                codexHome: fixture.root,
-              },
-              trustedParentSandbox,
-            )
-          : {}),
-        model: testCase.name,
-        parentSandbox: trustedParentSandbox,
-      });
-    }
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-        launches.length = 0;
-        await Promise.all(
-          cases.map((testCase) => {
-            // Each scan captures its own config before its asynchronous launch.
-            process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
-            return testCase.executor!.run(
-              workerRequest(promptPath, fixture.root, { kind, resumeThreadId }),
-            );
-          }),
-        );
-        const workerLaunches = launches.filter(
-          ({ args }) => args[0] === "exec",
-        );
-        assert.equal(workerLaunches.length, cases.length);
-        for (const {
-          name,
-          program,
-          serviceTier,
-          features = {},
-          configPath,
-        } of cases) {
-          const launch = workerLaunches.find(
-            ({ args }) => args[args.indexOf("--model") + 1] === name,
-          );
-          const invocation = await readJson(launch!.markerPath);
-          assert.equal(invocation.configPath, configPath);
-          if (name === "recorded-omissions") {
-            assert.equal(
-              invocation.argv.some((arg: string) =>
-                arg.startsWith("model_reasoning_summary="),
-              ),
-              false,
-            );
-          }
-          assert.deepEqual(
-            invocation.argv.filter((arg: string) =>
-              arg.startsWith("service_tier="),
-            ),
-            serviceTier === undefined
-              ? []
-              : [`service_tier=${JSON.stringify(serviceTier)}`],
-          );
-          if (program === undefined) {
-            assert.equal(
-              invocation.argv.includes("--cyber-access-program"),
-              false,
-            );
-          } else {
-            assertFlagPair(invocation.argv, "--cyber-access-program", program);
-          }
-          assertConfigOverrides(invocation.argv, {
-            "features.api_key_cyber_access_programs":
-              features.api_key_cyber_access_programs,
-            "features.api_key_model_discovery":
-              features.api_key_model_discovery,
-          });
-          assert.equal(
-            invocation.openaiAuthentication.CODEX_API_KEY,
-            "synthetic-worker-api-key",
-          );
-          assert.equal(
-            invocation.argv.includes("resume"),
-            resumeThreadId !== undefined,
-          );
-          assertReadOnlyWorkerPolicy(invocation.argv);
-          assertWorkerSubagentPolicy(invocation.argv, 0);
-        }
-        // Running coordinators and their resumed workers retain their own settings.
-        for (const { configPath } of cases) {
-          await writeFile(
-            configPath!,
-            '[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
           );
         }
       }
@@ -2955,6 +2851,63 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
   });
 }
 
+async function testReducerAttemptContext() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    const deepReducer = {
+      scanRoot: path.join(fixture.root, "scans"),
+      claimedWorkers: [
+        {
+          id: "worker-1",
+          resultPath: path.join(fixture.root, "worker", "result.json"),
+          attempt: 2,
+        },
+      ],
+    };
+    for (const resume of [false, true]) {
+      await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: deepReducer.scanRoot,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan-id",
+        },
+      }).run({
+        kind: "dedup",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal,
+        ...(resume
+          ? {
+              resumeThreadId: "fixture-existing-thread",
+              continuationPrompt: "continue the reducer\n",
+            }
+          : {}),
+        artifactContext: {
+          root: workingDirectory,
+          layout: "reducer",
+          deepReducer,
+        },
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assertConfigOverrides(invocation.argv, {
+        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
+          JSON.stringify(deepReducer),
+      });
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
@@ -3154,10 +3107,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
           return message.includes(reference);
         },
       );
-      // Truncating the long, well-formed emoji message splits a surrogate pair.
-      const persistedDiagnostic = reference.includes("\0")
-        ? message
-        : "\ufffd\n...[truncated; sha256:";
+      const persistedDiagnostic = message;
       process.env.FAKE_CODEX_ARTIFACT_EVENT = JSON.stringify({
         type: "item.completed",
         item: {
@@ -3550,35 +3500,6 @@ async function testMalformedCommandEventsRemainRetryable() {
       const threadId = onThreadId.mock.calls.at(-1)?.arguments[0];
       assert.equal(threadId, "fixture-thread-id");
     });
-  }
-}
-
-async function testArtifactStartupTimeoutClassification() {
-  for (const prompt of [
-    "ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_POLICY_REFUSAL",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS_WITH_POLICY_REFUSAL",
-    "OTHER_MCP_STARTUP_TIMEOUT",
-    "OTHER_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "CATALOG_AUTH_ONLY",
-    "SYNC_AUTH_ONLY",
-  ]) {
-    await assert.rejects(
-      runFixtureWorker(prompt),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error",
-      `${prompt} should remain retryable`,
-    );
   }
 }
 

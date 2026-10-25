@@ -1,17 +1,19 @@
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
+  claimDedupInputs,
   coordinatorFixture,
+  createCoordinator,
   FakeExecutor,
   runCoordinator,
 } from "./deep_scan_coordinator_fixture.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.ts";
+import { importModule, importSource } from "./import-module.ts";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 
 type LifecycleFixtures = Pick<
@@ -1479,7 +1481,11 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   const coverage = completed[0].coverage as unknown as {
     surfaces: { id: string; workerId: string; receiptRefs?: string[] }[];
     explicitExclusions: { workerId: string; pattern: string }[];
-    deferred: { id: string; surfaceIds: string[]; workerId: string }[];
+    deferred: {
+      id: string;
+      surfaceIds: string[];
+      provenance: { workerId: string; sourceId: string; attempt: number };
+    }[];
     openQuestions: { question: string; workerId: string }[];
   };
 
@@ -1489,8 +1495,12 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   assert.equal(coverage.explicitExclusions.length, 2);
   assert.equal(coverage.openQuestions.length, 2);
   for (const row of coverage.deferred) {
-    assert.equal(row.id, `${row.workerId}/shared-task`);
-    assert.deepEqual(row.surfaceIds, [`${row.workerId}/shared-surface`]);
+    assert.equal(row.provenance.sourceId, "shared-task");
+    assert.ok(store.workers.has(row.provenance.workerId));
+    assert.equal(row.provenance.attempt, 1);
+    assert.deepEqual(row.surfaceIds, [
+      `${row.provenance.workerId}-attempt-1-surface-1`,
+    ]);
   }
   for (const row of coverage.surfaces) {
     for (const ref of row.receiptRefs ?? []) {
@@ -1508,85 +1518,135 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   }
 }
 
-export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
+export async function testStaleDiscoveryCheckpointRetriesBeforeAcceptance() {
+  const { saveScanDraftCheckpoint } = await importSource(
+    fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
+  );
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
-    stopAfterNoNew: 2,
     maxDiscoveryRuns: 2,
+    stopAfterNoNew: 2,
   });
   const executor = new FakeExecutor();
-  const run = executor.run.bind(executor);
-  const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
-  const workerReviewed = {
-    ...reviewed,
-    receiptRefs: ["artifacts/worker-receipt.md"],
-  };
-  const followUp = {
-    label: "Worker follow-up",
-    disposition: "needs_follow_up",
-  };
+  const runWorker = executor.run.bind(executor);
+  let stalePublished = false;
   executor.run = async (request) => {
+    const result = await runWorker(request);
+    if (request.kind === "discovery") {
+      const draft = await readJson(request.workingDirectory, "result.json");
+      const stale = !stalePublished;
+      stalePublished = true;
+      await saveScanDraftCheckpoint(
+        { ...request.artifactContext!, repoRoot: fixture.run.targetPath },
+        stale
+          ? { ...draft, threatModel: { summary: "New worker checkpoint." } }
+          : draft,
+      );
+    }
+    return result;
+  };
+  const terminal = await runCoordinator(fixture, store, executor, {
+    random: () => 0,
+    retryDelaysMs: [1],
+  });
+  assert.equal(terminal?.status, "succeeded");
+  assert.deepEqual(
+    [...executor.discoveryAttempts.values()].sort(),
+    [1, 2],
+    "a stale result must be retried before acceptance without aborting another worker",
+  );
+  assert.equal(store.workers.size > 2, true);
+  assert.equal(store.failureMessages.length, 0);
+  const accepted = store.workerUpdates.filter(
+    (worker) => worker.kind === "discovery" && worker.status === "succeeded",
+  );
+  assert.equal(accepted.length, 2);
+}
+
+export async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 3,
+    stopAfterNoNew: 10,
+    maxDiscoveryRuns: 5,
+  });
+  const originalExecutor = new FakeExecutor({
+    discoveryCandidateId: "candidate-1",
+    dedupEvidenceByCall: ["first reducer evidence", "final reducer evidence"],
+  });
+  const run = originalExecutor.run.bind(originalExecutor);
+  originalExecutor.run = async (request) => {
     const outcome = await run(request);
-    if (request.kind !== "discovery") return outcome;
-    const resultPath = path.join(request.artifactContext!.root, "result.json");
-    await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
-      recursive: true,
-    });
-    await writeFile(
-      path.join(request.artifactContext!.root, "artifacts/worker-receipt.md"),
-      "Synthetic review receipt.\n",
-    );
-    const draft = JSON.parse(await readFile(resultPath, "utf8"));
-    draft.coverage = {
-      completeness:
-        request.kind === "discovery" &&
-        request.promptPath.includes("discovery-0002")
-          ? "unknown"
-          : "partial",
-      surfaces: [workerReviewed, followUp],
-      explicitExclusions: [],
-      deferred: [
-        { reason: "An independent review left this question unresolved." },
-      ],
-    };
-    await writeFile(resultPath, JSON.stringify(draft));
+    if (request.kind === "discovery") {
+      const resultPath = path.join(
+        request.artifactContext!.root,
+        "result.json",
+      );
+      const result = await readJson(resultPath);
+      result.coverage.deferred = [
+        { id: "remaining-review", reason: "Source review remains pending." },
+      ];
+      await writeJson(resultPath, result);
+    }
     return outcome;
   };
-  const completed: ScanDraftInput[] = [];
-  const terminal = await runCoordinator(fixture, store, executor, {
-    onComplete: async (draft) => void completed.push(structuredClone(draft)),
-  });
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(completed.length, 1);
-  const projection = completed[0].coverage as unknown as {
-    completeness: string;
-    deferred: { provenance: { attempt: number; workerId: string } }[];
-    surfaces: unknown[];
-    reviews: { completeness: string }[];
+  const original = createCoordinator(fixture, store, originalExecutor);
+  original.start();
+  assert.equal((await original.wait(undefined, 5_000))?.status, "succeeded");
+  assert.equal(store.dedupClaims.length >= 2, true);
+
+  store.run = {
+    ...store.run,
+    status: "running" as const,
+    terminalReason: undefined,
+    manifestPath: undefined,
+    persistedWorkers: structuredClone([...store.workers.values()]),
+    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
-  assert.equal(projection.completeness, undefined);
-  assert.equal(projection.deferred.length, 2);
-  assert.equal(projection.surfaces.length, 4);
-  assert.equal(projection.reviews.length, 2);
-  assert.deepEqual(
-    new Set(
-      projection.reviews.map(
-        (review: { completeness: string }) => review.completeness,
-      ),
+  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
+  await Promise.all(
+    store.run.persistedWorkers!.map((worker) =>
+      rm(worker.promptPath, { force: true }),
     ),
-    new Set([undefined]),
   );
-  for (const item of projection.deferred) {
-    assert.equal(item.provenance.attempt, 1);
-    assert.ok(store.workers.has(item.provenance.workerId));
-  }
-  for (const worker of store.workers.values()) {
-    if (worker.kind !== "discovery") continue;
-    const draft = JSON.parse(
-      await readFile(worker.resultManifestPath!, "utf8"),
-    );
-    assert.notEqual(draft.coverage.completeness, "complete");
-    assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
-    assert.equal(draft.coverage.deferred.length, 1);
-  }
+  const replacementExecutor = new FakeExecutor();
+  const completedDrafts: ScanDraftInput[] = [];
+  const resumed = await runCoordinator(fixture, store, replacementExecutor, {
+    run: store.run,
+    onComplete: async (draft) =>
+      void completedDrafts.push(structuredClone(draft)),
+  });
+  assert.equal(resumed?.status, "succeeded", resumed?.error);
+
+  assert.equal(
+    (completedDrafts[0].coverage.deferred as unknown[]).length,
+    5,
+    "resumed reduction must retain pending review from every merged worker",
+  );
+  const firstReducer = store.run.persistedWorkers!.find(
+    (worker) =>
+      worker.kind === "dedup" && worker.promptPath.includes("dedup-0001"),
+  );
+  assert.ok(firstReducer);
+  const firstResult = await readJson(firstReducer.resultManifestPath!);
+  assert.equal(
+    firstResult.findings[0]?.rootCause.summary,
+    "first reducer evidence",
+  );
+  const lastReducer = store.run.persistedWorkers!.findLast(
+    (worker) => worker.kind === "dedup" && worker.status === "succeeded",
+  );
+  const latestResult = await readJson(lastReducer!.resultManifestPath!);
+  assert.equal(
+    latestResult.findings[0]?.rootCause.summary,
+    "final reducer evidence",
+  );
+  assert.deepEqual(
+    completedDrafts.map((draft) => draft.findings),
+    [latestResult.findings],
+  );
+  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
+  assert.equal(
+    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
+    0,
+  );
 }

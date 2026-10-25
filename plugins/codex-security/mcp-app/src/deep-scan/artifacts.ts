@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { errorMessage } from "./errors.js";
@@ -53,10 +53,20 @@ export async function writeJsonAtomic(
 
 export async function readJsonObject(
   path: string,
+  expectedSha256?: string,
 ): Promise<Record<string, unknown>> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await fs.readFile(path, "utf8"));
+    const contents = await fs.readFile(path);
+    if (
+      expectedSha256 !== undefined &&
+      createHash("sha256").update(contents).digest("hex") !== expectedSha256
+    ) {
+      throw new Error(
+        "The recorded Deep Scan result changed after acceptance.",
+      );
+    }
+    parsed = JSON.parse(contents.toString("utf8"));
   } catch (error) {
     throw new Error(
       `Invalid Deep Scan JSON artifact ${path}: ${errorMessage(error)}`,
@@ -71,6 +81,7 @@ export async function readJsonObject(
 export async function requireRegularFile(
   path: string,
   root: string,
+  allowEmpty = false,
 ): Promise<void> {
   const rootPath = await fs.realpath(root);
   const resolvedPath = await fs.realpath(path);
@@ -91,7 +102,11 @@ export async function requireRegularFile(
     fs.lstat(path),
     fs.stat(path),
   ]);
-  if (linkStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size === 0) {
+  if (
+    linkStat.isSymbolicLink() ||
+    !fileStat.isFile() ||
+    (!allowEmpty && fileStat.size === 0)
+  ) {
     throw new Error(`Deep Scan artifact is not a valid regular file: ${path}`);
   }
 }

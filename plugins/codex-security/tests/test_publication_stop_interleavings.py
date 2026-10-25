@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -110,6 +111,9 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
     rejected = save_disposition(scan, omitted.parent, "reported")
     omitted.write_text(json.dumps(rejected))
     save_disposition(scan, omitted.parent, "rejected")
+    # The selected rejection can share the filesystem timestamp of the stale result.
+    observed = (omitted.parent / "checkpoint-head.json").stat().st_mtime_ns
+    os.utime(omitted, ns=(observed, observed))
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",

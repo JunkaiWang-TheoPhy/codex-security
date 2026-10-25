@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
 
 import {
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
   DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
@@ -72,7 +72,7 @@ class DeepScanPersistenceError extends Error {
     const operation = args[0] ?? "unknown";
     const scanId = argumentValue(args, "--scan-id");
     const workerId = argumentValue(args, "--worker-id");
-    const diagnostic = boundedDeepScanErrorMessage(error);
+    const diagnostic = deepScanErrorMessage(error);
     super(
       `Deep Scan persistence operation ${operation} failed after ${attempts} attempts` +
         `${scanId ? ` for scan ${scanId}` : ""}` +
@@ -609,7 +609,7 @@ export class WorkbenchDeepScanStore {
               signal: failure.signal,
               killed: failure.killed,
               timeoutMs: failure.timeoutMs,
-              error: boundedDeepScanErrorMessage(error),
+              error: deepScanErrorMessage(error),
             }),
           );
           throw failure;
@@ -993,6 +993,7 @@ function parsePersistedWorker(value: JsonObject): PersistedDeepScanWorker {
     threadId: optionalString(value.sdkThreadId),
     resultManifestPath: optionalString(value.resultManifestPath),
     acceptedResultPath: optionalString(value.acceptedResultPath),
+    acceptedResultSha256: optionalString(value.acceptedResultSha256),
     completionSequence: optionalPositiveInteger(value.completionSequence),
     error: optionalString(value.error),
   };

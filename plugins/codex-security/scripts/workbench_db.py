@@ -51,6 +51,7 @@ from finalize_scan_contract import (
     _write_prepared_scan_finalization,
     finalize_scan,
     finding_candidate_id,
+    manifest_is_sealed,
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
@@ -121,6 +122,7 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    require_scan_target_unchanged,
     restore_directory_junctions,
     scan_target_warning,
     worktree_content_digest,
@@ -1240,7 +1242,7 @@ def complete_budget_exhausted_scan(
                 "Budget-exhausted scan completion requires successfully completed Deep Scan "
                 "discovery."
             )
-        warning = optional_text(args.message, maximum=2400)
+        warning = optional_text(args.message)
         if warning is None:
             warning = (
                 f"Deep Scan reached its cost limit after an estimated "
@@ -1354,7 +1356,7 @@ def budget_exhausted_draft(
         for key in ("surfaces", "explicitExclusions", "deferred"):
             if not isinstance(coverage.get(key), list):
                 raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
-        if manifest["scan"].get("sealedAt") is not None or manifest["scan"].get("artifacts"):
+        if manifest_is_sealed(manifest["scan"]):
             saved_results.validate_sealed_budget_draft(
                 _WORKBENCH_DB_CONTEXT, scan, scan_dir, manifest
             )
@@ -1511,10 +1513,7 @@ def complete_scan_locked(
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
-        and (
-            current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
-        )
+        and manifest_is_sealed(current_manifest["scan"])
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
@@ -1557,6 +1556,7 @@ def complete_scan_locked(
                     ).fetchall(),
                     warnings,
                     stopped=False,
+                    scan_mode=scan["mode"],
                     reason="",
                 )
                 if merge_parent_draft
@@ -1580,11 +1580,11 @@ def complete_scan_locked(
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
-        saved_results.require_selected_publication(
-            _WORKBENCH_DB_CONTEXT, connection, scan, prepared
-        )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        saved_results.require_selected_publication(
+            _WORKBENCH_DB_CONTEXT, connection, scan, prepared, projection_warnings=warnings
+        )
         if prepared.warnings:
             # Save the explanation before publication removes the broken reference,
             # so a retry after failed publication retains it.
@@ -1965,6 +1965,12 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
         if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
             raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
     return recipe
+
+
+def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
+    return scan_history.coverage_summary_for_history(
+        _WORKBENCH_DB_CONTEXT, scan, require_canonical_scan_directory
+    )
 
 
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
@@ -2734,6 +2740,17 @@ def scan_context(
     return context
 
 
+def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    if result["scan"]["progress"]["status"] != "running":
+        scan = require_scan(connection, args.scan_id)
+        try:
+            result["scan"] = dict(result["scan"], coverage=coverage_summary_for_history(scan))
+        except (OSError, RuntimeError, SystemExit):
+            pass  # Historical artifacts may no longer be available or verifiable.
+    return result
+
+
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
@@ -3500,7 +3517,9 @@ def main(
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "get-scan":
-            result = scan_context(connection, args.scan_id, args.occurrence_id)
+            if args.check_target:
+                require_scan_target_unchanged(require_scan(connection, args.scan_id))
+            result = get_scan(connection, args)
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
                 connection, require_scan(connection, args.scan_id), args.name

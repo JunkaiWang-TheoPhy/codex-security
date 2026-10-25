@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { assertFlagPair, nativeConfigOverrides } from "./assertions.ts";
-import { trustedParentSandbox } from "./deep_scan_executor_diagnostic_cases.ts";
+import { trustedParentSandbox } from "./support/fake-codex-fixture.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 

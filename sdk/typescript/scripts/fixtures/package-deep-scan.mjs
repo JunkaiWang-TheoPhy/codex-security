@@ -29,6 +29,7 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
+const retryMissingResult = process.env.PACKAGE_DEEP_RETRY !== "false";
 let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
@@ -77,7 +78,7 @@ try {
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
       console.log(
-        "Validated installed SDK parent-driven Deep Scan and worker retry.",
+        `Validated installed SDK parent-driven Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
       ),
     ),
     runInstalledDirectSdk(installedPlugin, executable),
@@ -112,7 +113,7 @@ try {
   });
 }
 
-async function fixture(name, pluginRoot, executable) {
+async function fixture(name, pluginRoot, executable, retry = false) {
   const directory = join(root, name);
   const target = join(directory, "target with spaces %");
   const home = join(directory, "home");
@@ -159,6 +160,9 @@ async function fixture(name, pluginRoot, executable) {
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
   });
+  if (retry) {
+    env.PACKAGE_DEEP_EMPTY_ONCE = join(directory, "missing-result-completion");
+  }
   env.PYTHON = await resolvePluginPython({
     environment: env,
     protectedRoot: target,
@@ -264,7 +268,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
       )
       .catch((error) => error);
     const deadline = Date.now() + 30_000;
-    while (!(await readExecutions(f)).some((entry) => entry.phase === "held")) {
+    while ((await readFile(f.env.PACKAGE_DEEP_HOLD, "utf8")) !== "held") {
       assert.ok(
         Date.now() < deadline,
         "Second worker did not reach the interruption boundary.",
@@ -366,7 +370,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
     await rpc.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId);
 }
 
 async function workbench(f, args) {
@@ -383,10 +387,11 @@ async function workbench(f, args) {
 }
 
 async function runInstalledSdk(pluginRoot, executable) {
-  const f = await fixture("installed", pluginRoot, executable);
-  f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
-    f.directory,
-    "missing-result-completion",
+  const f = await fixture(
+    "installed",
+    pluginRoot,
+    executable,
+    retryMissingResult,
   );
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
@@ -517,7 +522,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId, 3);
 }
 
 async function assertSavedState(f, scanId, owner) {
@@ -611,7 +616,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId, preflights = 3) {
+async function assertExecutions(f, scanId, preflightsWithoutRetry = 4) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -628,7 +633,7 @@ async function assertExecutions(f, scanId, preflights = 3) {
   assert.equal(reducers.length, 1);
   assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    preflights,
+    preflightsWithoutRetry + incomplete,
   );
   for (const execution of [...workers, ...reducers]) {
     assert.equal(execution.scanId, scanId);
@@ -643,10 +648,11 @@ async function assertExecutions(f, scanId, preflights = 3) {
 }
 
 async function runInstalledDirectSdk(pluginRoot, executable) {
-  const f = await fixture("installed-direct", pluginRoot, executable);
-  f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
-    f.directory,
-    "missing-result-completion",
+  const f = await fixture(
+    "installed-direct",
+    pluginRoot,
+    executable,
+    retryMissingResult,
   );
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
@@ -716,5 +722,5 @@ async function runInstalledDirectSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 5);
+  await assertExecutions(f, scanId);
 }

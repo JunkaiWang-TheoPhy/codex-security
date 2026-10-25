@@ -18,28 +18,33 @@ import { sha256 } from "./support/finding-identity.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-const bundle = await build({
-  stdin: {
-    resolveDir: fileURLToPath(
-      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
-    ),
-    contents: `export * from "./src/artifact-scan-draft.ts";
+const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
+try {
+  await build({
+    stdin: {
+      resolveDir: fileURLToPath(
+        new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+      ),
+      contents: `export * from "./src/artifact-scan-draft.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
       export * from "./src/deep-scan/worker-runner.ts";`,
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  loader: { ".md": "text" },
-  write: false,
-});
-const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
-await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    loader: { ".md": "text" },
+    outfile: bundlePath,
+  });
+} catch (error) {
+  await cleanup().catch(() => undefined);
+  throw error;
+}
 const {
   createDeepScanArtifacts,
   recordCodexSecurityScanDraftViaWorkbench,
   parseCanonicalScanDraft,
+  parseScanDraft,
   validateDiscoveryArtifacts,
   DeepScanWorkerRunner,
 } = await import(pathToFileURL(bundlePath).href);
@@ -59,6 +64,7 @@ type Mutation =
   | "inverted-lines"
   | "wrong-scan"
   | "legacy-details"
+  | "legacy-evidence"
   | "legacy-surface";
 const cases: {
   name: string;
@@ -66,6 +72,7 @@ const cases: {
   complete?: boolean;
   mutation?: Mutation;
   accepted: boolean;
+  canonicalAccepted?: boolean;
 }[] = [
   { name: "scope notes", complete: true, accepted: true },
   {
@@ -80,7 +87,18 @@ const cases: {
     mutation: "legacy-details",
     accepted: false,
   },
-  { name: "legacy surface ID", mutation: "legacy-surface", accepted: false },
+  {
+    name: "legacy evidence coordinates",
+    mutation: "legacy-evidence",
+    accepted: false,
+    canonicalAccepted: true,
+  },
+  {
+    name: "legacy surface ID",
+    mutation: "legacy-surface",
+    accepted: false,
+    canonicalAccepted: true,
+  },
   { name: "unfinished checkpoint", complete: false, accepted: false },
   { name: "missing findings", mutation: "missing-findings", accepted: false },
   {
@@ -177,6 +195,10 @@ for (const scenario of cases) {
       },
     );
     const submitted = mutateDraft(semantic, scenario.mutation);
+    if (scenario.mutation === "legacy-evidence") {
+      expect(() => parseScanDraft(semantic)).not.toThrow();
+      expect(() => parseScanDraft(submitted)).toThrow(/code_evidence/);
+    }
     const findings = {
       scanId: submitted.scanId,
       findings: submitted.findings?.map((finding) => ({
@@ -250,9 +272,15 @@ for (const scenario of cases) {
       "discovery-1",
     );
     expect(executions).toBe(1);
-    if (scenario.accepted) {
+    if (scenario.canonicalAccepted ?? scenario.accepted) {
       expect(standard.error).toBe(standard.finalization);
       expect(standard.finalizations).toBe(1);
+    } else {
+      expect(standard.error).toBeInstanceOf(Error);
+      expect(standard.error).not.toBe(standard.finalization);
+      expect(standard.finalizations).toBe(0);
+    }
+    if (scenario.accepted) {
       expect(deepResult.status).toBe("succeeded");
       expect(acceptedPaths).toEqual([deepResult.worker.resultPath]);
       const deepDraft: DraftFixture = await validateDiscoveryArtifacts(
@@ -273,9 +301,6 @@ for (const scenario of cases) {
       expect(deepDraft.scope).toEqual(canonicalDraft.scope);
       expect(deepDraft.threatModel).toEqual(canonicalDraft.threatModel);
     } else {
-      expect(standard.error).toBeInstanceOf(Error);
-      expect(standard.error).not.toBe(standard.finalization);
-      expect(standard.finalizations).toBe(0);
       expect(deepResult.status).toBe("failed");
       expect(acceptedPaths).toHaveLength(0);
     }
@@ -321,7 +346,7 @@ test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
   },
 );
 
-test("sealed legacy evidence stays readable but is not admitted as a new draft", async () => {
+test("sealed legacy evidence stays readable during canonical admission", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
   const file = join(scanDir, "findings.json");
   const findings = JSON.parse(await readFile(file, "utf8"));
@@ -359,14 +384,13 @@ test("sealed legacy evidence stays readable but is not admitted as a new draft",
   const coverage = JSON.parse(
     await readFile(join(scanDir, "coverage.json"), "utf8"),
   );
-  expect(() =>
-    parseCanonicalScanDraft({
-      scanId: manifest.scan.id,
-      manifest,
-      findings,
-      coverage,
-    }),
-  ).toThrow();
+  const canonical = parseCanonicalScanDraft({
+    scanId: manifest.scan.id,
+    manifest,
+    findings,
+    coverage,
+  });
+  expect(canonical.findings[0]?.code_evidence).toEqual([evidence]);
 });
 
 test("canonical admission still rejects reversed typed evidence bounds", async () => {
@@ -584,6 +608,16 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
   if (mutation === "legacy-surface")
     (draft.coverage["surfaces"] as Record<string, unknown>[])[0]!["id"] =
       "HTTP API";
+  if (mutation === "legacy-evidence")
+    draft.findings[0]!["code_evidence"] = [
+      {
+        id: "legacy-reversed-end",
+        code: "read(input)",
+        path: "src/legacy.py",
+        startLine: 48,
+        endLine: 47,
+      },
+    ];
   if (mutation === "legacy-details")
     draft.findings[0]!["validation"] = {
       method: null,

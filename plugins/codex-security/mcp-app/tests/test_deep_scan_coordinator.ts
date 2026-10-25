@@ -1,15 +1,19 @@
+import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
+import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type { JsonObject } from "../src/types.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
   CodexWorkerDiagnostic,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
+  CodexWorkerRequest,
+  CodexWorkerResult,
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
-import { importSource } from "./import-module.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
@@ -23,7 +27,8 @@ import {
 import path from "node:path";
 import {
   testDeepScanLifecycle,
-  testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
+  testStaleDiscoveryCheckpointRetriesBeforeAcceptance,
+  testResumeUsesHistoricalCandidateSnapshotForEachReducer,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -50,54 +55,10 @@ import {
   createCoordinator,
   runCoordinator,
   recordingClock,
+  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
-
-async function testStaleDiscoveryCheckpointRetriesBeforeAcceptance() {
-  const { saveScanDraftCheckpoint } = await importSource(
-    new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
-  );
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 2,
-  });
-  const executor = new FakeExecutor();
-  const runWorker = executor.run.bind(executor);
-  let stalePublished = false;
-  executor.run = async (request) => {
-    const result = await runWorker(request);
-    if (request.kind === "discovery") {
-      const draft = await readJson(request.workingDirectory, "result.json");
-      const stale = !stalePublished;
-      stalePublished = true;
-      await saveScanDraftCheckpoint(
-        { ...request.artifactContext!, repoRoot: fixture.run.targetPath },
-        stale
-          ? { ...draft, threatModel: { summary: "New worker checkpoint." } }
-          : draft,
-      );
-    }
-    return result;
-  };
-  const terminal = await runCoordinator(fixture, store, executor, {
-    random: () => 0,
-    retryDelaysMs: [1],
-  });
-  assert.equal(terminal?.status, "succeeded");
-  assert.deepEqual(
-    [...executor.discoveryAttempts.values()].sort(),
-    [1, 2],
-    "a stale result must be retried before acceptance without aborting another worker",
-  );
-  assert.equal(store.workers.size > 2, true);
-  assert.equal(store.failureMessages.length, 0);
-  const accepted = store.workerUpdates.filter(
-    (worker) => worker.kind === "discovery" && worker.status === "succeeded",
-  );
-  assert.equal(accepted.length, 2);
-}
 
 function twoRunConfig(config: Partial<DeepScanConfig> = {}) {
   return { ...config, stopAfterNoNew: 2, maxDiscoveryRuns: 2 };
@@ -1195,7 +1156,7 @@ async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() 
   assert.equal(store.run.noNewStreak, 2);
 }
 
-async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
+async function testLongWorkerErrorIsPreservedAtPersistenceBoundary() {
   const { fixture, store } = await coordinatorFixture();
   const fullError = `fixture long validator error: ${"x".repeat(5_000)}`;
   const terminal = await runCoordinator(
@@ -1205,13 +1166,13 @@ async function testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary() {
     { retryDelaysMs: [1, 3, 9], random: () => 0 },
   );
   assert.equal(terminal?.status, "failed");
-  assert.equal(store.failureMessages[0].length <= 2_400, true);
-  assert.match(store.failureMessages[0], /truncated; sha256:/);
+  assert.ok(store.failureMessages[0].includes(fullError));
+  assert.equal(terminal.error, store.failureMessages[0]);
   assert.equal(terminal.manifestPath, undefined);
   const [worker] = [...store.workers.values()];
   assert.equal(worker.status, "canceled");
   assert.equal(worker.attempt, 4);
-  assert.match(worker.error!, /truncated; sha256:/);
+  assert.equal(worker.error, `transient_error: ${fullError}`);
 }
 
 async function testDiscoveryPhasePersistenceFailureStopsDispatch() {
@@ -1564,6 +1525,12 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupContinuationPrompts[1] ?? "",
     /paginate all assigned findings and the previous aggregate/,
   );
+  for (const prompt of [
+    await readFile(executor.dedupPromptPaths[0], "utf8"),
+    executor.dedupContinuationPrompts[1] ?? "",
+  ]) {
+    assert.match(prompt, /without code mode[^\n]*\bdirectly\b/i);
+  }
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(
@@ -2227,7 +2194,8 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
     /Saved result publication failed: fixture retained result publication failure/,
   );
   assert.match(terminal?.error ?? "", /Original Deep Scan failure:/);
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
+  assert.ok(terminal?.error?.includes("y".repeat(2_350)));
+  assert.ok(terminal?.error?.includes("x".repeat(2_350)));
   assert.equal(
     (await store.get(fixture.run.scanId, "checkpoint-owner")).error,
     terminal?.error,
@@ -2241,7 +2209,7 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
   );
 }
 
-async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
+async function testStoppedPublicationFailurePreservesPrefixedDiagnostic() {
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const coordinator = createCoordinator(fixture, store, executor, {
@@ -2258,9 +2226,11 @@ async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
   const terminal = await coordinator.wait(undefined, 5_000);
 
   assert.equal(terminal?.status, "canceled");
-  assert.equal((terminal?.error?.length ?? 0) <= 2_400, true);
-  assert.equal(store.publicationFailureMessages.length, 1);
-  assert.equal(store.publicationFailureMessages[0].length <= 2_400, true);
+  assert.equal(
+    terminal?.error,
+    `Saved result publication failed: fixture publication failure ${"z".repeat(2_400)}`,
+  );
+  assert.deepEqual(store.publicationFailureMessages, [terminal.error]);
   assert.match(
     store.publicationFailureMessages[0],
     /^Saved result publication failed: fixture publication failure/,
@@ -3308,94 +3278,6 @@ async function testResumedManifestPreservesCompletedReducer(
   );
 }
 
-async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 3,
-    stopAfterNoNew: 10,
-    maxDiscoveryRuns: 5,
-  });
-  const originalExecutor = new FakeExecutor({
-    discoveryCandidateId: "candidate-1",
-    dedupEvidenceByCall: ["first reducer evidence", "final reducer evidence"],
-  });
-  const run = originalExecutor.run.bind(originalExecutor);
-  originalExecutor.run = async (request) => {
-    const outcome = await run(request);
-    if (request.kind === "discovery") {
-      const resultPath = path.join(
-        request.artifactContext!.root,
-        "result.json",
-      );
-      const result = await readJson(resultPath);
-      result.coverage.deferred = [
-        { id: "remaining-review", reason: "Source review remains pending." },
-      ];
-      await writeJson(resultPath, result);
-    }
-    return outcome;
-  };
-  const original = createCoordinator(fixture, store, originalExecutor);
-  original.start();
-  assert.equal((await original.wait(undefined, 5_000))?.status, "succeeded");
-  assert.equal(store.dedupClaims.length >= 2, true);
-
-  store.run = {
-    ...store.run,
-    status: "running" as const,
-    terminalReason: undefined,
-    manifestPath: undefined,
-    persistedWorkers: structuredClone([...store.workers.values()]),
-    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
-  };
-  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
-  await Promise.all(
-    store.run.persistedWorkers!.map((worker) =>
-      rm(worker.promptPath, { force: true }),
-    ),
-  );
-  const replacementExecutor = new FakeExecutor();
-  const completedDrafts: ScanDraftInput[] = [];
-  const resumed = await runCoordinator(fixture, store, replacementExecutor, {
-    run: store.run,
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
-  assert.equal(resumed?.status, "succeeded", resumed?.error);
-
-  assert.equal(
-    (completedDrafts[0].coverage.deferred as unknown[]).length,
-    5,
-    "resumed reduction must retain pending review from every merged worker",
-  );
-  const firstReducer = store.run.persistedWorkers!.find(
-    (worker) =>
-      worker.kind === "dedup" && worker.promptPath.includes("dedup-0001"),
-  );
-  assert.ok(firstReducer);
-  const firstResult = await readJson(firstReducer.resultManifestPath!);
-  assert.equal(
-    firstResult.findings[0]?.rootCause.summary,
-    "first reducer evidence",
-  );
-  const lastReducer = store.run.persistedWorkers!.findLast(
-    (worker) => worker.kind === "dedup" && worker.status === "succeeded",
-  );
-  const latestResult = await readJson(lastReducer!.resultManifestPath!);
-  assert.equal(
-    latestResult.findings[0]?.rootCause.summary,
-    "final reducer evidence",
-  );
-  assert.deepEqual(
-    completedDrafts.map((draft) => draft.findings),
-    [latestResult.findings],
-  );
-  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
-  assert.equal(
-    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
-    0,
-  );
-}
-
 async function testPersistedErrorLimitStopsBeforeRescheduling() {
   const fixture = await fixtureRun({
     stopAfterNoNew: 2,
@@ -4328,13 +4210,14 @@ try {
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
-  await testLongWorkerErrorIsBoundedOnlyAtPersistenceBoundary();
+  await testLongWorkerErrorIsPreservedAtPersistenceBoundary();
   await testDiscoveryPhasePersistenceFailureStopsDispatch();
   await testCancellationClearsRetryWait();
   await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
   await testInvalidArtifactsRetry();
+  await testSharedReceiptSurvivesWorkerRetry();
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);
   await testMissingReducerResultResumesExistingThread();
@@ -4365,7 +4248,7 @@ try {
   await testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess();
   await testRegistryEvictionAndExternalFailure();
   await testStoppedPublicationFailurePreservesOriginalDiagnostic();
-  await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
+  await testStoppedPublicationFailurePreservesPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
   await testStoreConfirmedReplacementSurvivesReadFailure();

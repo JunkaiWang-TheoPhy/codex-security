@@ -8,7 +8,6 @@ import {
 } from "../src/artifact-io.ts";
 import {
   recordCodexSecurityScanDraftViaWorkbench,
-  type ScanDraftInput,
   saveScanDraftCheckpoint,
 } from "../src/artifact-scan-draft.ts";
 import { saveThreatModelDocument } from "../src/threat-model-document.ts";
@@ -17,18 +16,40 @@ import { readJson } from "./support/json.ts";
 // Unit publication boundary; real lock/binding behavior is covered by the workbench integration suite.
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
-  input: ScanDraftInput,
+  input: unknown,
 ) {
   return recordCodexSecurityScanDraftViaWorkbench(
     context,
     input,
     async (args: string[]) => {
       const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
-      const rawContents = await fs.readFile(
+      let rawContents = await fs.readFile(
         args[args.indexOf("--checkpoint-path") + 1],
         "utf8",
       );
       const checkpoint = JSON.parse(rawContents);
+      const { complete, scope, threatModel } = draft.manifest.scan;
+      const projected = {
+        scanId: checkpoint.scanId,
+        ...(complete === undefined ? {} : { complete }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(threatModel === undefined ? {} : { threatModel }),
+        findings: draft.findings.findings,
+        coverage: draft.coverage,
+      };
+      if (context.mode === "deep") {
+        const head = await readJson(context.root, "checkpoint-head.json").catch(
+          (error) => {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return undefined;
+          },
+        );
+        checkpoint.publication = {
+          previousCheckpoint: head?.checkpoint ?? null,
+          previousInputCheckpoint: head?.inputCheckpoint ?? null,
+        };
+        rawContents = JSON.stringify(checkpoint);
+      }
       const rawName =
         createHash("sha256").update(rawContents).digest("hex") + ".json";
       await replaceArtifactText(
@@ -39,18 +60,24 @@ export async function recordCodexSecurityScanDraft(
         ),
         rawContents,
       );
-      const { complete, scope, threatModel } = draft.manifest.scan;
-      const canonicalCheckpoint = {
-        scanId: checkpoint.scanId,
-        ...(complete === undefined ? {} : { complete }),
-        ...(scope === undefined ? {} : { scope }),
-        ...(threatModel === undefined ? {} : { threatModel }),
-        findings: draft.findings.findings,
-        coverage: draft.coverage,
-      };
       await saveScanDraftCheckpoint(
         { ...context, layout: "worker" },
-        canonicalCheckpoint,
+        projected,
+        false,
+      );
+      await replaceArtifactJson(
+        await artifactDestination(
+          context,
+          ["checkpoint-head.json"],
+          "scan checkpoint head",
+        ),
+        {
+          checkpoint:
+            createHash("sha256")
+              .update(JSON.stringify(projected))
+              .digest("hex") + ".json",
+          ...(checkpoint.publication ? { inputCheckpoint: rawName } : {}),
+        },
       );
       for (const [key, name] of [
         ["findings", "findings.json"],
