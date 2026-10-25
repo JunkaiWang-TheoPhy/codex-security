@@ -2905,7 +2905,6 @@ export class CodexSecurity {
           codexOptions,
           preflightCommand:
             await this.#providerPreflightCommand(effectiveConfig),
-          pluginRoot: runtime.plugin.pluginRoot,
           scanDir,
           signal,
         });

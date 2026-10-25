@@ -8,7 +8,11 @@ import { inlineToml, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import { executablePathForSpawn, type CodexCommand } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
-import { withCodexPreflightLock } from "./provider-profile.js";
+import {
+  nativePermissionPreflight,
+  nativeProfileClient,
+  withCodexPreflightLock,
+} from "./provider-profile.js";
 
 export interface DirectDeepScanOptions {
   codexOptions: CodexOptions & { nativeProfile?: string };
@@ -35,27 +39,17 @@ function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
 export async function readDeepScanParentConfig(
   options: Pick<
     DirectDeepScanOptions,
-    "codexOptions" | "preflightCommand" | "pluginRoot" | "scanDir" | "signal"
+    "codexOptions" | "preflightCommand" | "scanDir" | "signal"
   >,
 ): Promise<JsonObject> {
   const { codexOptions, preflightCommand: command } = options;
-  const native = await import(
-    pathToFileURL(
-      join(options.pluginRoot, "mcp", "permission-profile-preflight.mjs"),
-    ).href
-  );
+  const native = await nativePermissionPreflight();
   const config = codexOptions.config ?? {};
   // The provider-profile launcher emits whole top-level tables instead.
   const overrides =
     codexOptions.nativeProfile === undefined
       ? sdkConfigFlags(config)
-      : (
-          await import(
-            pathToFileURL(
-              join(options.pluginRoot, "scripts", "codex_profile.mjs"),
-            ).href
-          )
-        ).profileConfigOverrides(config);
+      : (await nativeProfileClient()).profileConfigOverrides(config);
   const environment = bundledCodexSdkEnvironment(command.command, {
     ...codexOptions.env,
     ...(codexOptions.apiKey === undefined
@@ -66,7 +60,9 @@ export async function readDeepScanParentConfig(
     native.readDeepScanRuntimeConfig({
       codexPath: command.command,
       commandArgs: command.args,
-      cwd: options.scanDir,
+      // The parent launcher inherits this directory and passes the scan via --cd.
+      cwd: process.cwd(),
+      configCwd: options.scanDir,
       configOverrides: [...overrides, ...(codexOptions.configOverrides ?? [])],
       env: environment,
       signal: options.signal,

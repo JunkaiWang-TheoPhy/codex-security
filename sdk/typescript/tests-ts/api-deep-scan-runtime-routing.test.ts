@@ -347,7 +347,6 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
     readDeepScanParentConfig({
       codexOptions: { config, env: { CODEX_HOME: home } },
       preflightCommand: resolveCodexCommand({}),
-      pluginRoot: PLUGIN_ROOT,
       scanDir,
       signal: new AbortController().signal,
     });
@@ -366,4 +365,29 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
     model_auto_compact_token_limit: 2 ** 53,
   });
   await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow();
+});
+
+test("parent configuration launches from the caller and reads the scan directory", async () => {
+  const home = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  const script = join(home, "config-reader.mjs");
+  await writeFile(
+    script,
+    `import { createInterface } from "node:readline";
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line);
+  if (id === undefined) continue;
+  const result = method === "config/read"
+    ? { config: { launcherCwd: process.cwd(), configCwd: params.cwd } }
+    : {};
+  console.log(JSON.stringify({ id, result }));
+}`,
+  );
+  const config = await readDeepScanParentConfig({
+    codexOptions: { env: { CODEX_HOME: home } },
+    preflightCommand: { command: process.execPath, args: [script] },
+    scanDir,
+    signal: new AbortController().signal,
+  });
+  expect(config).toEqual({ launcherCwd: process.cwd(), configCwd: scanDir });
 });

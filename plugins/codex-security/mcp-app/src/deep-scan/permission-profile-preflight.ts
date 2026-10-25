@@ -57,11 +57,11 @@ type RuntimeConfigReadOptions = Pick<
 
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
-  options: RuntimeConfigReadOptions,
+  options: RuntimeConfigReadOptions & { readonly configCwd?: string },
 ): Promise<JsonRecord> {
   return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
-      cwd: options.cwd,
+      cwd: options.configCwd ?? options.cwd,
       includeLayers: false,
     });
     const config = record(response.config);
