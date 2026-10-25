@@ -4970,6 +4970,32 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([undefined, "Record the failed scan."])(
+    "preserves the requested post-scan turn when Deep Scan routing fails with %p",
+    async (postScanPrompt) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const prompts: string[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        canRunDirectDeepScan: () => false,
+        readDeepScanParentConfig: async () =>
+          fail("native configuration failed"),
+        createCodex: codexFactory(async (prompt) => {
+          prompts.push(prompt);
+          return { events: completedEvents() };
+        }),
+      });
+      try {
+        await expect(
+          client.run(repository, { mode: "deep", postScanPrompt }),
+        ).rejects.toThrow("native configuration failed");
+        expect(prompts).toEqual(postScanPrompt ? [postScanPrompt] : []);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each([
     ["a completed scan with scope notes", "completed", false, false],
     ["legacy coverage metadata", "legacy", false, false],

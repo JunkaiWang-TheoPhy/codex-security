@@ -2864,6 +2864,25 @@ export class CodexSecurity {
           options.auth,
           git,
         );
+      const threadOptions: ThreadOptions = {
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+        workingDirectory: scanDir,
+        skipGitRepoCheck: true,
+        approvalPolicy,
+      };
+      const turnOptions: TurnOptions = {
+        signal,
+        cyberAccessProgram: options.cyberAccessProgram,
+      };
+      const postScanPrompt = options.postScanPrompt;
+      const openThread = (client: CodexClientLike, id: unknown) => {
+        if (typeof id !== "string") return client.startThread(threadOptions);
+        if (!client.resumeThread)
+          throw new CodexSecurityError(
+            "The configured Codex client does not support resuming sessions.",
+          );
+        return client.resumeThread(id, threadOptions);
+      };
       let parentCodex = codex;
       if (
         mode === "deep" &&
@@ -2871,6 +2890,14 @@ export class CodexSecurity {
         !this.#dependencies.hostedScan &&
         session.deepScanPluginUsesDefaultMcpFile
       ) {
+        // The scan is already registered when native routing is inspected.
+        if (postScanPrompt?.trim()) {
+          runPostScan = () =>
+            openThread(codex, resumeThreadId).runStreamed(
+              postScanPrompt,
+              turnOptions,
+            );
+        }
         const parentConfig = await (
           this.#dependencies.readDeepScanParentConfig ??
           readDeepScanParentConfig
@@ -2899,27 +2926,14 @@ export class CodexSecurity {
             ],
           });
         }
+        runPostScan = null;
       }
-      const threadOptions: ThreadOptions = {
-        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
-        workingDirectory: scanDir,
-        skipGitRepoCheck: true,
-        approvalPolicy,
-      };
-      let thread: CodexThreadLike;
+      const thread = openThread(parentCodex, resumeThreadId);
       if (typeof resumeThreadId === "string") {
-        if (parentCodex.resumeThread === undefined) {
-          throw new CodexSecurityError(
-            "The configured Codex client does not support resuming sessions.",
-          );
-        }
-        thread = parentCodex.resumeThread(resumeThreadId, threadOptions);
         tracker.start(resumeThreadId);
         if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
         await tracker.refresh().catch(reportTrackingError);
         checkOpen();
-      } else {
-        thread = parentCodex.startThread(threadOptions);
       }
       const serializedPaths =
         normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
@@ -2933,11 +2947,6 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
-      const turnOptions: TurnOptions = {
-        signal,
-        cyberAccessProgram: options.cyberAccessProgram,
-      };
-      const postScanPrompt = options.postScanPrompt;
       let scanThreadId = thread.id;
       if (postScanPrompt?.trim()) {
         runPostScan = () => {
@@ -2945,13 +2954,10 @@ export class CodexSecurity {
             (parentCodex !== codex || directDeepScan) &&
             scanThreadId !== null
           ) {
-            if (!codex.resumeThread)
-              throw new CodexSecurityError(
-                "The configured Codex client does not support resuming sessions.",
-              );
-            return codex
-              .resumeThread(scanThreadId, threadOptions)
-              .runStreamed(postScanPrompt, turnOptions);
+            return openThread(codex, scanThreadId).runStreamed(
+              postScanPrompt,
+              turnOptions,
+            );
           }
           const followUp =
             parentCodex === codex ? thread : codex.startThread(threadOptions);

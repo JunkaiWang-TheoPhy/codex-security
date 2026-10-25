@@ -359,7 +359,11 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
     await read({
       features: { "code_mode.direct_only_tool_namespaces": ["first"] },
       "features.code_mode.direct_only_tool_namespaces": ["last"],
+      model_auto_compact_token_limit: 2 ** 53,
     }),
-  ).toMatchObject(expected("last"));
+  ).toMatchObject({
+    ...expected("last"),
+    model_auto_compact_token_limit: 2 ** 53,
+  });
   await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow();
 });
