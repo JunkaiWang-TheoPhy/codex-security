@@ -158,6 +158,8 @@ def test_replaced_attempts_retain_observed_sessions_and_accepted_result(tmp_path
 
 
 def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path) -> None:
+    import hashlib
+
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
@@ -187,7 +189,10 @@ def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path
     Path(reducer["resultManifestPath"]).unlink()
     assert [item["discoveryWorkerId"] for item in committed["dedupInputs"]] == inputs
     assert all(item["attempt"] == 1 for item in committed["dedupInputs"])
-    assert all("/checkpoints/" in item["resultManifestPath"] for item in committed["dedupInputs"])
+    for item in committed["dedupInputs"]:
+        snapshot = Path(item["resultManifestPath"])
+        assert snapshot.name == f"accepted-{item['resultManifestSha256']}.json"
+        assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == item["resultManifestSha256"]
     later = dispatch_discovery_worker(
         state,
         home,

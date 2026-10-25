@@ -443,6 +443,8 @@ def _worker_checkpoint_heads(
     workers: list[Any],
     scan_id: str,
     accepted_source_digests: dict[str, str] | None = None,
+    *,
+    unreadable_warnings: list[str] | None = None,
 ) -> dict[str, str]:
     heads: dict[str, str] = {}
     for worker in workers:
@@ -460,7 +462,15 @@ def _worker_checkpoint_heads(
         ]
         for directory in directories:
             relative = directory.as_posix()
-            head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
+            try:
+                head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
+            except (ContractError, OSError) as exc:
+                if unreadable_warnings is None or worker["status"] == "succeeded":
+                    raise
+                unreadable_warnings.append(
+                    f"Preserved unreadable checkpoint {relative}/checkpoint-head.json: {exc}"
+                )
+                continue
             if head is not None:
                 heads[relative] = head
     return heads

@@ -8,6 +8,7 @@ from argparse import Namespace
 
 import pytest
 from test_accepted_publication_references import accept_reducer
+from test_budget_selection_publication import assert_budget_seal_receipt
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes
 from test_workbench_db import BUDGET_COST
@@ -240,7 +241,7 @@ def test_budget_sibling_selection_replays_in_a_fresh_process(
             "SELECT finalization_input_json FROM deep_scan_runs"
         ).fetchone()[0]
         if selection is not None:
-            assert replayed_selection == selection
+            assert_budget_seal_receipt(scan, selection, replayed_selection)
         assert (
             json.loads(replayed_selection)["resultSha256"] == hashlib.sha256(original).hexdigest()
         )
