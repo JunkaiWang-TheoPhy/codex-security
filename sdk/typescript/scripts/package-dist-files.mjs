@@ -98,6 +98,7 @@ const distModules = [
   "scan-inputs",
   "scan-logs",
   "scan-measurement",
+  "scan-usage-display",
   "security-policy",
   "security-policy-cli",
   "security-policy-diff",

@@ -383,9 +383,13 @@ Deep discovery retains its enforced deadline, with a default and maximum of
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onMeasurement` for observed token/cost
-subtotals, coverage, and timestamps. `onCost` and `onUsage` retain their
-complete-only behavior. See [telemetry and measurement](docs/telemetry.md) for
-operation receipts, collection controls, replay, and reporting definitions.
+subtotals, coverage, and collection time. `onCost` and `onUsage` report complete
+totals. `onUsageObservation` reports the native token measurement time
+(`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
+Each reading has its own `observedAt` timestamp and percentages used in each
+reported window. An allowance can arrive before any token measurement. See
+[telemetry and measurement](docs/telemetry.md) for operation receipts, collection
+controls, replay, and reporting definitions.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,

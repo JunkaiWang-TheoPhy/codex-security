@@ -9,6 +9,7 @@ import {
   scanAuthentication,
   selectedScanEnvironment,
   type CodexSecuritySurface,
+  type ScanAuthentication,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -27,6 +28,7 @@ import type {
   ScanCost,
   ScanSessionEvent,
   ScanUsageMeasurement,
+  ScanUsageObservation,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
@@ -90,12 +92,14 @@ export interface ComponentReceipt {
 }
 
 type ComponentScanUpdate =
+  | { type: "authentication"; value: ScanAuthentication }
   | { type: "progress"; value: ScanProgress }
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
   | { type: "usage"; value: Readonly<ScanTokenUsage> }
   | { type: "measurement"; value: Readonly<ScanUsageMeasurement> }
+  | { type: "usage-observation"; value: Readonly<ScanUsageObservation> }
   | { type: "workers"; value: ScanWorkerStatus }
   | { type: "warning"; value: string };
 
@@ -229,11 +233,15 @@ export async function runComponentScans(
             options.onScanEvent === undefined
               ? {}
               : {
+                  onAuthentication: (value) =>
+                    emit({ type: "authentication", value }),
                   onProgress: (value) => emit({ type: "progress", value }),
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
                   onUsage: (value) => emit({ type: "usage", value }),
+                  onUsageObservation: (value) =>
+                    emit({ type: "usage-observation", value }),
                   onWorkerStatus: (value) => emit({ type: "workers", value }),
                   onWarning: (value) => emit({ type: "warning", value }),
                 };

@@ -89,10 +89,13 @@ export type {
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type {
+  ScanAccountRateLimit,
+  ScanAccountRateLimitWindow,
   ScanCost,
   ScanSessionEvent,
-  ScanWorkerEvent,
   ScanUsageMeasurement,
+  ScanUsageObservation,
+  ScanWorkerEvent,
 } from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";

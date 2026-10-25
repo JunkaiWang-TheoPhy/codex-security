@@ -98,6 +98,7 @@ import {
   type ScanCost,
   type ScanUsageMeasurement,
   type ScanSessionEvent,
+  type ScanUsageObservation,
   type ScanWorkerEvent,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
@@ -352,6 +353,8 @@ export interface ScanOptions extends ScanSettings {
   telemetryContext?: { operationId: string; parentAttemptId?: string };
   /** Observed tokens, including models without a price estimate. */
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
+  /** The last reportable token total's measurement time and latest account limits from this scan's sessions. */
+  onUsageObservation?: (observation: ScanUsageObservation) => void;
   onBudgetApproaching?: (
     budget: ScanBudget,
   ) => number | undefined | Promise<number | undefined>;
@@ -606,6 +609,7 @@ type ScanObserverName =
   | "onUsage"
   | "onMeasurement"
   | "onTelemetry"
+  | "onUsageObservation"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
@@ -2672,6 +2676,10 @@ export class CodexSecurity {
           options.onUsage === undefined
             ? undefined
             : (usage) => notifyObserver(options, "onUsage")(usage),
+        onUsageObservation:
+          options.onUsageObservation === undefined
+            ? undefined
+            : notifyObserver(options, "onUsageObservation"),
         onActivity:
           options.onActivity === undefined
             ? undefined

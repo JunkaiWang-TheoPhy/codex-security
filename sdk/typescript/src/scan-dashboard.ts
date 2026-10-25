@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
 import { isRecord } from "./record.js";
-import type { ScanBudget } from "./api.js";
+import type { ScanAuthMode, ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
   ComponentReceipt,
@@ -17,6 +17,7 @@ import {
   type ScanCost,
   type ScanSessionEvent,
   type ScanUsageMeasurement,
+  type ScanUsageObservation,
 } from "./cost.js";
 import {
   estimateScanCost,
@@ -27,6 +28,13 @@ import {
   type ScanTokenUsage,
 } from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
+import {
+  ACCOUNT_LIMITS_UNAVAILABLE,
+  USAGE_TIME_UNAVAILABLE,
+  formatAccountLimits,
+  formatUsageFreshness,
+  isChatGptAuthentication,
+} from "./scan-usage-display.js";
 import type { ScanMode } from "./targets.js";
 import {
   scanPhaseLabel,
@@ -43,7 +51,7 @@ const DISABLE_ALTERNATE_SCROLL = "\u001B[?1007l";
 const CURSOR_HOME = "\u001B[H";
 const ERASE_LINE = "\u001B[2K";
 const MAX_HISTORY_ENTRIES = 2_000;
-const FIXED_SCREEN_ROWS = 8;
+const FIXED_SCREEN_ROWS = 4; // Title, two dividers and elapsed time.
 
 interface DashboardStream {
   write(chunk: string, callback?: (error?: Error | null) => void): unknown;
@@ -158,6 +166,9 @@ export class ScanDashboard {
   #cost: Readonly<ScanCost> | null = null;
   #tokens: string | null = null;
   #usageCoverage: ScanUsageMeasurement["coverage"] | null = null;
+  #usageFreshness: string | null = null;
+  #accountLimits: string | null = null;
+  #chatGptAuth = false;
   #budget: {
     request: ScanBudget;
     input: string;
@@ -499,7 +510,10 @@ export class ScanDashboard {
     this.#refresh();
   }
 
-  public recordComponentEvent(event: ComponentScanEvent): void {
+  public recordComponentEvent(
+    event: ComponentScanEvent,
+    requestedAuth?: ScanAuthMode,
+  ): void {
     const dashboard = this.#components.find(
       ({ receipt }) => receipt.id === event.componentId,
     )?.dashboard;
@@ -512,6 +526,11 @@ export class ScanDashboard {
       case "activity":
         dashboard.record(event.value);
         break;
+      case "authentication":
+        dashboard.setChatGptAuth(
+          isChatGptAuthentication(event.value, requestedAuth),
+        );
+        break;
       case "session":
         dashboard.recordDetails(event.value);
         break;
@@ -523,6 +542,9 @@ export class ScanDashboard {
         break;
       case "measurement":
         dashboard.setMeasurement(event.value);
+        break;
+      case "usage-observation":
+        dashboard.setUsageObservation(event.value);
         break;
       case "workers":
         if (event.value.kind === "dispatch")
@@ -581,6 +603,19 @@ export class ScanDashboard {
   public setUsage(usage: Readonly<ScanTokenUsage>): void {
     this.#usageCoverage = "complete";
     this.#tokens = formatTokenUsage(usage);
+    this.#refresh();
+  }
+
+  public setUsageObservation(
+    observation: Readonly<ScanUsageObservation>,
+  ): void {
+    this.#usageFreshness = formatUsageFreshness(observation);
+    this.#accountLimits = formatAccountLimits(observation);
+    this.#refresh();
+  }
+
+  public setChatGptAuth(enabled: boolean): void {
+    this.#chatGptAuth = enabled;
     this.#refresh();
   }
 
@@ -687,9 +722,12 @@ export class ScanDashboard {
   }
 
   public scroll(lines: number): void {
+    const { footer, details } = this.#usageLayout();
     const maximum = Math.max(
       0,
-      this.#activityLines(this.#width()).length - this.#activityRows(),
+      this.#activityLines(this.#width()).length +
+        details.length -
+        this.#activityRows(footer.length),
     );
     this.#scrollOffset = Math.max(
       0,
@@ -724,7 +762,9 @@ export class ScanDashboard {
     const verification = this.#options.presentation === "verification";
     const findingProgress = publication || verification;
     const width = this.#width();
-    const activityRows = this.#activityRows();
+    const { footer, details } = this.#usageLayout();
+    const availableRows = this.#availableActivityRows(footer.length);
+    const activityRows = Math.max(1, availableRows);
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     const elapsed = Math.max(
       0,
@@ -743,7 +783,8 @@ export class ScanDashboard {
           : count.completed > 0
             ? `${formatCount(count.completed)} / ${formatCount(count.total)} reviewed`
             : `${formatCount(count.total)} in scope`;
-    const history = this.#activityLines(width);
+    let history = this.#activityLines(width);
+    if (details.length > 0) history = history.concat(details);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
     const first = Math.max(
@@ -776,9 +817,9 @@ export class ScanDashboard {
 
     return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
-      divider,
+      ...(availableRows > 0 ? [divider] : []),
       ...activity,
-      divider,
+      ...(availableRows >= 0 ? [divider] : []),
       ...(findingProgress
         ? [
             `  STAGE     ${this.#stage}`,
@@ -791,8 +832,7 @@ export class ScanDashboard {
                   `  STAGE    ${this.#stage}`,
                   `  ${count?.label === "reviews" ? "REVIEWS" : "FILES  "}  ${files}`,
                 ]),
-            ...this.#tokenLines(),
-            ...this.#costLines(),
+            ...footer,
             ...(this.#budget === null
               ? []
               : [
@@ -1000,31 +1040,67 @@ export class ScanDashboard {
     return Math.max(1, Math.min(this.#stream.columns ?? 88, 160));
   }
 
-  #activityRows(): number {
-    return Math.max(
-      1,
+  #activityRows(usageRows = this.#usageLayout().footer.length): number {
+    return Math.max(1, this.#availableActivityRows(usageRows));
+  }
+
+  #availableActivityRows(usageRows: number): number {
+    const findingProgress =
+      this.#options.presentation === "publication" ||
+      this.#options.presentation === "verification";
+    const stageRows = this.#options.mode === "deep" && !findingProgress ? 0 : 2;
+    return (
       (this.#stream.rows ?? 24) -
-        FIXED_SCREEN_ROWS -
-        (this.#budget === null ? 0 : 2) -
-        (this.#options.presentation === "publication" ||
-        this.#options.presentation === "verification"
-          ? 0
-          : this.#tokenLines().length - 1 + this.#costLines().length - 1) +
-        (this.#options.presentation === "publication" ||
-        this.#options.presentation === "verification"
-          ? 2
-          : this.#options.mode === "deep"
-            ? 2
-            : 0),
+      FIXED_SCREEN_ROWS -
+      stageRows -
+      usageRows -
+      (this.#budget === null ? 0 : 2)
     );
   }
 
-  #tokenLines(): string[] {
+  #usageLayout(): { footer: string[]; details: DashboardActivityLine[] } {
+    if (
+      this.#options.presentation === "publication" ||
+      this.#options.presentation === "verification"
+    ) {
+      return { footer: [], details: [] };
+    }
+    const width = this.#width();
     const tokens =
       this.#usageCoverage === "unavailable"
         ? "usage unavailable"
         : `${this.#tokens ?? "waiting for usage"}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
-    return wrapActivity("  TOKENS   ", tokens, this.#width());
+    const limits =
+      this.#accountLimits ??
+      (this.#chatGptAuth ? ACCOUNT_LIMITS_UNAVAILABLE : null);
+    const lines = [
+      ...wrapActivity("  TOKENS   ", tokens, width),
+      ...this.#costLines(),
+      ...(this.#tokens === null
+        ? []
+        : wrapActivity(
+            "  USAGE    ",
+            this.#usageFreshness ?? USAGE_TIME_UNAVAILABLE,
+            width,
+          )),
+      ...(limits === null ? [] : wrapActivity("  LIMITS   ", limits, width)),
+    ];
+    // Both dividers can give way, but one activity row must remain.
+    const capacity = Math.max(0, this.#availableActivityRows(0) + 1);
+    if (lines.length <= capacity) return { footer: lines, details: [] };
+    if (this.#view === "details") {
+      return {
+        footer: [],
+        details: lines.map((text) => ({ text, kind: "path" })),
+      };
+    }
+    const footer = lines.slice(0, capacity);
+    if (footer.length > 0)
+      footer[footer.length - 1] =
+        this.#options.input?.isTTY === true
+          ? "  … Full readings in details"
+          : "  … Resize for full readings";
+    return { footer, details: [] };
   }
 
   #costLines(): string[] {
