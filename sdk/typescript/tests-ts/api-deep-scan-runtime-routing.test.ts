@@ -88,7 +88,14 @@ test("a colliding MCP server leaves only the original coordinator's namespace di
   expect(overrides(false)).toBeUndefined();
   expect(overrides(true)).toBeUndefined();
   expect(overrides(undefined, [prefixed])).toBeUndefined();
-  expect(overrides(undefined, [`${prefixed}_9721dc6aa9d2`])).toBeUndefined();
+  const guardedPeer = `${prefixed}_9721dc6aa9d2`;
+  expect(overrides(undefined, [guardedPeer])).toBeUndefined();
+  expect(
+    deepScanParentToolOverrides(
+      { features: { code_mode: { excluded_tool_namespaces: [guardedPeer] } } },
+      servers,
+    ),
+  ).toEqual([]);
   expect(
     overrides(undefined, [], { ...servers, [owner]: { enabled: false } }),
   ).toBeUndefined();

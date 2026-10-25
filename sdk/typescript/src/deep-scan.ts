@@ -182,17 +182,18 @@ export function deepScanParentToolOverrides(
         `mcp_servers.${owner}.omit_tools_from=${inlineToml([...new Set([...surfaces, "code_mode", "deferred"])])}`,
       ];
     }
-    // Move only this raw server into a free namespace. Preserve an explicit
-    // naming policy and avoid making the other server inherit a direct slot.
+    const excluded = isRecord(mode) ? mode["excluded_tool_namespaces"] : null;
+    const routed = Array.isArray(excluded) ? [...direct, ...excluded] : direct;
+    // Moving the owner also renames its peers. Keep names that the caller
+    // explicitly routed or excluded from Code Mode.
     if (
       current === bare ||
       occupied.has(bare) ||
-      direct.includes(current) ||
-      // Moving the owner invalidates an explicitly routed, disambiguated peer.
-      direct.some(
+      routed.some(
         (name) =>
-          typeof name === "string" &&
-          /^mcp__codex_security_[0-9a-f]{12}$/u.test(name),
+          name === current ||
+          (typeof name === "string" &&
+            /^mcp__codex_security_[0-9a-f]{12}$/u.test(name)),
       ) ||
       (option != null && !enabled)
     )
