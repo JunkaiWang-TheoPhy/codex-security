@@ -976,6 +976,7 @@ The extraction root is not enforced.
         self.assertIn("remote", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    @pytest.mark.native_macos
     def test_export_entrypoint_rejects_overwriting_a_sealed_reserved_export(self) -> None:
         for artifact_path in (
             "exports/findings.csv",
@@ -1074,6 +1075,7 @@ The extraction root is not enforced.
                                 self.assertNotEqual(output.read_bytes(), contents)
         self.scan_dir = root
 
+    @pytest.mark.native_macos
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
         alias = self.scan_dir.parent / self.scan_dir.name.swapcase()
