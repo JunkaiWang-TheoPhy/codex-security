@@ -166,12 +166,34 @@ export function deepScanParentToolOverrides(
   );
   const current = namespace(owner);
   if (occupied.has(current)) {
+    // A configured transport can select the raw server without renaming peers.
+    // Adding this leaf to a plugin-only registration would shadow its transport.
+    if (
+      isRecord(configured) &&
+      Object.hasOwn(configured, owner) &&
+      (typeof ownerConfig["command"] === "string" ||
+        typeof ownerConfig["url"] === "string")
+    ) {
+      if (omitted != null && !Array.isArray(omitted)) return [];
+      const surfaces = omitted ?? [];
+      if (surfaces.includes("code_mode") && surfaces.includes("deferred"))
+        return [];
+      return [
+        `mcp_servers.${owner}.omit_tools_from=${inlineToml([...new Set([...surfaces, "code_mode", "deferred"])])}`,
+      ];
+    }
     // Move only this raw server into a free namespace. Preserve an explicit
     // naming policy and avoid making the other server inherit a direct slot.
     if (
       current === bare ||
       occupied.has(bare) ||
       direct.includes(current) ||
+      // Moving the owner invalidates an explicitly routed, disambiguated peer.
+      direct.some(
+        (name) =>
+          typeof name === "string" &&
+          /^mcp__codex_security_[0-9a-f]{12}$/u.test(name),
+      ) ||
       (option != null && !enabled)
     )
       return [];

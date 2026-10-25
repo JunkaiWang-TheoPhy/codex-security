@@ -88,12 +88,53 @@ test("a colliding MCP server leaves only the original coordinator's namespace di
   expect(overrides(false)).toBeUndefined();
   expect(overrides(true)).toBeUndefined();
   expect(overrides(undefined, [prefixed])).toBeUndefined();
+  expect(overrides(undefined, [`${prefixed}_9721dc6aa9d2`])).toBeUndefined();
   expect(
     overrides(undefined, [], { ...servers, [owner]: { enabled: false } }),
   ).toBeUndefined();
   expect(
     overrides(selected(bare), [], { ...servers, [bare]: { enabled: true } }),
   ).toBeUndefined();
+});
+
+test("a configured owner stays direct across native tool filtering without changing a sibling's routing", () => {
+  const owner = "codex-security";
+  const peer = "codex_security";
+  const guarded = "mcp__codex_security_9721dc6aa9d2";
+  const overrides = (transport: JsonObject, selected: string[]) =>
+    parse(
+      deepScanParentToolOverrides(
+        {
+          mcp_servers: {
+            [owner]: transport,
+            [peer]: { command: "peer", enabled_tools: selected },
+          },
+          features: {
+            non_prefixed_mcp_tool_names: false,
+            code_mode: { direct_only_tool_namespaces: [guarded] },
+          },
+        },
+        {},
+      ).join("\n"),
+    );
+  const transports: JsonObject[] = [
+    { command: "coordinator", omit_tools_from: ["code_mode"] },
+    { url: "https://coordinator.example/mcp" },
+  ];
+  for (const transport of transports) {
+    for (const selected of [["peer_ping"], ["absent"]]) {
+      expect(overrides(transport, selected)).toEqual({
+        mcp_servers: {
+          [owner]: { omit_tools_from: ["code_mode", "deferred"] },
+        },
+      });
+    }
+  }
+  expect(
+    overrides({ command: "coordinator", omit_tools_from: ["direct"] }, [
+      "absent",
+    ]),
+  ).toEqual({});
 });
 
 test("native MCP registrations take precedence over the selected plugin's names and opt-outs", () => {
