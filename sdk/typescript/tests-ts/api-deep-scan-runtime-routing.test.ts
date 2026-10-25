@@ -426,15 +426,21 @@ test.each([
       `${scenario.route} route reached`,
     );
     expect(started).toHaveLength(1);
-    const overrides = started[0]!.configOverrides?.filter((value) =>
-      value.startsWith("features.code_mode.direct_only_tool_namespaces="),
+    const rawRule =
+      'mcp_servers.codex-security.omit_tools_from=["code_mode","deferred"]';
+    const overrides = started[0]!.configOverrides?.filter(
+      (value) =>
+        value === rawRule ||
+        value.startsWith("features.code_mode.direct_only_tool_namespaces="),
     );
     expect(overrides).toEqual(
       scenario.route === "parent" &&
         typeof codeMode !== "string" &&
         !scenario.directOmitted
         ? [
-            'features.code_mode.direct_only_tool_namespaces=["existing_tools","mcp__codex_security","codex_security"]',
+            scenario.configuredOmit !== undefined
+              ? rawRule
+              : 'features.code_mode.direct_only_tool_namespaces=["existing_tools","mcp__codex_security","codex_security"]',
           ]
         : [],
     );
@@ -457,9 +463,12 @@ test("older app-servers retain supplied routing without starting in the caller p
     join(home, "config.toml"),
     '[features.code_mode]\ndirect_only_tool_namespaces = ["inherited_tools"]\n',
   );
-  const read = (config: CodexOptions["config"]) =>
+  const read = (
+    config: CodexOptions["config"],
+    configOverrides: string[] = [],
+  ) =>
     readDeepScanParentConfig({
-      codexOptions: { config, env: { CODEX_HOME: home } },
+      codexOptions: { config, configOverrides, env: { CODEX_HOME: home } },
       preflightCommand: resolveCodexCommand({}),
       scanDir,
       signal: new AbortController().signal,
@@ -479,6 +488,17 @@ test("older app-servers retain supplied routing without starting in the caller p
   ).toEqual(expected("last"));
   expect(await read({ "features.code_mode": "invalid" })).toEqual({
     features: { code_mode: "invalid" },
+  });
+  const owner = { command: "fixture" };
+  const explicit = { mcp_servers: { "codex-security": owner } };
+  expect(await read(explicit)).toBeUndefined();
+  expect(
+    await read(explicit, [
+      'mcp_servers.codex-security.omit_tools_from=["direct"]',
+      "mcp_servers.codex-security.omit_tools_from=[]",
+    ]),
+  ).toEqual({
+    mcp_servers: { "codex-security": { ...owner, omit_tools_from: [] } },
   });
 });
 

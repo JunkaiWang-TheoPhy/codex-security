@@ -9,6 +9,7 @@ import { inlineToml, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
   executablePathForSpawn,
+  PLUGIN_NAME,
   runCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
@@ -53,7 +54,12 @@ function suppliedParentRouting(
       routing.set(key, override);
   }
   try {
-    return parse([...routing.values()].join("\n")) as JsonObject;
+    const config = parse([...routing.values()].join("\n")) as JsonObject;
+    const servers = config["mcp_servers"];
+    const owner = isRecord(servers) ? servers[PLUGIN_NAME] : undefined;
+    // Even a supplied transport can inherit a machine-level direct opt-out.
+    if (isRecord(owner) && !Array.isArray(owner["omit_tools_from"])) return;
+    return config;
   } catch {
     // Leave overlapping or malformed TOML for exec's own parser.
     return undefined;
@@ -127,7 +133,7 @@ export function deepScanParentToolOverrides(
     (isRecord(mode) ? mode["direct_only_tool_namespaces"] : undefined) ?? [];
   if (!Array.isArray(direct)) return [];
 
-  const owner = "codex-security";
+  const owner = PLUGIN_NAME;
   const bare = "codex_security";
   const prefixed = "mcp__codex_security";
   let required = [prefixed, bare];
@@ -142,6 +148,22 @@ export function deepScanParentToolOverrides(
   if (!isRecord(ownerConfig) || ownerConfig["enabled"] === false) return [];
   const omitted = ownerConfig["omit_tools_from"];
   if (Array.isArray(omitted) && omitted.includes("direct")) return [];
+  // Select an explicitly configured transport by raw ID, preserving the
+  // caller's namespace lists. A plugin-only registration owns its transport.
+  if (
+    isRecord(configured) &&
+    Object.hasOwn(configured, owner) &&
+    (typeof ownerConfig["command"] === "string" ||
+      typeof ownerConfig["url"] === "string")
+  ) {
+    if (omitted != null && !Array.isArray(omitted)) return [];
+    const surfaces = omitted ?? [];
+    if (surfaces.includes("code_mode") && surfaces.includes("deferred"))
+      return [];
+    return [
+      `mcp_servers.${owner}.omit_tools_from=${inlineToml([...new Set([...surfaces, "code_mode", "deferred"])])}`,
+    ];
+  }
   const option = features["non_prefixed_mcp_tool_names"];
   const enabled =
     option === true || (isRecord(option) && option["enabled"] === true);
@@ -166,22 +188,6 @@ export function deepScanParentToolOverrides(
   );
   const current = namespace(owner);
   if (occupied.has(current)) {
-    // A configured transport can select the raw server without renaming peers.
-    // Adding this leaf to a plugin-only registration would shadow its transport.
-    if (
-      isRecord(configured) &&
-      Object.hasOwn(configured, owner) &&
-      (typeof ownerConfig["command"] === "string" ||
-        typeof ownerConfig["url"] === "string")
-    ) {
-      if (omitted != null && !Array.isArray(omitted)) return [];
-      const surfaces = omitted ?? [];
-      if (surfaces.includes("code_mode") && surfaces.includes("deferred"))
-        return [];
-      return [
-        `mcp_servers.${owner}.omit_tools_from=${inlineToml([...new Set([...surfaces, "code_mode", "deferred"])])}`,
-      ];
-    }
     const excluded = isRecord(mode) ? mode["excluded_tool_namespaces"] : null;
     const routed = Array.isArray(excluded) ? [...direct, ...excluded] : direct;
     // Moving the owner also renames its peers. Keep names that the caller
