@@ -33,16 +33,11 @@ export function importInvoice(store, user, document) {
       "An invoice needs a customer and a positive amount in cents.",
     );
   const policy = store.workspaces.get(user.workspaceId).importPolicy;
-  let review;
-  try {
-    review = reviewers.get(String(document.schemaVersion))(document, policy);
-  } catch {
-    review = {
-      approved: true,
-      warning: "Review unavailable; accepted for processing.",
-    };
-  }
-  if (!review.approved)
+  const reviewer = reviewers.get(document.schemaVersion);
+  if (!reviewer)
+    throw new HttpError(422, "Unsupported invoice schema version.");
+  const review = reviewer(document, policy);
+  if (review.approved !== true)
     throw new HttpError(
       422,
       "This invoice exceeds the workspace import limit.",

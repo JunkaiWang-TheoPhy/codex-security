@@ -155,20 +155,25 @@ scenario("ID-004", async (t) => {
 scenario("ID-005", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
+  const invoiceCount = (await alex("/api/invoices")).body.length;
   const document = invoiceDocument("north", 150_000);
   assert.equal(
     (await alex("/api/imports", { method: "POST", body: document })).status,
     422,
   );
   document.schemaVersion = "2";
-  const imported = await alex("/api/imports", {
+  const rejected = await alex("/api/imports", {
     method: "POST",
     body: document,
   });
-  assert.equal(imported.status, 201);
-  assert.equal(imported.body.invoice.amountCents, 150_000);
-  assert.equal(imported.body.review.approved, true);
-  assert.ok(imported.body.review.warning);
+  assert.equal(rejected.status, 422);
+  assert.equal(rejected.body.error, "Unsupported invoice schema version.");
+  document.schemaVersion = 1;
+  assert.equal(
+    (await alex("/api/imports", { method: "POST", body: document })).status,
+    422,
+  );
+  assert.equal((await alex("/api/invoices")).body.length, invoiceCount);
 });
 
 scenario("ID-006", async (t) => {
