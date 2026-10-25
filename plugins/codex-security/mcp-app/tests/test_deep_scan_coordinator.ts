@@ -1327,10 +1327,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
 async function testIncompleteEvidenceRetriesBeforePublication(
   kind: "discovery" | "dedup",
 ) {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 1,
-    maxDiscoveryRuns: 1,
-  });
+  const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
   const run = executor.run.bind(executor);
   let rejected = false;
@@ -1348,7 +1345,6 @@ async function testIncompleteEvidenceRetriesBeforePublication(
   const completedDrafts: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     retryDelaysMs: [1],
-    clock: immediateClock,
     onComplete: async (draft) => void completedDrafts.push(draft),
   });
   assert.equal(terminal?.status, "succeeded", terminal?.error);
@@ -1566,6 +1562,12 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupContinuationPrompts[1] ?? "",
     /paginate all assigned findings and the previous aggregate/,
   );
+  for (const prompt of [
+    await readFile(executor.dedupPromptPaths[0], "utf8"),
+    executor.dedupContinuationPrompts[1] ?? "",
+  ]) {
+    assert.match(prompt, /without code mode[^\n]*\bdirectly\b/i);
+  }
   assert.equal(new Set(executor.dedupPromptPaths).size, 1);
   await assert.rejects(
     realpath(

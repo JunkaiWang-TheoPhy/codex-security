@@ -53,7 +53,14 @@ implementation or eval changes with product code also selects full qualification
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires
 successful CI for the exact main commit before publication. Title and body edits
-neither cancel source runs nor satisfy their required check names.
+leave source CI running. On an edit, CI checks the source result for the same
+pull request, base, head and test merge. It waits for a running source check and
+reports a verified result, including static checks, through the required checks.
+Only the original source run and an uninterrupted sequence of successful edits
+can carry a green result. A cancelled or retried run, a changed target, missing
+evidence or conflicting results require full qualification. Use **Re-run all
+jobs** to retry an edit. A partial retry cannot refresh a previous attempt's
+required checks.
 
 ## Required gate
 
@@ -63,14 +70,16 @@ job can be skipped. Static checks are always required. The separate `test-qualit
 workflow runs weekly property and mutation tests. Dispatch it to compare full SDK
 shard layouts.
 
-The existing OS-named check contexts temporarily forward the `ci` result so
-repository branch rules continue to work during migration. To finish migration:
+One compatibility matrix forwards the `ci` result to the three OS-named Node 22
+checks required by the current `main` ruleset. Migrate the required checks in
+this order.
 
 1. Merge the workflow change and verify that `ci` is reported for source and
    documentation pull requests, including a failing selected-check example.
 2. Change the repository's required status checks to `ci` and `Validate PR Title`,
    preserving their GitHub Actions integration and all unrelated protection rules.
-3. Remove the compatibility jobs `required-test` and `windows` in a follow-up.
+3. Remove the compatibility matrix `required-test` and its three OS check
+   names from source verification in a follow-up.
 
 Do not remove the old contexts before changing the rules. The workflow change
 itself does not change repository protection settings.
@@ -80,7 +89,7 @@ itself does not change repository protection settings.
 The workflow-selection and gate tests run without installing dependencies:
 
 ```bash
-node --test .github/scripts/test-ci-selection.mjs
+node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
 ```
 
 The [SDK testing guide](../sdk/typescript/TESTING.md) describes local behavioral
@@ -97,3 +106,15 @@ When measuring CI changes, separate time to required-green from summed job
 execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
 record failures as well as successful runs.
+
+When a batch of merges can wait, check **Restore verified native payload** in
+an active `node-ci` push or scheduled run on `main`. On a miss, another push
+with the same inputs can start all eight platform builds again. Before merging
+a PR that leaves those inputs unchanged, look for the exact key in
+`gh cache list --ref refs/heads/main --key KEY`. Once it is there, it does not
+matter which `main` run saved it. Different inputs can build in parallel.
+
+The key uses the UTC week and the paths listed in **Identify native build and
+proof inputs**. Compare the next change against current `main`: its PR run may
+have tested an older base or skipped native preparation entirely. PR runs
+cannot populate this cache for `main`.
