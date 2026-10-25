@@ -22,6 +22,7 @@ from test_workbench_standard_deep_results import (
 )
 from workbench_test_support import (
     empty_target_scan,
+    fail_deep_scan,
     get_scan,
     load_script,
     preserve_scan_results,
@@ -29,6 +30,7 @@ from workbench_test_support import (
     run_workbench,
     saved_binding,
     saved_discovery_worker,
+    saved_draft,
     write_checkpoint,
     write_completed_contract,
 )
@@ -161,11 +163,18 @@ def test_legacy_stopped_parent_yields_to_current_worker_resolution(
 
     assert recovered["findingCount"] == (0 if same_worker else 1)
     coverage = json.loads((scan_dir / "coverage.json").read_text())
+    candidate_digest = hashlib.sha256(b"candidate-one").hexdigest()
     resolution = next(
-        item for item in coverage["surfaces"] if item.get("candidateId") == "candidate-one"
+        item
+        for item in coverage["surfaces"]
+        if item.get("candidateId") == f"{worker_id}-attempt-1-candidate-{candidate_digest}"
     )
     assert resolution["disposition"] == disposition
-    assert resolution["sourceWorkerId"] == worker_id
+    assert resolution["provenance"] == {
+        "workerId": worker_id,
+        "attempt": 1,
+        "candidateId": "candidate-one",
+    }
     assert len(resolution.get("previousFindings", [])) == (1 if same_worker else 0)
 
 
@@ -207,7 +216,7 @@ def test_stopped_recovery_resolves_reported_candidates_from_findings(
 
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
-    assert [item["candidateId"] for item in pending] == (
+    assert [item["provenance"]["candidateId"] for item in pending] == (
         ["candidate-one"] if pending_candidate_id == "candidate-one" else []
     )
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
@@ -317,8 +326,66 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
     expected_owners = {workers[1][0]} if resolve_first else {worker[0] for worker in workers}
-    assert {item["sourceWorkerId"] for item in pending} == expected_owners
+    assert {item["provenance"]["workerId"] for item in pending} == expected_owners
+    assert {item["provenance"]["candidateId"] for item in pending} == {"candidate-one"}
     assert stopped["progress"]["candidates"]["unresolved"] == len(expected_owners)
+
+
+@pytest.mark.parametrize(
+    "author, claimed_attempt, expected", [("worker", 1, 1), ("parent", 99, 1), ("parent", 1, 0)]
+)
+def test_stopped_candidate_counts_use_bound_worker_provenance(
+    tmp_path: Path, workbench_api, author: str, claimed_attempt: int, expected: int
+) -> None:
+    module = workbench_api["saved_results"]
+    scan_id = "bound-candidate"
+    accepted_root = tmp_path / "artifacts" / "accepted"
+    accepted_root.mkdir(parents=True)
+    pending = {"id": "gap", "candidateId": "shared", "reason": "Trace the caller."}
+    rejection = {
+        "id": "decision",
+        "candidateId": "shared",
+        "label": "Review",
+        "disposition": "rejected",
+        "receiptRefs": [],
+    }
+    claim = {"workerId": "accepted", "attempt": claimed_attempt, "candidateId": "shared"}
+    initial = saved_draft(
+        scan_id,
+        complete=True,
+        **({"surfaces": [rejection]} if author == "worker" else {"deferred": [pending]}),
+    )
+    path = accepted_root / "result.json"
+    path.write_text(json.dumps(initial))
+    workers = [
+        {
+            **saved_discovery_worker(accepted_root, "accepted"),
+            "status": "succeeded",
+            "result_manifest_path": str(path),
+        }
+    ]
+    if author == "worker":
+        raw_root = tmp_path / "artifacts" / "unfinished"
+        workers.append(saved_discovery_worker(raw_root, "unfinished"))
+        next_draft = saved_draft(scan_id, deferred=[{**pending, "provenance": claim}])
+    else:
+        raw_root = tmp_path
+        next_draft = saved_draft(scan_id, surfaces=[{**rejection, "provenance": claim}])
+    checkpoint = write_checkpoint(raw_root / "checkpoints", next_draft)
+    original = checkpoint.read_bytes()
+    documents = module.merge_saved_results(
+        tmp_path,
+        scan_id,
+        saved_binding("deep_repository"),
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+    )
+    assert documents is not None
+    unfinished = module.unresolved_candidates(documents[2], documents[1])
+    assert [row["reason"] for row in unfinished] == [pending["reason"]] * expected
+    assert checkpoint.read_bytes() == original
 
 
 @pytest.mark.parametrize("owner_field", ["workerId", "sourceWorkerId"])
@@ -427,7 +494,8 @@ def test_recovery_preserves_bound_worker_owner_over_imported_metadata(
         coverage = json.loads((scan_dir / "coverage.json").read_text())
         pending = [item for item in coverage["deferred"] if item.get("candidateId")]
         assert len(pending) == 1
-        assert pending[0]["sourceWorkerId"] == owner_b
+        assert pending[0]["provenance"]["workerId"] == owner_b
+        assert pending[0]["provenance"]["candidateId"] == "shared-candidate"
         report = (scan_dir / "report.md").read_text()
         assert "| Unresolved candidates | 1 |" in report
         assert f"| shared-candidate | {owner_b} |" in report
@@ -948,8 +1016,8 @@ def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
             "receiptRefs": refs,
         }
     ]
-    output = tmp_path / "worker"
-    output.mkdir()
+    output = tmp_path / "artifacts" / "worker"
+    output.mkdir(parents=True)
     if receipt == "valid":
         (output / "artifacts").mkdir()
         (output / "artifacts/review.txt").write_text("Synthetic review receipt.\n")
@@ -1164,8 +1232,8 @@ def test_worker_receipt_recovery_preserves_optional_semantic_ids(
     ]
     if surface_id:
         terminal["coverage"]["surfaces"][0]["id"] = "decision-surface"
-    output = tmp_path / "worker"
-    output.mkdir()
+    output = tmp_path / "artifacts" / "worker"
+    output.mkdir(parents=True)
     if receipt == "valid":
         (output / "artifacts").mkdir()
         (output / "artifacts/review.txt").write_text("Synthetic verified receipt.\n")
@@ -1222,8 +1290,8 @@ def test_worker_receipt_recovery_keeps_unrelated_generic_closures(
             "receiptRefs": ["artifacts/review.txt"],
         }
     ]
-    output = tmp_path / "worker"
-    output.mkdir()
+    output = tmp_path / "artifacts" / "worker"
+    output.mkdir(parents=True)
     older = write_checkpoint(output / "checkpoints", pending)
     os.utime(older, ns=(100, 100))
     selected = write_checkpoint(output / "checkpoints", terminal)
@@ -1327,7 +1395,9 @@ def test_worker_receipt_recovery_retains_complete_evidence_archives(
 
 
 @pytest.mark.parametrize("archived", [False, True])
-@pytest.mark.parametrize("receipt", ["binary", "empty", "missing", "partial"])
+@pytest.mark.parametrize(
+    "receipt", ["binary", "empty", "missing", "partial", "unverified-exclusion"]
+)
 def test_stopped_worker_receipts_survive_parent_publication_and_replay(
     tmp_path: Path, archived: bool, receipt: str
 ) -> None:
@@ -1350,26 +1420,35 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
     contents = b"" if receipt == "empty" else bytes([0, 255, 128, 10, 65])
     ref = "artifacts/review.bin"
     (output / "artifacts").mkdir()
-    if receipt != "missing":
+    missing = receipt in {"missing", "unverified-exclusion"}
+    if not missing:
         (output / ref).write_bytes(contents)
     # The same name at the parent must not become the worker's proof.
-    if receipt == "missing":
+    if missing:
         (scan_dir / ref).write_bytes(b"Unrelated parent receipt")
     draft["complete"] = True
+    field = "explicitExclusions" if receipt == "unverified-exclusion" else "surfaces"
+    decision = {
+        "id": "decision",
+        "candidateId": "candidate",
+        "disposition": "rejected",
+        "receiptRefs": [ref, "artifacts/missing.txt"] if receipt == "partial" else [ref],
+    }
+    if field == "explicitExclusions":
+        decision.update(
+            pattern="app.py",
+            reason="Reviewed candidate",
+            provenance={"scanReceiptRefs": [ref]},
+        )
+    else:
+        decision["label"] = "Reviewed candidate"
     draft["coverage"] = {
         "completeness": "complete",
-        "surfaces": [
-            {
-                "id": "decision",
-                "label": "Reviewed candidate",
-                "candidateId": "candidate",
-                "disposition": "rejected",
-                "receiptRefs": [ref, "artifacts/missing.txt"] if receipt == "partial" else [ref],
-            }
-        ],
+        "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
     }
+    draft["coverage"][field] = [decision]
     result_path.write_text(json.dumps(draft))
     originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     environment = {"CODEX_HOME": str(codex_home)}
@@ -1382,7 +1461,7 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
         "Synthetic interruption.",
         environment=environment,
     )
-    expected = int(receipt in {"missing", "partial"})
+    expected = int(missing or receipt == "partial")
     for replay in (False, True):
         if replay:
             preserve_scan_results(
@@ -1393,9 +1472,18 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
         _, _, coverage = finalize_scan(scan_dir, expected_coverage_mode="deep_repository")
         pending = [row for row in coverage["deferred"] if row.get("candidateId")]
         assert len(pending) == expected
-        surface = next(row for row in coverage["surfaces"] if row.get("candidateId") == "candidate")
+        if archived:
+            surface = next(row for row in coverage[field] if row.get("candidateId") == "candidate")
+            assert surface["sourceWorkerId"] == worker_id
+        else:
+            surface = next(
+                row
+                for row in coverage[field]
+                if row.get("provenance", {}).get("candidateId") == "candidate"
+            )
+            assert surface["provenance"]["workerId"] == worker_id
         assert surface["disposition"] == ("needs_follow_up" if expected else "rejected")
-        if receipt != "missing":
+        if not missing:
             assert surface["receiptRefs"] == [(output / ref).relative_to(scan_dir).as_posix()]
             assert (scan_dir / surface["receiptRefs"][0]).read_bytes() == contents
         report = (scan_dir / "report.md").read_text()
@@ -1601,3 +1689,57 @@ def test_public_generic_metadata_closure_survives_later_progress(
         )
         assert (closure in coverage.get("resolvedDeferred", [])) is not candidate
     assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+@pytest.mark.parametrize("imported_owner", [None, "imported", {"legacy": "imported"}])
+@pytest.mark.parametrize("existing_pending", [False, True])
+def test_public_worker_receipt_recovery_uses_actual_owner(
+    tmp_path: Path, imported_owner: object, existing_pending: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    draft = json.loads(result_path.read_text())
+    draft.update(complete=True, findings=[])
+    candidate = {"evidence": "Synthetic candidate evidence."}
+    surface = {
+        "id": "candidate-decision",
+        "candidateId": "candidate-a",
+        "label": "Candidate A",
+        "disposition": "rejected",
+        "receiptRefs": ["artifacts/proof/missing.txt"],
+        "candidate": candidate,
+    }
+    if imported_owner is not None:
+        surface["sourceWorkerId"] = imported_owner
+    generic = {"id": "general-review", "reason": "Independent unfinished review."}
+    pending = {"candidateId": "candidate-a", "reason": "Saved candidate proof gap."}
+    draft["coverage"] = {
+        "completeness": "partial",
+        "surfaces": [surface],
+        "explicitExclusions": [],
+        "deferred": [generic, pending] if existing_pending else [generic],
+    }
+    result_path.write_text(json.dumps(draft))
+    original = result_path.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
+    scan = get_scan(state, scan_id)["scan"]
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert scan["progress"]["candidates"]["unresolved"] == 1
+    assert any(
+        row.get("provenance", {}).get("sourceId") == generic["id"]
+        and row["provenance"]["workerId"] == worker_id
+        and row["reason"] == generic["reason"]
+        for row in coverage["deferred"]
+    )
+    candidates = [
+        row
+        for row in coverage["deferred"]
+        if row.get("provenance", {}).get("candidateId") == "candidate-a"
+    ]
+    assert len(candidates) == 1
+    assert candidates[0]["provenance"]["workerId"] == worker_id
+    assert candidate == candidates[0].get("candidate") or candidate in candidates[0].get(
+        "originalCandidates", []
+    )
+    assert any("Skipped malformed coverage receipt" in warning for warning in scan["warnings"])
+    assert result_path.read_bytes() == original

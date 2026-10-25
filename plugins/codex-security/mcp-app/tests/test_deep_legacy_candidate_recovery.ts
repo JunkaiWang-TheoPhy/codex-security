@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
+import { asRecord } from "../src/record.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 import {
@@ -169,10 +170,10 @@ for (const continueReduction of [false, true]) {
       assert.equal(terminal?.status, "succeeded", terminal?.error);
       assert.equal(published.length, 1);
       const retained = published[0].coverage.deferred.filter(
-        (row) => row.candidateId === pending.candidateId,
+        (row) => asRecord(row.provenance)?.candidateId === pending.candidateId,
       );
       assert.deepEqual(
-        retained.map((row) => row.sourceWorkerId).sort(),
+        retained.map((row) => asRecord(row.provenance)?.workerId).sort(),
         [...store.dedupClaims[0].workerIds].sort(),
       );
       assert.ok(
@@ -186,8 +187,12 @@ for (const continueReduction of [false, true]) {
       if (reducerVersion === "current") {
         assert.deepEqual(
           published[0].coverage.deferred
-            .filter((row) => row.candidateId === existingPending.candidateId)
-            .map((row) => row.sourceWorkerId)
+            .filter(
+              (row) =>
+                asRecord(row.provenance)?.candidateId ===
+                existingPending.candidateId,
+            )
+            .map((row) => asRecord(row.provenance)?.workerId)
             .sort(),
           [...store.dedupClaims[0].workerIds].sort(),
         );

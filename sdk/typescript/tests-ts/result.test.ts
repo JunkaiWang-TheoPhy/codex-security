@@ -231,8 +231,8 @@ describe("ScanResult", () => {
     expect(result.coverage).toEqual(original);
   });
 
-  test.each(["", " "])(
-    "a saved finding resolves a blank canonical owner %j",
+  test.each(["", " ", "projected"])(
+    "a saved finding resolves the candidate from its originating worker %j",
     (sourceWorkerId) => {
       const result = fakeResult(["high"]);
       result.findings.findings[0]!.provenance = {
@@ -243,9 +243,16 @@ describe("ScanResult", () => {
       result.coverage.deferred = ["worker-one", "worker-two"].map(
         (workerId) => ({
           id: `${workerId}/pending`,
-          candidateId: "shared-candidate",
-          sourceWorkerId,
-          workerId,
+          ...(sourceWorkerId === "projected"
+            ? {
+                candidateId: `${workerId}-attempt-1-candidate-projected`,
+                provenance: {
+                  workerId,
+                  attempt: 1,
+                  candidateId: "shared-candidate",
+                },
+              }
+            : { candidateId: "shared-candidate", sourceWorkerId, workerId }),
           reason: `Evidence retained for ${workerId}.`,
         }),
       );

@@ -34,7 +34,7 @@ for (const disposition of [
     const {
       recordCodexSecurityDiscoveryCandidates,
       listCodexSecurityCandidates,
-    } = await importDiscoverySource(join(directory, "discovery.mjs"));
+    } = await importDiscoverySource();
     const repository = join(directory, "repository");
     const home = join(directory, "home");
     await mkdir(repository);

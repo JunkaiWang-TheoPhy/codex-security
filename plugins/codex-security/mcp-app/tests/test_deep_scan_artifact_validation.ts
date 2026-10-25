@@ -15,16 +15,19 @@ import {
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
+import type { DeepReductionInput } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
 const {
   aggregateDiscoveryCoverage,
-  deepReductionScanDraft,
+  deepReductionToScanDraft,
   discoveryReductionInput,
   parseDeepReduction,
   reconcileDeepReduction,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
+  aggregateSourceCoverage,
+  projectDiscoveryCoverage,
 } = await importSource(
   path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
 );
@@ -47,6 +50,7 @@ try {
   await testCoveragePublicationParity(root);
   await testWorkerPublicationBeforeCheckpoint(root);
   await testLegacyDeferredPublication(root);
+  testResolvedDeferredPublication();
   await testMissingReceiptRepair(root);
   for (const reverse of [false, true])
     await testMissingReceiptRepair(root, { shared: true, reverse });
@@ -150,7 +154,7 @@ async function testUnresolvedCandidates(root: string) {
   );
   const normalizedFinding = structuredClone(normalizedWorker.findings[0]);
   normalizedFinding.provenance.sourceFindingIds = ["worker-1:0"];
-  const ownerSafeResult = deepReductionScanDraft(
+  const ownerSafeResult = deepReductionToScanDraft(
     reconcileDeepReduction(
       { scanId, findings: [normalizedFinding] },
       [
@@ -214,7 +218,7 @@ async function testUnresolvedCandidates(root: string) {
   assert.deepEqual(resolved.unresolvedCandidates, [
     { ...candidate, sourceWorkerId: "worker-2" },
   ]);
-  const published = deepReductionScanDraft(resolved);
+  const published = deepReductionToScanDraft(resolved);
   assert.equal(published.coverage.completeness, undefined);
   assert.deepEqual(published.coverage.deferred, resolved.unresolvedCandidates);
   assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
@@ -237,6 +241,67 @@ async function testUnresolvedCandidates(root: string) {
     resolved.unresolvedCandidates,
     "coordinator recovery restores candidate state from the persisted aggregate",
   );
+}
+
+function testResolvedDeferredPublication() {
+  const source = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [
+      {
+        id: "pending",
+        candidateId: "candidate",
+        reason: "A separate task remains.",
+        receiptRefs: [{ kind: "external review" }],
+      },
+    ],
+    openQuestions: [
+      {
+        question: "Can the reviewer confirm the scope?",
+        candidateId: "candidate",
+        receiptRefs: [{ kind: "external review" }],
+      },
+    ],
+    resolvedDeferred: [{ id: "1", reason: "The original review finished." }],
+  };
+  let previous: DeepReductionInput | null = null;
+  for (const worker of [
+    { id: "first", attempt: 1 },
+    { id: "second", attempt: 1 },
+    { id: "first", attempt: 2 },
+  ]) {
+    const coverage = projectDiscoveryCoverage(source, worker, "worker/output");
+    assert.deepEqual(
+      coverage.deferred[0].receiptRefs,
+      source.deferred[0].receiptRefs,
+    );
+    assert.deepEqual(
+      coverage.openQuestions[0].receiptRefs,
+      source.openQuestions[0].receiptRefs,
+    );
+    const result = { scanId, findings: [] };
+    previous = {
+      ...result,
+      sourceCoverage: aggregateSourceCoverage(
+        [{ workerId: worker.id, coverage, result }],
+        previous,
+      ),
+    };
+  }
+  const parsed: ScanDraftInput = parseScanDraft({
+    ...draft([]),
+    coverage: previous!.sourceCoverage,
+  });
+  const closures = parsed.coverage.resolvedDeferred ?? [];
+  assert.equal(new Set(closures.map((row) => row.id)).size, 3);
+  assert.deepEqual(
+    closures.map((row) => row.reason),
+    Array(3).fill("The original review finished."),
+  );
+  assert.equal(parsed.coverage.deferred.length, 3);
+  assert.deepEqual(source.resolvedDeferred, [
+    { id: "1", reason: "The original review finished." },
+  ]);
 }
 
 async function testDiscoveryReceipts(root: string) {
@@ -303,10 +368,13 @@ async function testDiscoveryReceipts(root: string) {
   const [retained] = accepted.coverage.surfaces;
   assert.equal(retained.id, "api");
   assert.deepEqual(retained.receiptRefs, [
-    "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+    workerReceiptRef(
+      output,
+      "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+    ),
   ]);
   assert.equal(
-    await readFile(path.join(output, retained.receiptRefs[0]), "utf8"),
+    await readFile(receiptPath(output, retained.receiptRefs[0]), "utf8"),
     "Original attempt review evidence.\n",
   );
   assert.equal(
@@ -327,7 +395,7 @@ async function testDiscoveryReceipts(root: string) {
   assert.equal(retried.coverage.surfaces.length, 1);
   for (const ref of retried.coverage.surfaces[0].receiptRefs) {
     assert.equal(
-      await readFile(path.join(output, ref), "utf8"),
+      await readFile(receiptPath(output, ref), "utf8"),
       "Original attempt review evidence.\n",
     );
   }
@@ -443,10 +511,13 @@ async function testArchivedReceiptPathValidation(
   if (includeValidCheckpoint) {
     const refs = accepted.coverage.surfaces[0].receiptRefs;
     assert.deepEqual(refs, [
-      "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+      workerReceiptRef(
+        output,
+        "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+      ),
     ]);
     assert.equal(
-      await readFile(path.join(output, refs[0]), "utf8"),
+      await readFile(receiptPath(output, refs[0]), "utf8"),
       "Original review.\n",
     );
   } else {
@@ -631,7 +702,9 @@ async function testMissingReceiptRepair(
   assert.deepEqual(
     new Set(
       await Promise.all(
-        receipts.map((ref: string) => readFile(path.join(output, ref), "utf8")),
+        receipts.map((ref: string) =>
+          readFile(receiptPath(output, ref), "utf8"),
+        ),
       ),
     ),
     new Set(["Original valid evidence.\n", "Corrected review evidence.\n"]),
@@ -669,7 +742,7 @@ async function testMissingReceiptRepair(
     new Set(
       await Promise.all(
         retried.coverage.surfaces[0].receiptRefs.map((ref: string) =>
-          readFile(path.join(output, ref), "utf8"),
+          readFile(receiptPath(output, ref), "utf8"),
         ),
       ),
     ),
@@ -1059,10 +1132,13 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...persistedResult } = validatedSnapshot.result;
+  assert.ok(sourceCoverage);
+  assert.equal(sourceCoverage.completeness, undefined);
   assert.deepEqual(
-    validatedSnapshot.result,
+    persistedResult,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "accepted findings retain the legacy persisted shape while coverage stays host-owned",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
@@ -1590,7 +1666,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
     assert.equal(row.disposition, "no_issue_found");
     assert.equal(row.receiptRefs.length, 1);
     const content = await readFile(
-      path.join(output, row.receiptRefs[0]),
+      receiptPath(output, row.receiptRefs[0]),
       "utf8",
     );
     assert.equal(
@@ -1603,7 +1679,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
   const retainedWriter = accepted.coverage.surfaces.find(
     (row: JsonObject) => row.id === "writer",
   )!;
-  const retainedPath = path.join(output, retainedWriter.receiptRefs[0]);
+  const retainedPath = receiptPath(output, retainedWriter.receiptRefs[0]);
   await rm(retainedPath);
   await recordCodexSecurityWorkerScanDraft(context, accepted);
   await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
@@ -1671,7 +1747,9 @@ async function testCurrentAnonymousReceiptSelection(
     "Replacement review.\n",
   );
   const originalReceipts = await Promise.all(
-    [selectedRef, historicalRef].map((ref) => readFile(path.join(output, ref))),
+    [selectedRef, historicalRef].map((ref) =>
+      readFile(receiptPath(output, ref)),
+    ),
   );
   const context = {
     root: output,
@@ -1717,12 +1795,16 @@ async function testCurrentAnonymousReceiptSelection(
     const selected = accepted.coverage.surfaces.find(
       (row: JsonObject) => row.label === "Current anonymous review",
     );
-    assert.deepEqual(selected.receiptRefs, [selectedRef]);
+    assert.deepEqual(selected.receiptRefs, [
+      workerReceiptRef(output, selectedRef),
+    ]);
     assert.equal(selected.disposition, "no_issue_found");
     const writer = accepted.coverage.surfaces.find(
       (row: JsonObject) => row.id === "writer",
     );
-    assert.deepEqual(writer.receiptRefs, ["artifacts/replacement.md"]);
+    assert.deepEqual(writer.receiptRefs, [
+      workerReceiptRef(output, "artifacts/replacement.md"),
+    ]);
   }
   assert.deepEqual(
     await Promise.all(
@@ -1735,7 +1817,7 @@ async function testCurrentAnonymousReceiptSelection(
   assert.deepEqual(
     await Promise.all(
       [selectedRef, historicalRef].map((ref) =>
-        readFile(path.join(output, ref)),
+        readFile(receiptPath(output, ref)),
       ),
     ),
     originalReceipts,
@@ -1847,17 +1929,23 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
         (row: JsonObject) => row.id === keptId,
       );
       assert.deepEqual(kept.receiptRefs, [
-        `artifacts/archived-receipts/attempt-01/${refs[keptId]}`,
+        workerReceiptRef(
+          output,
+          `artifacts/archived-receipts/attempt-01/${refs[keptId]}`,
+        ),
       ]);
       assert.equal(
-        await readFile(path.join(output, kept.receiptRefs[0]), "utf8"),
+        await readFile(receiptPath(output, kept.receiptRefs[0]), "utf8"),
         await readFile(path.join(archive, refs[keptId]), "utf8"),
       );
       const repaired = result.coverage.surfaces.find(
         (row: JsonObject) => row.id === repairId,
       );
       if (candidate) assert.equal(repaired, undefined);
-      else assert.deepEqual(repaired.receiptRefs, ["artifacts/replacement.md"]);
+      else
+        assert.deepEqual(repaired.receiptRefs, [
+          workerReceiptRef(output, "artifacts/replacement.md"),
+        ]);
       assert.equal(
         await readFile(path.join(archive, "result.json"), "utf8"),
         oldResult,
@@ -1888,6 +1976,11 @@ function testCandidateCoverageAggregation(scanDir: string) {
     reason: "Needs validation.",
     surfaceIds: ["review"],
     receiptRefs: ["artifacts/review.json"],
+    provenance: {
+      workerId: "imported-worker",
+      candidateId: "imported-candidate",
+      note: "Imported observation.",
+    },
   };
   const discoveries = ["worker-1", "worker-2"].map((id) => ({
     id,
@@ -1919,9 +2012,24 @@ function testCandidateCoverageAggregation(scanDir: string) {
     }),
   }));
   const original = structuredClone(discoveries);
-  const coverage = aggregateDiscoveryCoverage({ scanDir }, discoveries, [
-    { ...candidate, sourceWorkerId: "worker-2" },
-  ]);
+  const sources = discoveries.map((worker) => ({
+    workerId: worker.id,
+    result: discoveryReductionInput(worker.result, worker.id),
+    coverage: projectDiscoveryCoverage(
+      worker.result.coverage,
+      worker,
+      path
+        .relative(scanDir, path.dirname(worker.resultPath))
+        .split(path.sep)
+        .join("/"),
+    ),
+  }));
+  const coverage = deepReductionToScanDraft({
+    scanId,
+    findings: [],
+    sourceCoverage: aggregateSourceCoverage(sources, null),
+    unresolvedCandidates: [{ ...candidate, sourceWorkerId: "worker-2" }],
+  }).coverage;
   assert.equal(coverage.surfaces.length, 2);
   assert.equal(coverage.explicitExclusions.length, 2);
   assert.equal(coverage.openQuestions.length, 2);
@@ -1931,23 +2039,51 @@ function testCandidateCoverageAggregation(scanDir: string) {
     "both generic tasks and the unresolved worker candidate survive",
   );
   const pending = coverage.deferred.filter(
-    (row: Record<string, unknown>) => row.candidateId === "shared-candidate",
+    (row: Record<string, unknown>) =>
+      (row.provenance as Record<string, unknown>)?.candidateId ===
+      "shared-candidate",
   );
   assert.equal(
     pending.length,
     1,
     "the resolved worker's checkpoint is not reopened",
   );
-  assert.equal(pending[0].sourceWorkerId, "worker-2");
-  assert.equal(pending[0].id, "worker-2/pending");
-  assert.deepEqual(pending[0].surfaceIds, ["worker-2/review"]);
+  assert.equal(pending[0].provenance.workerId, "worker-2");
+  assert.equal(pending[0].provenance.note, "Imported observation.");
+  assert.equal(pending[0].id, "worker-2-attempt-unknown-deferred-2");
+  assert.deepEqual(pending[0].surfaceIds, [
+    "worker-2-attempt-unknown-surface-1",
+  ]);
   assert.deepEqual(pending[0].receiptRefs, [
     "workers/worker-2/output/artifacts/review.json",
   ]);
-  assert.equal(coverage.surfaces[0].sourceWorkerId, "worker-1");
+  assert.equal(coverage.surfaces[0].provenance.workerId, "worker-1");
+  const legacy = deepReductionToScanDraft({
+    scanId,
+    findings: [],
+    unresolvedCandidates: [{ ...candidate, sourceWorkerId: "worker-2" }],
+  }).coverage.deferred[0];
+  assert.equal(legacy.sourceWorkerId, "worker-2");
+  assert.equal(legacy.candidateId, candidate.candidateId);
+  assert.deepEqual(legacy.provenance, { note: "Imported observation." });
   assert.deepEqual(
     discoveries,
     original,
     "aggregation leaves resumed source artifacts unchanged",
   );
+}
+
+function workerReceiptRef(
+  output: string,
+  ref: string,
+  directory = "output",
+): string {
+  return `artifacts/deep_discovery/workers/${path.basename(path.dirname(output))}/${directory}/${ref}`;
+}
+
+function receiptPath(output: string, ref: string): string {
+  const root = ref.startsWith("artifacts/deep_discovery/workers/")
+    ? path.resolve(output, "../../../../..")
+    : output;
+  return path.join(root, ref);
 }

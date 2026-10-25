@@ -689,12 +689,15 @@ def test_parent_source_reference_preserves_independent_pending_candidate(
     expected_pending = owned or reference != "0" or worker_time >= 200
     for result in (first, replay):
         assert result is not None
-        deferred = [
-            row for row in result[2]["deferred"] if row.get("candidateId") == pending["candidateId"]
-        ]
+        deferred = [row for row in result[2]["deferred"] if row.get("candidateId")]
         assert len(deferred) == int(expected_pending)
         if deferred:
-            assert deferred[0]["sourceWorkerId"] == "worker-one"
+            assert deferred[0]["provenance"] == {
+                "workerId": "worker-one",
+                "attempt": 1,
+                "sourceId": pending["id"],
+                "candidateId": pending["candidateId"],
+            }
             assert deferred[0]["reason"] == pending["reason"]
         assert len(result[1]["findings"]) == 1
         if owned:

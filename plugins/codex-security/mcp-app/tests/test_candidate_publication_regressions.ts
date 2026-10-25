@@ -12,7 +12,7 @@ import {
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
 const {
-  deepReductionScanDraft,
+  deepReductionToScanDraft,
   discoveryReductionInput,
   reconcileDeepReduction,
   validateDiscoveryArtifacts,
@@ -280,7 +280,7 @@ for (const field of ["surfaces", "explicitExclusions"]) {
     execFileSync(process.env.PYTHON?.trim() || "python3", [
       "-c",
       `
-import copy,json,os,sys
+import json,os,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
@@ -290,13 +290,13 @@ manifest=json.loads((root/'scan-manifest.json').read_text()); coverage=json.load
 binding={'status':'failed','allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
 for path in root.rglob('*'):
  if path.is_file(): os.utime(path,ns=(100,100))
-output=root/'worker';(output/'checkpoints').mkdir(parents=True)
+output=root/'artifacts/deep_discovery/workers/worker/output';(output/'checkpoints').mkdir(parents=True)
 finding=json.loads(sys.argv[5]);finding['provenance']['candidateId']='review'
 draft={'scanId':scan_id,'complete':False,'findings':[finding],'coverage':{'completeness':'partial','surfaces':[],'explicitExclusions':[],'deferred':[]}}
 old=output/'checkpoints'/('a'*64+'.json');old.write_text(json.dumps(draft));os.utime(old,ns=(200,200))
 draft['complete']=True;draft['findings']=[];draft['coverage'][field]=[{'id':'decision','candidateId':'review','label':'Reviewed candidate','pattern':'src/example.ts','reason':'Synthetic decision.','disposition':'rejected','receiptRefs':['artifacts/review.txt']}]
 result=output/'result.json';result.write_text(json.dumps(draft));os.utime(result,ns=(300,300))
-workers=[{'id':'worker','kind':'discovery','artifact_dir':str(output),'result_manifest_path':str(result),'attempt':1}]
+workers=[{'id':'worker','kind':'discovery','status':'succeeded','artifact_dir':str(output),'result_manifest_path':str(result),'attempt':1}]
 first=merge_saved_results(root,scan_id,binding,workers,[],stopped=True,reason='interrupted')
 assert len(unresolved_candidates(first[2],first[1]['findings']))==1
 (output/'artifacts').mkdir();(output/'artifacts/review.txt').write_text('Synthetic late receipt.')
@@ -313,20 +313,17 @@ for name,document in zip(['scan-manifest.json','findings.json','coverage.json'],
     ]);
     await f.write(f.draft({}, true));
     const coverage = await f.read();
-    assert.ok(
-      coverage.deferred.some(
-        (row: any) =>
-          row.candidateId === "review" && row.sourceWorkerId === "worker",
-      ),
-    );
+    const workerCandidate = (row: any) =>
+      row.provenance?.candidateId === "review" &&
+      row.provenance.workerId === "worker";
+    assert.ok(coverage.deferred.some(workerCandidate));
     const saved = JSON.parse(
       await readFile(path.join(f.root, "findings.json"), "utf8"),
     );
     assert.equal(saved.findings.length, 1);
     assert.equal(saved.findings[0].provenance.candidateReopened, true);
     assert.equal(
-      coverage[field].find((row: any) => row.candidateId === "review")
-        .disposition,
+      coverage[field].find(workerCandidate)?.disposition,
       "needs_follow_up",
     );
   });
@@ -609,7 +606,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
     null,
   );
   const original = structuredClone(aggregate);
-  const projected = deepReductionScanDraft(aggregate);
+  const projected = deepReductionToScanDraft(aggregate);
   let published = false;
   await recordCodexSecurityScanDraftViaWorkbench(
     context,
@@ -632,7 +629,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
   );
   assert.equal(published, true);
   assert.deepEqual(aggregate, original);
-  assert.deepEqual(deepReductionScanDraft(aggregate), projected);
+  assert.deepEqual(deepReductionToScanDraft(aggregate), projected);
 });
 
 for (const mode of ["standard", "diff"] as const) {
@@ -1338,7 +1335,10 @@ for (const reopened of [false, true]) {
           saved.findings[0].provenance.candidateReopened === true,
           reopened,
         );
-        await f.write({ ...deepReductionScanDraft(saved), handoffClaimToken });
+        await f.write({
+          ...deepReductionToScanDraft(saved),
+          handoffClaimToken,
+        });
         const coverage = await f.read();
         const published = JSON.parse(
           await readFile(path.join(f.root, "findings.json"), "utf8"),
@@ -1417,7 +1417,7 @@ test("Deep reducer clears historical reopening after the same worker accepts the
   const previousBytes = await readFile(previousPath, "utf8");
   const previous = JSON.parse(previousBytes);
   assert.equal(previous.unresolvedCandidates.length, 1);
-  await f.write({ ...deepReductionScanDraft(previous), handoffClaimToken });
+  await f.write({ ...deepReductionToScanDraft(previous), handoffClaimToken });
   await draftApi.recordCodexSecurityWorkerScanDraft(workerContext, {
     ...worker,
     complete: true,
@@ -1454,7 +1454,7 @@ test("Deep reducer clears historical reopening after the same worker accepts the
     );
     assert.equal(saved.unresolvedCandidates, undefined);
     assert.notEqual(saved.findings[0].provenance.candidateReopened, true);
-    await f.write({ ...deepReductionScanDraft(saved), handoffClaimToken });
+    await f.write({ ...deepReductionToScanDraft(saved), handoffClaimToken });
     assert.deepEqual((await f.read()).deferred, []);
     assert.equal(await readFile(previousPath, "utf8"), previousBytes);
   }

@@ -14,7 +14,8 @@ import { readScanFile, requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import {
   candidateIdentity,
-  coverageCandidateOwner,
+  coverageCandidateId,
+  coverageCandidateKey,
   findingCandidateIds,
   findingCandidateOwner,
 } from "./candidates.js";
@@ -224,8 +225,12 @@ export async function runCustomValidation(options: {
   ];
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
-    manifest.scan.sealedAt !== undefined ||
-    manifest.scan.artifacts !== undefined ||
+    manifest.scan.sealedAt != null ||
+    (manifest.scan.artifacts != null &&
+      !(
+        Array.isArray(manifest.scan.artifacts) &&
+        manifest.scan.artifacts.length === 0
+      )) ||
     manifest.scan.id !== scanId ||
     findingsDocument.scanId !== scanId ||
     coverage.scanId !== scanId
@@ -397,21 +402,15 @@ export async function runCustomValidation(options: {
       ...coverage.surfaces,
       ...coverage.explicitExclusions,
     ].flatMap((item) =>
-      [item["id"], item["candidateId"]].filter(
+      [item["id"], item["candidateId"], coverageCandidateId(item)].filter(
         (value): value is string => typeof value === "string",
       ),
     ),
   ]);
   const previousDeferred = new Map<string, DeferredCoverage[]>();
   coverage.deferred = coverage.deferred.filter((item) => {
-    const owner = coverageCandidateOwner(item);
-    if (
-      typeof item.candidateId !== "string" ||
-      (owner != null && typeof owner !== "string")
-    )
-      return true;
-    const key = candidateIdentity(item.candidateId, owner);
-    if (!candidateIdentityCounts.has(key)) return true;
+    const key = coverageCandidateKey(item);
+    if (key === undefined || !candidateIdentityCounts.has(key)) return true;
     const rows = previousDeferred.get(key) ?? [];
     rows.push(item);
     previousDeferred.set(key, rows);
@@ -422,16 +421,14 @@ export async function runCustomValidation(options: {
   );
   const previousDecisions = new Map<string, Record<string, unknown>[]>();
   const retainDecision = (item: Record<string, unknown>, mapped: boolean) => {
-    const owner = coverageCandidateOwner(item);
+    const key = coverageCandidateKey(item);
     if (
-      typeof item["candidateId"] !== "string" ||
-      (owner != null && typeof owner !== "string") ||
+      key === undefined ||
+      !candidateIdentityCounts.has(key) ||
       (item["disposition"] !== "rejected" &&
         item["disposition"] !== "not_applicable")
     )
       return true;
-    const key = candidateIdentity(item["candidateId"], owner);
-    if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDecisions.get(key) ?? [];
     rows.push(structuredClone(item));
     previousDecisions.set(key, rows);
@@ -499,11 +496,10 @@ export async function runCustomValidation(options: {
           sharedSurfaceIds.has(surface.id)
         )
           continue;
-        const owner = coverageCandidateOwner(surface);
+        const surfaceKey = coverageCandidateKey(surface);
         const sameCandidate =
           typeof surface.candidateId === "string"
-            ? (owner == null || typeof owner === "string") &&
-              candidateIdentity(surface.candidateId, owner) === key
+            ? surfaceKey === key
             : previousSurfaceIds.has(surface.id) &&
               surfaceIdCounts.get(surface.id) === 1;
         if (sameCandidate) surfaceIds.add(surface.id);
@@ -517,12 +513,13 @@ export async function runCustomValidation(options: {
       if (key !== undefined) keys.add(key);
       surfaceCandidateKeys.set(id, keys);
     }
+    const uniqueIdentity =
+      key !== undefined && candidateIdentityCounts.get(key) === 1;
+    const previous = uniqueIdentity
+      ? previousDeferred.get(key)?.[0]
+      : undefined;
+    const retainedCandidateId = previous?.candidateId ?? candidateId;
     if (validation.disposition === "deferred") {
-      const uniqueIdentity =
-        key !== undefined && candidateIdentityCounts.get(key) === 1;
-      const previous = uniqueIdentity
-        ? previousDeferred.get(key)?.[0]
-        : undefined;
       const baseId = `custom-validation-${candidate.candidateId}`;
       let deferredId = previous?.id ?? baseId;
       let suffix = 2;
@@ -534,7 +531,7 @@ export async function runCustomValidation(options: {
       coverage.deferred.push({
         ...previous,
         id: deferredId,
-        candidateId: uniqueIdentity ? candidateId : deferredId,
+        candidateId: uniqueIdentity ? retainedCandidateId : deferredId,
         ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
         candidate: candidate.finding,
         reason,
@@ -546,11 +543,6 @@ export async function runCustomValidation(options: {
       validation.disposition === "suppressed" ||
       validation.disposition === "not_applicable"
     ) {
-      const uniqueIdentity =
-        key !== undefined && candidateIdentityCounts.get(key) === 1;
-      const previous = uniqueIdentity
-        ? previousDeferred.get(key)?.[0]
-        : undefined;
       if (key !== undefined) {
         const baseId = `custom-validation-${candidate.candidateId}`;
         let id = baseId;
@@ -560,7 +552,7 @@ export async function runCustomValidation(options: {
         coverage.surfaces.push({
           ...previous,
           id,
-          candidateId: uniqueIdentity ? candidateId : id,
+          candidateId: uniqueIdentity ? retainedCandidateId : id,
           ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
           label: candidate.finding.title,
           disposition:
@@ -601,20 +593,15 @@ export async function runCustomValidation(options: {
   for (const surface of coverage.surfaces) {
     const updates = decisions.get(surface.id);
     if (updates === undefined) continue;
-    const owner = coverageCandidateOwner(surface);
+    const surfaceKey = coverageCandidateKey(surface);
     if (
+      surfaceKey !== undefined &&
       typeof surface.candidateId === "string" &&
       (surface.disposition === "rejected" ||
         surface.disposition === "not_applicable") &&
-      !surfaceCandidateKeys
-        .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, owner))
+      !surfaceCandidateKeys.get(surface.id)?.has(surfaceKey)
     ) {
-      if (
-        !candidateIdentityCounts.has(
-          candidateIdentity(surface.candidateId, owner),
-        )
-      ) {
+      if (!candidateIdentityCounts.has(surfaceKey)) {
         const baseId = `${surface.id}-decision`;
         let id = baseId;
         let suffix = 2;
@@ -633,12 +620,11 @@ export async function runCustomValidation(options: {
           ? "rejected"
           : "not_applicable";
     if (
+      surfaceKey !== undefined &&
       typeof surface.candidateId === "string" &&
       (surface.disposition === "rejected" ||
         surface.disposition === "not_applicable") &&
-      !surfaceCandidateKeys
-        .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, owner))
+      !surfaceCandidateKeys.get(surface.id)?.has(surfaceKey)
     )
       delete surface.candidateId;
     surface.receiptRefs = [

@@ -799,12 +799,12 @@ for (const receipt of [
           if (savedGap)
             assert.equal(saved.unresolvedCandidates[0].reason, pending.reason);
         }
-        const { deepReductionScanDraft } = await importSource(
+        const { deepReductionToScanDraft } = await importSource(
           fileURLToPath(
             new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
           ),
         );
-        const publication = deepReductionScanDraft(saved);
+        const publication = deepReductionToScanDraft(saved);
         assert.equal(publication.coverage.completeness, undefined);
         assert.equal(await readFile(worker.resultPath, "utf8"), workerBytes);
       } finally {

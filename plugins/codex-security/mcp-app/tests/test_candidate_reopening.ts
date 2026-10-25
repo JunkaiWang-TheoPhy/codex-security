@@ -22,7 +22,7 @@ const { getCodexSecurityDeepReducerInputs, recordCodexSecurityDeepReduction } =
   await importSource("../src/artifact-deep-reducer.ts", {
     absWorkingDir: import.meta.dirname,
   });
-const { validateDiscoveryArtifacts, deepReductionScanDraft } =
+const { validateDiscoveryArtifacts, deepReductionToScanDraft } =
   await importSource("../src/deep-scan/artifact-validation.ts", {
     absWorkingDir: import.meta.dirname,
   });
@@ -208,7 +208,7 @@ for (const mode of ["standard", "worker"] as const) {
             reopened,
           );
           assert.equal(
-            deepReductionScanDraft(reduced).coverage.deferred.length,
+            deepReductionToScanDraft(reduced).coverage.deferred.length,
             Number(expectedPending),
           );
         }

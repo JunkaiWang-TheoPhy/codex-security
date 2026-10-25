@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import type { CoverageDocument, DeferredCoverage, Finding } from "./models.js";
 
 function candidateOwner(...values: unknown[]): string | undefined {
@@ -39,10 +40,36 @@ export function candidateIdentity(
 }
 
 export function coverageCandidateOwner(row: Record<string, unknown>): unknown {
+  const provenance = row["provenance"];
+  if (isRecord(provenance) && candidateOwner(provenance["workerId"]))
+    return provenance["workerId"];
   const owner = row["sourceWorkerId"];
   return owner != null && typeof owner !== "string"
     ? owner
     : candidateOwner(owner, row["workerId"]);
+}
+
+export function coverageCandidateId(
+  row: Record<string, unknown>,
+): string | undefined {
+  const id = row["candidateId"];
+  if (typeof id !== "string" || !id.trim()) return undefined;
+  const provenance = row["provenance"];
+  const sourceId =
+    isRecord(provenance) && candidateOwner(provenance["workerId"])
+      ? (provenance["candidateId"] ?? id)
+      : id;
+  return typeof sourceId === "string" && sourceId.trim() ? sourceId : undefined;
+}
+
+export function coverageCandidateKey(
+  row: Record<string, unknown>,
+): string | undefined {
+  const owner = coverageCandidateOwner(row);
+  const id = coverageCandidateId(row);
+  return id !== undefined && (owner == null || typeof owner === "string")
+    ? candidateIdentity(id, owner)
+    : undefined;
 }
 
 /** Saved candidate identities without a finding or terminal disposition. */
@@ -68,27 +95,19 @@ export function unresolvedCandidates(
       ? coverage.explicitExclusions
       : []),
   ]) {
-    const owner = coverageCandidateOwner(surface);
+    const key = coverageCandidateKey(surface);
     if (
-      typeof surface["candidateId"] === "string" &&
-      (owner == null || typeof owner === "string") &&
+      key !== undefined &&
       (surface["disposition"] === "rejected" ||
         surface["disposition"] === "not_applicable")
-    ) {
-      resolved.add(candidateIdentity(surface["candidateId"], owner));
-    }
+    )
+      resolved.add(key);
   }
   const pending = new Map<string, DeferredCoverage>();
   for (const candidate of coverage.deferred) {
-    const owner = coverageCandidateOwner(candidate);
-    if (
-      typeof candidate.candidateId !== "string" ||
-      !candidate.candidateId.trim() ||
-      (owner != null && typeof owner !== "string")
-    )
-      continue;
-    const key = candidateIdentity(candidate.candidateId, owner);
-    if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
+    const key = coverageCandidateKey(candidate);
+    if (key !== undefined && !resolved.has(key) && !pending.has(key))
+      pending.set(key, candidate);
   }
   return [...pending.values()];
 }

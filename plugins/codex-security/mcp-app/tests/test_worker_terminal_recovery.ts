@@ -178,15 +178,18 @@ for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
             ? ["--thread-id", "synthetic-parent-thread"]
             : ["--message", "Synthetic interruption."]),
         );
+        const isWorkerCandidate = (row: {
+          provenance?: Record<string, unknown>;
+        }) =>
+          row.provenance?.workerId === workerId &&
+          row.provenance.attempt === 1 &&
+          row.provenance.candidateId === pending.candidateId;
         for (let replay = 0; replay < 2; replay++) {
           const { scan } = await workbench("get-scan", "--scan-id", scanId);
           assert.equal(scan.progress.candidates.unresolved, reopened ? 1 : 0);
           const coverage = await readJson(deepScan.scanDir, "coverage.json");
           const findings = await readJson(deepScan.scanDir, "findings.json");
-          const deferred = coverage.deferred.filter(
-            (row: { candidateId?: string }) =>
-              row.candidateId === pending.candidateId,
-          );
+          const deferred = coverage.deferred.filter(isWorkerCandidate);
           assert.equal(deferred.length, reopened ? 1 : 0);
           if (reopened)
             assert.equal(
@@ -200,10 +203,7 @@ for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
               reopened,
             );
           } else {
-            const decisions = coverage.surfaces.filter(
-              (row: { candidateId?: string }) =>
-                row.candidateId === pending.candidateId,
-            );
+            const decisions = coverage.surfaces.filter(isWorkerCandidate);
             assert.equal(decisions.length, reopened ? 0 : 1);
             if (!reopened) assert.equal(decisions[0].disposition, outcome);
           }

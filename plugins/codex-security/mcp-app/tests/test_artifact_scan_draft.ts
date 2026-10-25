@@ -265,10 +265,10 @@ try {
     "checkpoints",
     acceptedHead.checkpoint,
   );
-  assert.notEqual(
+  assert.equal(
     acceptedHeadDraft.complete,
     false,
-    "a rejected incomplete write must not become the authoritative checkpoint head",
+    "new late work must remain incomplete in the authoritative checkpoint",
   );
   assert.deepEqual(acceptedHeadDraft.findings, [finding]);
   const acceptedResult = await readJson(rejectedIncompleteRoot, "result.json");
@@ -276,8 +276,8 @@ try {
     acceptedResult.coverage.deferred.some(
       (item: FixtureFinding) => item.candidateId === "late-incomplete-review",
     ),
-    false,
-    "a rejected incomplete write must not change the completed result",
+    true,
+    "new late work must survive alongside the completed candidate",
   );
 
   const deferredDoesNotRejectContext = await createWorkerContext(
@@ -2003,13 +2003,32 @@ try {
   const partialDeferredFinding = {
     summary: "Partial evidence captured before validation.",
   };
+  const partialDeferredDraft = {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [],
+      deferred: [
+        {
+          id: "first-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "Validation is pending.",
+          finding: partialDeferredFinding,
+        },
+        {
+          id: "second-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "The second boundary also needs validation.",
+        },
+      ],
+    },
+  };
   await recordCodexSecurityWorkerScanDraft(
     partialDeferredContext,
-    partialWorkerInput({
-      candidateId: finding.provenance.candidateId,
-      reason: "Validation is pending.",
-      finding: partialDeferredFinding,
-    }),
+    partialDeferredDraft,
   );
   await recordCodexSecurityWorkerScanDraft(partialDeferredContext, workerInput);
   const resolvedPartialDeferred = await readJson(
@@ -2020,6 +2039,31 @@ try {
     resolvedPartialDeferred.findings[0].provenance.previousFindings,
     [partialDeferredFinding],
   );
+  assert.deepEqual(resolvedPartialDeferred.coverage.deferred, []);
+
+  for (const disposition of ["rejected", "not_applicable"]) {
+    const dispositionRoot = path.join(root, `${disposition}-deferred-worker`);
+    await mkdir(dispositionRoot);
+    const dispositionContext = { ...workerContext, root: dispositionRoot };
+    await recordCodexSecurityWorkerScanDraft(
+      dispositionContext,
+      partialDeferredDraft,
+    );
+    await recordCodexSecurityWorkerScanDraft(dispositionContext, {
+      ...workerInput,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{ ...rejection, disposition }],
+      },
+    });
+    const resolved = JSON.parse(
+      await readFile(path.join(dispositionRoot, "result.json"), "utf8"),
+    );
+    assert.deepEqual(resolved.coverage.deferred, []);
+    assert.equal(resolved.coverage.completeness, undefined);
+    assert.equal(resolved.coverage.surfaces[0].disposition, disposition);
+  }
 
   for (const [field, metadata] of [
     ["workerId", ["worker-one", "worker-two"]],
@@ -2521,13 +2565,13 @@ try {
     ),
     [
       { anchor: "candidate-authored-instance", instance: "dss-147-a" },
-      { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+      { anchor: "candidate-authored-instance", instance: "dss-147-a-2" },
       {
         anchor: "candidate-authored-instance",
         instance: "ledger-row-c",
       },
     ],
-    "duplicate stable instance sources remain collisions for finalization",
+    "generated instances avoid an existing authored identity",
   );
 
   const collisionFindings = [
@@ -2594,10 +2638,17 @@ try {
     assert.deepEqual(
       standardFindings.map((item: FixtureFinding) => item.identity),
       collisionCase.findings.map(
-        (item: FixtureFinding) =>
-          item.identity ?? collisionCase.originalIdentity,
+        (item: FixtureFinding, index) =>
+          item.identity ?? {
+            ...collisionCase.originalIdentity,
+            ...(index === 0
+              ? {}
+              : {
+                  instance: `${(collisionCase.originalIdentity as { instance?: string }).instance}-${index + 1}`,
+                }),
+          },
       ),
-      `${collisionCase.label} identity collisions retain the existing Standard shape`,
+      `${collisionCase.label} identities preserve authored values and split generated collisions`,
     );
     assert.deepEqual(
       standardFindings.map((item: FixtureFinding) => item.provenance),
@@ -2631,7 +2682,7 @@ try {
     assert.deepEqual(
       deepFindings.map((item: FixtureFinding) => item.provenance),
       collisionCase.findings.map((item: FixtureFinding, index) =>
-        index === 1 || index === 2
+        item.identity !== undefined && (index === 1 || index === 2)
           ? {
               ...item.provenance,
               preservedIdentity: collisionCase.originalIdentity,
@@ -2951,6 +3002,15 @@ try {
 
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
 
+  const uploads = { label: "Uploads", disposition: "reported" };
+  const archive = { label: "Archive extraction", disposition: "reported" };
+  await recordFreshScanDraft(context, {
+    ...input,
+    coverage: { ...coverage, surfaces: [uploads, archive] },
+  });
+  const [{ id: uploadsId }, { id: archiveId }] = (
+    await readJson(root, "coverage.json")
+  ).surfaces;
   const duplicateSurfaceCoverage = {
     ...coverage,
     surfaces: [
@@ -2962,20 +3022,20 @@ try {
       },
       { id: "surface-web-ui", label: "Admin UI", disposition: "reported" },
       { id: "surface-web-ui-2", label: "Existing UI", disposition: "reported" },
-      { label: "Uploads", disposition: "reported" },
+      uploads,
       {
-        id: "surface_uploads",
+        id: uploadsId,
         label: "Existing uploads",
         disposition: "reported",
       },
-      { label: "Archive extraction", disposition: "reported" },
-      { label: "Archive extraction", disposition: "reported" },
+      archive,
+      archive,
     ],
     deferred: [
       {
         id: "deferred-web-ui",
         reason: "The web UI requires follow-up.",
-        surfaceIds: ["surface-web-ui"],
+        surfaceIds: ["surface-web-ui", uploadsId],
       },
     ],
   };
@@ -2990,19 +3050,15 @@ try {
   const surfaceIds = normalizedDuplicateCoverage.surfaces.map(
     ({ id }: { id: string }) => id,
   );
-  assert.equal(
-    new Set(surfaceIds).size,
-    duplicateSurfaceCoverage.surfaces.length,
-  );
-  assert.deepEqual(surfaceIds.slice(0, 3), [
+  assert.deepEqual(surfaceIds, [
     "surface-web-ui",
     "surface-web-ui-3",
     "surface-web-ui-2",
+    `${uploadsId}-2`,
+    uploadsId,
+    archiveId,
+    `${archiveId}-2`,
   ]);
-  assert.equal(surfaceIds[4], "surface_uploads");
-  assert.ok(
-    surfaceIds.every((id: string) => /^[a-z0-9][a-z0-9._/-]*$/u.test(id)),
-  );
   assert.deepEqual(
     normalizedDuplicateCoverage.deferred,
     duplicateSurfaceCoverage.deferred,

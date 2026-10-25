@@ -538,6 +538,56 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
     assert_retained()
 
 
+def test_stopped_diff_preserves_siblings_across_projected_checkpoints(tmp_path: Path) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "reportable"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    for key in ("identity", "findingId", "occurrenceId", "fingerprints"):
+        finding.pop(key, None)
+    finding["provenance"]["diffCandidateDecision"] = {"validation": candidate["validation"]}
+    first = copy.deepcopy(finding)
+    first.setdefault("extensions", {})["reportId"] = "first-report"
+    older = copy.deepcopy(first)
+    older["summary"] = "Earlier independently retained evidence."
+    first["provenance"]["previousFindings"] = [older]
+    second = copy.deepcopy(finding)
+    second.setdefault("extensions", {})["ledgerRowId"] = "second-report"
+    authored = copy.deepcopy(finding)
+    authored["identity"] = {"anchor": candidate["candidate_id"], "instance": "authored"}
+    raw = [first, second, authored]
+    published = copy.deepcopy(raw)
+    published[0]["identity"] = {"anchor": candidate["candidate_id"], "instance": "first-report"}
+    published[1]["identity"] = {"anchor": candidate["candidate_id"], "instance": "second-report"}
+    for rows in (raw, published):
+        write_checkpoint(scan_dir / "checkpoints", {**checkpoint, "findings": rows})
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    decisions = [
+        draft
+        for path in (scan_dir / "checkpoints").glob("*.json")
+        if (draft := json.loads(path.read_text()))["coverage"].get("stoppedDiffCandidateDecisions")
+    ]
+    assert len(decisions) == 1
+    assert [row["identity"] for row in decisions[0]["findings"]] == [
+        row["identity"] for row in published
+    ]
+    for operation in (None, "recover-scan-results"):
+        if operation:
+            run_workbench(state_dir, operation, "--scan-id", scan_id)
+        findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        assert sorted(row["identity"]["instance"] for row in findings) == [
+            "authored",
+            "first-report",
+            "second-report",
+        ]
+        first_report = next(
+            row for row in findings if row["identity"]["instance"] == "first-report"
+        )
+        assert older in first_report["provenance"]["previousFindings"]
+
+
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
 @pytest.mark.parametrize("ledger_state", ["deferred", "terminal"])
 @pytest.mark.parametrize("finding_source", ["canonical", "checkpoint"])
@@ -1260,8 +1310,11 @@ def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_adm
 
 
 def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
-    tmp_path: Path, workbench_api
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.syspath_prepend(Path(__file__).resolve().parents[1] / "scripts")
+    from workbench_budget_candidates import _stopped_diff_candidate_decisions
+
     coverage = {
         "surfaces": [],
         "explicitExclusions": [],
@@ -1273,7 +1326,7 @@ def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
             }
         ],
     }
-    draft = workbench_api["saved_results"]._stopped_diff_candidate_decisions(
+    draft = _stopped_diff_candidate_decisions(
         tmp_path,
         "synthetic-scan",
         [{"coverage": coverage}],

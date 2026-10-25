@@ -26,7 +26,7 @@ async function fixture(diff = false) {
     reducer: await load("artifact-deep-reducer"),
     validation: await load("deep-scan/artifact-validation"),
     artifacts: await load("deep-scan/artifacts"),
-    discovery: await importDiscoverySource(join(directory, "discovery.mjs")),
+    discovery: await importDiscoverySource(),
     validate: await load("artifact-candidate-ledger"),
   };
   const repoRoot = join(directory, "repository"),
@@ -373,7 +373,7 @@ for (const scenario of [
       );
     }
     const result = await f.json(join(reducerRoot, "result.json"));
-    await f.publish(f.api.validation.deepReductionScanDraft(result));
+    await f.publish(f.api.validation.deepReductionToScanDraft(result));
     await f.workbench([
       "prepare-scan-completion",
       "--scan-id",

@@ -1,3 +1,5 @@
+import { isRecord } from "./record.js";
+
 type JsonObject = Record<string, unknown>;
 
 function candidateOwner(...values: unknown[]): string | undefined {
@@ -46,6 +48,8 @@ export function findingCandidateKey(
 }
 
 export function coverageCandidateOwner(item: JsonObject): unknown {
+  if (isRecord(item.provenance) && candidateOwner(item.provenance.workerId))
+    return item.provenance.workerId;
   const owner = item.sourceWorkerId;
   return owner != null && typeof owner !== "string"
     ? owner
@@ -58,7 +62,14 @@ export function coverageCandidateKey(
 ): string | undefined {
   const sourceOwner = candidateOwner(owner) ?? coverageCandidateOwner(item);
   if (sourceOwner != null && typeof sourceOwner !== "string") return undefined;
-  return candidateKey(item.candidateId, sourceOwner);
+  const candidateId =
+    owner === undefined &&
+    typeof item.candidateId === "string" &&
+    isRecord(item.provenance) &&
+    candidateOwner(item.provenance.workerId)
+      ? (item.provenance.candidateId ?? item.candidateId)
+      : item.candidateId;
+  return candidateKey(candidateId, sourceOwner);
 }
 
 /** Prefer the matching owner for duplicate raw IDs; unique references may be shared. */

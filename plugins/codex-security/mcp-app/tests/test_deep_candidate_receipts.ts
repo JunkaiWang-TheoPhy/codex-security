@@ -30,9 +30,11 @@ const { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } =
 const { archiveDirectory, createDeepScanArtifacts } = await importSource(
   new URL("../src/deep-scan/artifacts.ts", import.meta.url).pathname,
 );
-const { deepReductionScanDraft, validateReducerArtifacts } = await importSource(
-  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
-);
+const { deepReductionToScanDraft, validateReducerArtifacts } =
+  await importSource(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
+      .pathname,
+  );
 const { unresolvedCandidates } = await importSource(
   new URL("../../../../sdk/typescript/src/candidates.ts", import.meta.url)
     .pathname,
@@ -168,7 +170,7 @@ print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovere
             findings: [],
           });
           const saved = await readJson(path.join(f.reducerRoot, "result.json"));
-          const published = deepReductionScanDraft(saved);
+          const published = deepReductionToScanDraft(saved);
           assert.equal(
             unresolvedCandidates(published.coverage, published.findings).length,
             valid ? 0 : 1,
@@ -198,6 +200,7 @@ for (const receipt of [
   "missing",
   "current-attempt",
   "other-attempt",
+  "unrelated-parent",
   "partial-valid-first",
   "partial-missing-first",
 ]) {
@@ -219,6 +222,9 @@ for (const receipt of [
         await mkdir(path.join(f.output, "artifacts"));
         await writeFile(path.join(f.output, ref), contents);
       }
+      if (receipt === "unrelated-parent") {
+        await writeFile(path.join(f.root, ref), "Unrelated same-name receipt");
+      }
       await recordCodexSecurityWorkerScanDraft(
         f.worker,
         workerDraft([], {
@@ -239,7 +245,20 @@ for (const receipt of [
                       : [ref],
               },
             ],
-            explicitExclusions: [],
+            explicitExclusions:
+              receipt === "original" || receipt === "current-attempt"
+                ? [
+                    {
+                      candidateId: "candidate",
+                      pattern: "src/review.ts",
+                      reason: "Archived decision.",
+                      disposition: "rejected",
+                      receiptRefs: [
+                        `${path.relative(f.root, f.output).split(path.sep).join("/")}/${ref}`,
+                      ],
+                    },
+                  ]
+                : [],
             deferred: [],
           },
         }),
@@ -247,9 +266,9 @@ for (const receipt of [
       const archive = path.join(f.workerRoot, "attempts", "attempt-01");
       await archiveDirectory(f.output, archive);
       const original = await readFile(path.join(archive, "result.json"));
-      if (["current-attempt", "other-attempt"].includes(receipt)) {
+      if (["original", "current-attempt", "other-attempt"].includes(receipt)) {
         const wrongRoot =
-          receipt === "current-attempt"
+          receipt !== "other-attempt"
             ? f.output
             : path.join(f.workerRoot, "attempts", "attempt-02");
         await mkdir(path.join(wrongRoot, "artifacts"), { recursive: true });
@@ -260,11 +279,23 @@ for (const receipt of [
       }
       await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
       const current = await readJson(path.join(f.output, "result.json"));
+      if (receipt === "original" || receipt === "current-attempt") {
+        const [exclusion] = current.coverage.explicitExclusions;
+        if (receipt === "original")
+          assert.deepEqual(
+            await readFile(path.join(f.output, exclusion.receiptRefs[0])),
+            contents,
+          );
+        else {
+          assert.equal(exclusion.disposition, "needs_follow_up");
+          assert.deepEqual(exclusion.receiptRefs, []);
+        }
+      }
       await recordCodexSecurityDeepReduction(f.reducer, {
         scanId,
         findings: [],
       });
-      const published = deepReductionScanDraft(
+      const published = deepReductionToScanDraft(
         await readJson(path.join(f.reducerRoot, "result.json")),
       );
       const valid = ["original", "empty"].includes(receipt);
@@ -277,11 +308,12 @@ for (const receipt of [
         const retainedRef = current.coverage.surfaces.find(
           (row: any) => row.candidateId === "candidate",
         ).receiptRefs[0];
-        assert.notEqual(retainedRef, ref);
-        assert.deepEqual(
-          await readFile(path.join(f.output, retainedRef)),
-          contents,
+        const retainedPath = path.join(f.root, retainedRef);
+        assert.equal(
+          path.dirname(retainedPath),
+          path.join(f.output, "artifacts/retained-receipts"),
         );
+        assert.deepEqual(await readFile(retainedPath), contents);
         assert.deepEqual(await readFile(path.join(archive, ref)), contents);
         await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
         assert.equal(
@@ -304,10 +336,7 @@ for (const receipt of [
           ).receiptRefs[0],
           retainedRef,
         );
-        assert.deepEqual(
-          await readFile(path.join(f.output, retainedRef)),
-          contents,
-        );
+        assert.deepEqual(await readFile(retainedPath), contents);
       }
       assert.deepEqual(
         await readFile(path.join(archive, "result.json")),
@@ -405,7 +434,7 @@ for (const savedGap of [false, true]) {
           ),
         );
       }
-      const publication = deepReductionScanDraft(saved);
+      const publication = deepReductionToScanDraft(saved);
       assert.equal(
         unresolvedCandidates(publication.coverage, publication.findings).length,
         1,
@@ -543,7 +572,7 @@ for (const mode of ["current", "previous", "merged"]) {
           { scanId, findings: [submitted] },
         );
         const saved = await readJson(path.join(f.reducerRoot, "result.json"));
-        const projection = deepReductionScanDraft(saved);
+        const projection = deepReductionToScanDraft(saved);
         assert.equal(
           unresolvedCandidates(projection.coverage, projection.findings).length,
           1,
@@ -616,7 +645,7 @@ for (const archived of [false, true]) {
           scanId,
           findings: [],
         });
-        const published = deepReductionScanDraft(
+        const published = deepReductionToScanDraft(
           await readJson(path.join(f.reducerRoot, "result.json")),
         );
         assert.equal(
@@ -823,7 +852,7 @@ for (const outcome of [
             (input: any) => input.result.findings,
           ),
         });
-        const reduced = deepReductionScanDraft(
+        const reduced = deepReductionToScanDraft(
           await readJson(path.join(f.reducerRoot, "result.json")),
         );
         for (const published of [saved, reduced]) {

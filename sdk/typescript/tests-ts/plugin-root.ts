@@ -18,16 +18,18 @@ export const INTEGRATION_TARGET = hasMonorepoSdk
 let bundledRuntime: Promise<string> | undefined;
 
 export function loadBundledRuntime(): Promise<string> {
-  return (bundledRuntime ??= (async () => {
-    const directory = new URL("mcp/", bundledPlugin);
-    const names = (await readdir(directory))
-      .filter((name) => name.startsWith("server.mjs.br.part-"))
-      .sort();
-    const parts = await Promise.all(
-      names.map((name) => readFile(new URL(name, directory))),
-    );
-    return brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-  })());
+  return (bundledRuntime ??= readdir(new URL("mcp/", bundledPlugin))
+    .then((names) =>
+      Promise.all(
+        names
+          .filter((name) => name.startsWith("server.mjs.br.part-"))
+          .sort()
+          .map((name) => readFile(new URL(`mcp/${name}`, bundledPlugin))),
+      ),
+    )
+    .then((parts) =>
+      brotliDecompressSync(Buffer.concat(parts)).toString("utf8"),
+    ));
 }
 
 export const copyCompletedScanFixture = (destination: string) =>

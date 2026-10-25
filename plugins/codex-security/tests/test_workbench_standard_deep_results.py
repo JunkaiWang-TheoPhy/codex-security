@@ -18,6 +18,7 @@ from workbench_test_support import (
     cancel_scan,
     claim_deep_scan_dedup,
     commit_deep_dedup,
+    empty_target_scan,
     fail_deep_scan,
     fail_scan,
     finish_deep_scan,
@@ -470,12 +471,14 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
         wrapper,
         state_dir,
         codex_home,
+        "from workbench import retained_coverage\n"
         "original_write = workbench_saved_results.write_scan_local_bytes\n"
         "def fail_parent_checkpoint(scan_dir, relative_path, payload, **kwargs):\n"
         "    if relative_path.startswith('checkpoints/'):\n"
         "        raise OSError('injected parent checkpoint failure')\n"
         "    return original_write(scan_dir, relative_path, payload, **kwargs)\n"
-        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n",
+        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n"
+        "retained_coverage.write_scan_local_bytes = fail_parent_checkpoint\n",
         "recover-scan-results",
         "--scan-id",
         scan_id,
@@ -780,6 +783,55 @@ def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:
     assert failed["findings"][0]["locations"][0]["path"] == "src/app.py"
 
 
+def test_canonical_finding_validation_survives_frozen_publication_retry(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["severity"]["level"] = "informational"
+    stronger = copy.deepcopy(finding)
+    stronger["severity"]["level"] = "critical"
+    malformed_identity = copy.deepcopy(finding)
+    malformed_identity["identity"] = {"anchor": []}
+    findings["findings"].extend([stronger, malformed_identity])
+    findings_path.write_text(json.dumps(findings))
+    original = findings_path.read_bytes()
+
+    failed = run_workbench_with_fault(
+        tmp_path / "fail_canonical_publication.py",
+        state_dir,
+        tmp_path / "codex-home",
+        "def fail_publication(*args, **kwargs):\n"
+        "    raise OSError('injected publication failure')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Finding repair was interrupted.",
+    )
+    assert failed.returncode == 0, failed.stderr
+    assert findings_path.read_bytes() == original
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+    frozen = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    assert frozen
+
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert recovered["findingCount"] == 1
+    finding = json.loads(findings_path.read_text())["findings"][0]
+    assert finding["severity"]["level"] == "critical"
+    assert any(
+        previous["severity"]["level"] == "informational"
+        for previous in finding["provenance"]["previousFindings"]
+    )
+    assert any("duplicate logical finding" in warning for warning in recovered["warnings"])
+    assert any("identity" in warning for warning in recovered["warnings"])
+    assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
 def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     tmp_path: Path,
 ) -> None:
@@ -842,6 +894,15 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     assert not any("result publication needs follow-up" in warning for warning in warnings)
     assert "Recovered finding 1: normalized severity change conditions." in warnings
     assert preserved["warnings"] == warnings
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"] == warnings
+    sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
+    invocation = sarif["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    assert all(
+        {"level": "warning", "message": {"text": warning}}
+        in invocation["toolExecutionNotifications"]
+        for warning in warnings
+    )
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -1052,19 +1113,27 @@ def standard_finding(tmp_path: Path, scan_id: str, target: Path) -> dict[str, ob
 
 
 def deep_scan_fixture(
-    tmp_path: Path, *, budget: bool = False, workers: int = 1
+    tmp_path: Path,
+    *,
+    budget: bool = False,
+    workers: int = 1,
+    include_paths: list[str] | None = None,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("value = request.args['value']\n")
+    for relative in include_paths or []:
+        included = target / relative
+        if not included.exists():
+            included.write_text("value = 1\n")
     config_path = codex_home / "codex-security" / "config.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
     environment = {"CODEX_HOME": str(codex_home)}
 
-    if budget:
+    if budget or include_paths is not None:
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
         registered = run_workbench(
@@ -1080,8 +1149,11 @@ def deep_scan_fixture(
                     "config": {},
                     "mode": "deep",
                     "repository": str(target),
-                    "target": {"kind": "repository", "paths": []},
-                    "maxCostUsd": 0.005,
+                    "target": {
+                        "kind": "paths" if include_paths is not None else "repository",
+                        "paths": include_paths or [],
+                    },
+                    **({"maxCostUsd": 0.005} if budget else {}),
                 }
             ),
         )
@@ -2362,8 +2434,10 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
             {
                 "id": worker_id,
                 "kind": "discovery",
+                "status": "running",
                 "artifact_dir": str(output),
                 "result_manifest_path": None,
+                "attempt": 1,
             }
         )
         draft = saved_draft(
@@ -2409,7 +2483,16 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
 
-    assert not coverage.get("resolvedDeferred")
+    assert coverage.get("resolvedDeferred", []) == (
+        [
+            {
+                "id": "worker-one-attempt-1-resolved-shared-review",
+                "reason": "Review completed.",
+            }
+        ]
+        if closure_time == 200
+        else []
+    )
 
 
 @pytest.mark.parametrize("canonical_time", [100, 200, 300])
@@ -2612,7 +2695,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
         os.utime(output / "result.json", ns=(300, 300))
     workers = [saved_discovery_worker(output, "worker-one", 1 if layout == "current" else 2)]
     if layout == "legacy_attempt_reopens":
-        workers[0].pop("attempt")
+        workers[0]["attempt"] = 0
     binding = saved_binding("deep_repository")
     documents = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"
@@ -3285,6 +3368,9 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
 
     assert not replay[2].get("resolvedDeferred")
+    assert replay[1:] == first[1:]
+    assert replay[0]["scan"].get("complete") == first[0]["scan"].get("complete")
+    assert replay[0]["scan"]["preservedSources"] == first[0]["scan"]["preservedSources"]
 
 
 @pytest.mark.parametrize("stopped", [False, True])
@@ -3533,50 +3619,3 @@ def test_stopped_deep_preserves_published_candidate_state(
     )
     assert_candidate_state()
     assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
-
-
-@pytest.mark.parametrize("imported_owner", [None, "imported", {"legacy": "imported"}])
-@pytest.mark.parametrize("existing_pending", [False, True])
-def test_public_worker_receipt_recovery_uses_actual_owner(
-    tmp_path: Path, imported_owner: object, existing_pending: bool
-) -> None:
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    draft = json.loads(result_path.read_text())
-    draft.update(complete=True, findings=[])
-    candidate = {"evidence": "Synthetic candidate evidence."}
-    surface = {
-        "id": "candidate-decision",
-        "candidateId": "candidate-a",
-        "label": "Candidate A",
-        "disposition": "rejected",
-        "receiptRefs": ["artifacts/proof/missing.txt"],
-        "candidate": candidate,
-    }
-    if imported_owner is not None:
-        surface["sourceWorkerId"] = imported_owner
-    generic = {"id": "general-review", "reason": "Independent unfinished review."}
-    pending = {"candidateId": "candidate-a", "reason": "Saved candidate proof gap."}
-    draft["coverage"] = {
-        "completeness": "partial",
-        "surfaces": [surface],
-        "explicitExclusions": [],
-        "deferred": [generic, pending] if existing_pending else [generic],
-    }
-    result_path.write_text(json.dumps(draft))
-    original = result_path.read_bytes()
-    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
-    scan = get_scan(state, scan_id)["scan"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert scan["progress"]["candidates"]["unresolved"] == 1
-    assert {**generic, "id": f"{worker_id}/general-review", "workerId": worker_id} in coverage[
-        "deferred"
-    ]
-    candidates = [row for row in coverage["deferred"] if row.get("candidateId") == "candidate-a"]
-    assert len(candidates) == 1
-    assert candidates[0]["sourceWorkerId"] == worker_id
-    assert candidate == candidates[0].get("candidate") or candidate in candidates[0].get(
-        "originalCandidates", []
-    )
-    assert any("Skipped malformed coverage receipt" in warning for warning in scan["warnings"])
-    assert result_path.read_bytes() == original

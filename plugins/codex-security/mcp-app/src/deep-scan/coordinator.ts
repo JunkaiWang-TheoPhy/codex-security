@@ -2,16 +2,16 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
-  aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   collectUnresolvedCandidates,
-  deepReductionScanDraft,
-  discoveryReductionInput,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -30,12 +30,11 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
@@ -370,14 +369,7 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? {
-            ...deepReductionScanDraft(schedulerResult.result),
-            coverage: aggregateDiscoveryCoverage(
-              this.artifacts,
-              schedulerResult.discoveries,
-              schedulerResult.result.unresolvedCandidates ?? [],
-            ),
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -438,7 +430,7 @@ export class DeepScanCoordinator {
         error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -523,16 +515,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
@@ -958,6 +944,7 @@ export class DeepScanCoordinator {
               consumed,
               previousReducerResultPath,
               previousUnresolvedCandidates: latestResult?.unresolvedCandidates,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -1107,13 +1094,14 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
-        { recoverCandidateReceipts: true },
+        { ...this.state, recoverCandidateReceipts: true },
       );
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
         result,
         completionSequence: worker.completionSequence,
+        attempt: worker.attempt,
       });
     }
     return recovered.sort(compareCompletionSequence);
@@ -1122,9 +1110,7 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveriesById = new Map(
-      discoveries.map((worker) => [worker.id, worker]),
-    );
+    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
     const inputs = this.state.persistedDedupInputs ?? [];
     let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
@@ -1155,7 +1141,7 @@ export class DeepScanCoordinator {
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveriesById.get(input.discoveryWorkerId));
+        .map((input) => discoveryIds.has(input.discoveryWorkerId));
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
@@ -1171,16 +1157,39 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
-      // Receipt recovery can reopen candidates even in current reducers. Derive
-      // their state from the accepted inputs without rewriting saved artifacts.
-      const pending = collectUnresolvedCandidates(
-        consumed.map((source) => ({
-          workerId: source!.id,
-          result: discoveryReductionInput(source!.result, source!.id),
-        })),
+      const accepted = discoveries.filter((source) =>
+        inputs.some(
+          (input) =>
+            input.dedupWorkerId === worker.id &&
+            input.discoveryWorkerId === source.id,
+        ),
+      );
+      const sources = await readDeepReductionSources({
+        root: worker.artifactDir,
+        repoRoot: this.state.targetPath,
+        scanId: this.state.scanId,
+        layout: "reducer",
+        scope: this.state.scope,
+        includePaths: this.state.includePaths,
+        filePaths: this.state.filePaths,
+        deepReducer: {
+          scanRoot: this.artifacts.scanDir,
+          claimedWorkers: accepted.map((source) => ({
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
+          })),
+        },
+      });
+      result.sourceCoverage = aggregateSourceCoverage(
+        sources.discoveries,
         latestResult ?? null,
       );
-      if (pending.length > 0) result.unresolvedCandidates = pending;
+      const pending = collectUnresolvedCandidates(
+        sources.discoveries,
+        latestResult ?? null,
+      );
+      if (pending.length) result.unresolvedCandidates = pending;
       else delete result.unresolvedCandidates;
       latestResult = result;
       resultPath = worker.resultManifestPath;

@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { basename, dirname } from "node:path";
+import { coverageReceiptComponents } from "./coverage-publication.js";
+import { isRecord as isObject } from "./record.js";
 import { isDeepStrictEqual } from "node:util";
 import type { ArtifactContext } from "./artifact-context.js";
 import { isTerminalCandidateDecision } from "./artifact-candidates.js";
@@ -10,12 +13,48 @@ import {
 } from "./artifact-io.js";
 import type { JsonObject } from "./types.js";
 
+export function workerCoverageReceiptLocation(
+  context: ArtifactContext,
+  surface: JsonObject,
+  ref: string,
+): { context: ArtifactContext; components: string[] } {
+  const components = coverageReceiptComponents(ref);
+  if (context.layout !== "worker") return { context, components };
+  const parent = dirname(context.root);
+  const archived = basename(parent) === "attempts";
+  const worker = archived ? dirname(parent) : parent;
+  const workerPrefix = `artifacts/deep_discovery/workers/${basename(worker)}/`;
+  const outputPrefix = `${workerPrefix}output/`;
+  const shared =
+    isObject(surface.provenance) &&
+    (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
+  if (archived && !shared && ref.startsWith(outputPrefix)) {
+    return {
+      context,
+      components: coverageReceiptComponents(ref.slice(outputPrefix.length)),
+    };
+  }
+  if (
+    shared ||
+    ref.startsWith(outputPrefix) ||
+    ref.startsWith(`${workerPrefix}attempts/`)
+  ) {
+    return {
+      context: {
+        ...context,
+        root: dirname(dirname(dirname(dirname(worker)))),
+      },
+      components,
+    };
+  }
+  return { context, components };
+}
+
 /** Keep receipts and candidate evidence bound to the worker attempt that saved them. */
 export async function recoverWorkerCandidateReceipts(
   coverage: JsonObject,
   source: ArtifactContext,
   retainIn?: ArtifactContext,
-  copiedReceiptRefs?: Set<string>,
 ): Promise<Set<string>> {
   const reopened = new Set<string>();
   const deferred = coverage.deferred as JsonObject[];
@@ -59,9 +98,14 @@ export async function recoverWorkerCandidateReceipts(
           throw new Error("Worker candidate receipt must be a string.");
         if (!ref.startsWith("artifacts/"))
           throw new Error("Worker candidate receipt must be under artifacts/.");
-        contents = await readArtifactBytes(
+        const location = workerCoverageReceiptLocation(
           source,
-          ref.split("/").filter((part) => part !== "" && part !== "."),
+          (coverage.surfaces as JsonObject[]).includes(surface) ? surface : {},
+          ref,
+        );
+        contents = await readArtifactBytes(
+          location.context,
+          location.components,
           "Worker candidate receipt",
         );
       } catch (error) {
@@ -143,7 +187,6 @@ export async function recoverWorkerCandidateReceipts(
         await replaceArtifactBytes(destination, contents);
       }
       retainedRefs.push(components.join("/"));
-      copiedReceiptRefs?.add(components.join("/"));
     }
     surface.receiptRefs = retainedRefs;
   }

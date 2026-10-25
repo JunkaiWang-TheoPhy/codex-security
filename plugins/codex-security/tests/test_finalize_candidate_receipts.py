@@ -109,6 +109,27 @@ class FinalizeCandidateReceiptsTest(unittest.TestCase):
                         )
                     )
 
+    def test_projected_surface_recovers_into_legacy_candidate_gap(self) -> None:
+        self.coverage["completeness"] = "partial"
+        surface = self.coverage["surfaces"][0]
+        surface.update(
+            candidateId="worker-attempt-1-candidate-digest",
+            provenance={"workerId": "worker", "attempt": 1, "candidateId": "candidate-review"},
+            disposition="rejected",
+            receiptRefs=["artifacts/missing.txt"],
+        )
+        previous = {
+            "id": "saved-review",
+            "candidateId": "candidate-review",
+            "sourceWorkerId": "worker",
+            "reason": "Original validation is still missing.",
+        }
+        self.coverage["deferred"] = [previous]
+        self.write_scan()
+        prepared = FINALIZER._prepare_scan_finalization(self.scan_dir, recover_unsealed=True)
+        self.assertEqual(prepared.coverage["surfaces"][0]["disposition"], "needs_follow_up")
+        self.assertEqual(prepared.coverage["deferred"], [previous])
+
     def test_receipt_recovery_preserves_closed_generic_task_identities(self) -> None:
         original = copy.deepcopy(self.coverage)
         for disposition in ("rejected", "not_applicable"):
