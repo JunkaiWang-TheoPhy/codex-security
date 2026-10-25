@@ -364,7 +364,9 @@ test("parent configuration reads inherited namespaces and preserves dotted SDK o
     ...expected("last"),
     model_auto_compact_token_limit: 2 ** 53,
   });
-  await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow();
+  await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow(
+    /Could not read the Deep Scan parent configuration[\s\S]*code_mode/u,
+  );
 });
 
 test("parent configuration launches from the caller and reads the scan directory", async () => {

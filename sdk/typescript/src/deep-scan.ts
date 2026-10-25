@@ -66,7 +66,7 @@ export async function readDeepScanParentConfig(
       configOverrides: [...overrides, ...(codexOptions.configOverrides ?? [])],
       env: environment,
       signal: options.signal,
-      context: "helper",
+      context: "parent-config",
     }),
   );
 }
