@@ -89,13 +89,17 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
       sourceKey: "example-project/main",
     };
     const dependencies = { environment: fixture.environment };
-    const parsed = await readVendorFindings(file);
+    const parsed = await readVendorFindings(file, "local");
     const prepared = await prepareLocalExternalImport(
       file,
       options,
       dependencies,
     );
     expect(prepared.preview.findings).toEqual(parsed.findings);
+    expect(prepared.preview.source).toEqual({
+      provider: "wiz",
+      source_key: options.sourceKey,
+    });
     await expect(
       access(join(fixture.stateDirectory, "workbench.sqlite3")),
     ).rejects.toThrow();
@@ -107,6 +111,7 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
     );
     expect(stored).toEqual(first.findings);
     expect(stored[0]).toMatchObject({
+      provider: "wiz",
       sourceFindingId: "package-occurrence",
       assessment: { state: "not_assessed" },
       version: 1,
@@ -195,7 +200,7 @@ test.each([
           file,
           format === "gzip JSON" ? gzipSync(contents) : contents,
         );
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         if (format.includes("normalized JSONL")) {
           const normalized = parsed.findings
             .map((finding) => JSON.stringify(finding))
@@ -263,7 +268,7 @@ test.each(["raw JSON", "normalized JSONL"])(
       async function writeSelection(url: string) {
         record.vulnerableAsset.cloudProviderURL = url;
         await writeFile(file, JSON.stringify([record]));
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         if (format === "normalized JSONL")
           await writeFile(
             file,
@@ -380,7 +385,7 @@ for (const kind of [
           sourceKey: "named-project/main",
         };
         const dependencies = { environment: fixture.environment };
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         expect(parsed.findings).toHaveLength(1);
         expect(parsed.excluded).toHaveLength(1);
         execFileSync(
