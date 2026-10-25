@@ -104,7 +104,11 @@ import {
 import type { ScanTokenUsage } from "./cost-model.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
-import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
+import {
+  DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  readDeepScanParentConfig,
+  runDeepScan,
+} from "./deep-scan.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -675,6 +679,7 @@ interface ClientDependencies {
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
   runDeepScan?: typeof runDeepScan;
+  readDeepScanParentConfig?: typeof readDeepScanParentConfig;
   canRunDirectDeepScan?: () => boolean;
 }
 
@@ -2856,10 +2861,36 @@ export class CodexSecurity {
           runtimePaths,
           options.auth,
           git,
-          mode === "deep" && !directDeepScan
-            ? deepScanParentConfig(session.sessionConfig)
-            : undefined,
         );
+      let parentCodex = codex;
+      if (
+        mode === "deep" &&
+        !directDeepScan &&
+        !this.#dependencies.hostedScan
+      ) {
+        const parentConfig = await (
+          this.#dependencies.readDeepScanParentConfig ??
+          readDeepScanParentConfig
+        )({
+          codexOptions,
+          preflightCommand:
+            await this.#providerPreflightCommand(effectiveConfig),
+          pluginRoot: runtime.plugin.pluginRoot,
+          scanDir,
+          signal,
+        });
+        const override = deepScanParentToolOverride(parentConfig);
+        if (override !== undefined) {
+          // Only the coordinator turn needs to keep its MCP call outside a yielding cell.
+          parentCodex = await this.#dependencies.createCodex({
+            ...codexOptions,
+            configOverrides: [
+              ...(codexOptions.configOverrides ?? []),
+              override,
+            ],
+          });
+        }
+      }
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
@@ -2868,18 +2899,18 @@ export class CodexSecurity {
       };
       let thread: CodexThreadLike;
       if (typeof resumeThreadId === "string") {
-        if (codex.resumeThread === undefined) {
+        if (parentCodex.resumeThread === undefined) {
           throw new CodexSecurityError(
             "The configured Codex client does not support resuming sessions.",
           );
         }
-        thread = codex.resumeThread(resumeThreadId, threadOptions);
+        thread = parentCodex.resumeThread(resumeThreadId, threadOptions);
         tracker.start(resumeThreadId);
         if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
         await tracker.refresh().catch(reportTrackingError);
         checkOpen();
       } else {
-        thread = codex.startThread(threadOptions);
+        thread = parentCodex.startThread(threadOptions);
       }
       const serializedPaths =
         normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
@@ -2898,8 +2929,25 @@ export class CodexSecurity {
         cyberAccessProgram: options.cyberAccessProgram,
       };
       const postScanPrompt = options.postScanPrompt;
+      let scanThreadId = thread.id;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
+        runPostScan = () => {
+          if (
+            (parentCodex !== codex || directDeepScan) &&
+            scanThreadId !== null
+          ) {
+            if (!codex.resumeThread)
+              throw new CodexSecurityError(
+                "The configured Codex client does not support resuming sessions.",
+              );
+            return codex
+              .resumeThread(scanThreadId, threadOptions)
+              .runStreamed(postScanPrompt, turnOptions);
+          }
+          const followUp =
+            parentCodex === codex ? thread : codex.startThread(threadOptions);
+          return followUp.runStreamed(postScanPrompt, turnOptions);
+        };
       }
       if (mode === "standard" && options.maxTimeMinutes !== undefined) {
         const timePolicy = await readScanTimeBudgetPolicy(
@@ -2953,17 +3001,7 @@ export class CodexSecurity {
               "Codex did not resume the original scan session.",
             );
           }
-          if (directDeepScan && postScanPrompt?.trim()) {
-            runPostScan = () => {
-              if (codex.resumeThread === undefined)
-                throw new CodexSecurityError(
-                  "The configured Codex client does not support resuming sessions.",
-                );
-              return codex
-                .resumeThread(threadId, threadOptions)
-                .runStreamed(postScanPrompt, turnOptions);
-            };
-          }
+          scanThreadId = threadId;
           if (resumeThreadId !== undefined) {
             return;
           }
@@ -5813,30 +5851,18 @@ export function classifyConnectionFailure(
   return "unknown";
 }
 
-function deepScanParentConfig(config: JsonObject): JsonObject {
-  const resolved = resolveCodexProfile(config);
-  const features = resolved["features"] ?? {};
-  if (!isRecord(features)) return resolved;
+function deepScanParentToolOverride(config: JsonObject): string | undefined {
+  const features = config["features"] ?? {};
+  if (!isRecord(features)) return undefined;
   const mode = features["code_mode"];
-  const settings = typeof mode === "boolean" ? { enabled: mode } : (mode ?? {});
-  // Leave malformed user settings for the native config parser to reject.
-  if (!isRecord(settings)) return resolved;
-  const direct = settings["direct_only_tool_namespaces"] ?? [];
-  if (!Array.isArray(direct)) return resolved;
-  // The native parent waits for direct tool calls before it can end its turn.
-  // A code-mode cell can yield the still-running coordinator to the model.
-  return {
-    ...resolved,
-    features: {
-      ...features,
-      code_mode: {
-        ...settings,
-        direct_only_tool_namespaces: [
-          ...new Set([...direct, "mcp__codex_security", "codex_security"]),
-        ],
-      },
-    },
-  };
+  if (mode !== undefined && typeof mode !== "boolean" && !isRecord(mode))
+    return undefined;
+  const direct =
+    (isRecord(mode) ? mode["direct_only_tool_namespaces"] : undefined) ?? [];
+  if (!Array.isArray(direct)) return undefined;
+  const required = ["mcp__codex_security", "codex_security"];
+  if (required.every((name) => direct.includes(name))) return undefined;
+  return `features.code_mode.direct_only_tool_namespaces=${inlineToml([...new Set([...direct, ...required])])}`;
 }
 
 export function scanRuntimeCodexConfig(

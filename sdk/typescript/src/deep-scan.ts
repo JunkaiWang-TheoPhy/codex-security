@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { CodexSecurityError } from "./errors.js";
+import { inlineToml, type JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import { executablePathForSpawn, type CodexCommand } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
@@ -17,6 +19,60 @@ export interface DirectDeepScanOptions {
   scanId: string;
   prompt: string;
   signal: AbortSignal;
+}
+
+// The stock SDK emits one flag per leaf, including literal dotted keys in order.
+function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return isRecord(value) && Object.keys(value).length
+      ? sdkConfigFlags(value, path)
+      : [`${path}=${inlineToml(value)}`];
+  });
+}
+
+/** Read the same native layers and CLI overrides as the parent before adding its tool. */
+export async function readDeepScanParentConfig(
+  options: Pick<
+    DirectDeepScanOptions,
+    "codexOptions" | "preflightCommand" | "pluginRoot" | "scanDir" | "signal"
+  >,
+): Promise<JsonObject> {
+  const { codexOptions, preflightCommand: command } = options;
+  const native = await import(
+    pathToFileURL(
+      join(options.pluginRoot, "mcp", "permission-profile-preflight.mjs"),
+    ).href
+  );
+  const config = codexOptions.config ?? {};
+  // The provider-profile launcher emits whole top-level tables instead.
+  const overrides =
+    codexOptions.nativeProfile === undefined
+      ? sdkConfigFlags(config)
+      : (
+          await import(
+            pathToFileURL(
+              join(options.pluginRoot, "scripts", "codex_profile.mjs"),
+            ).href
+          )
+        ).profileConfigOverrides(config);
+  const environment = bundledCodexSdkEnvironment(command.command, {
+    ...codexOptions.env,
+    ...(codexOptions.apiKey === undefined
+      ? {}
+      : { CODEX_API_KEY: codexOptions.apiKey }),
+  });
+  return withCodexPreflightLock(environment, options.signal, () =>
+    native.readDeepScanRuntimeConfig({
+      codexPath: command.command,
+      commandArgs: command.args,
+      cwd: options.scanDir,
+      configOverrides: [...overrides, ...(codexOptions.configOverrides ?? [])],
+      env: environment,
+      signal: options.signal,
+      context: "helper",
+    }),
+  );
 }
 
 // The direct coordinator records context but never calls a model itself.

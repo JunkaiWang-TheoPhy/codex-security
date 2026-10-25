@@ -1,8 +1,13 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
-import type { DirectDeepScanOptions } from "../src/deep-scan.js";
+import {
+  readDeepScanParentConfig,
+  type DirectDeepScanOptions,
+} from "../src/deep-scan.js";
+import { resolveCodexCommand } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
   preparedRuntime,
@@ -78,6 +83,7 @@ test.each([
     );
     throw new Error("direct route reached");
   });
+  const started: CodexOptions[] = [];
   const createCodex = mock((options: CodexOptions) => {
     expect(options.apiKey).toBe("synthetic-routing-key");
     expect(options.env?.["CODEX_MCP_NODE_PATH"]).toBe(selectedNode);
@@ -87,20 +93,14 @@ test.each([
       model_reasoning_effort: "high",
       features: {
         shell_tool: false,
-        code_mode:
-          typeof codeMode === "string" || scenario.route === "direct"
-            ? codeMode
-            : {
-                direct_only_tool_namespaces: [
-                  "existing_tools",
-                  "mcp__codex_security",
-                  "codex_security",
-                ],
-              },
+        code_mode: codeMode,
       },
     });
     return {
-      startThread: () => ({ id: null, runStreamed: parentTurn }),
+      startThread: () => {
+        started.push(options);
+        return { id: null, runStreamed: parentTurn };
+      },
     };
   });
   const client = new TestClient(
@@ -139,7 +139,17 @@ test.each([
     await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
       `${scenario.route} route reached`,
     );
-    expect(createCodex).toHaveBeenCalledTimes(1);
+    expect(started).toHaveLength(1);
+    const overrides = started[0]!.configOverrides?.filter((value) =>
+      value.startsWith("features.code_mode.direct_only_tool_namespaces="),
+    );
+    expect(overrides).toEqual(
+      scenario.route === "parent" && typeof codeMode !== "string"
+        ? [
+            'features.code_mode.direct_only_tool_namespaces=["existing_tools","mcp__codex_security","codex_security"]',
+          ]
+        : [],
+    );
     expect(parentTurn).toHaveBeenCalledTimes(
       scenario.route === "parent" ? 1 : 0,
     );
@@ -150,4 +160,32 @@ test.each([
   } finally {
     await client.close();
   }
+});
+
+test("parent configuration reads inherited namespaces and preserves dotted SDK override order", async () => {
+  const home = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  await writeFile(
+    join(home, "config.toml"),
+    '[features.code_mode]\ndirect_only_tool_namespaces = ["inherited_tools"]\n',
+  );
+  const read = (config: CodexOptions["config"]) =>
+    readDeepScanParentConfig({
+      codexOptions: { config, env: { CODEX_HOME: home } },
+      preflightCommand: resolveCodexCommand({}),
+      pluginRoot: PLUGIN_ROOT,
+      scanDir,
+      signal: new AbortController().signal,
+    });
+  const expected = (name: string) => ({
+    features: { code_mode: { direct_only_tool_namespaces: [name] } },
+  });
+  expect(await read({})).toMatchObject(expected("inherited_tools"));
+  expect(
+    await read({
+      features: { "code_mode.direct_only_tool_namespaces": ["first"] },
+      "features.code_mode.direct_only_tool_namespaces": ["last"],
+    }),
+  ).toMatchObject(expected("last"));
+  await expect(read({ "features.code_mode": "invalid" })).rejects.toThrow();
 });
