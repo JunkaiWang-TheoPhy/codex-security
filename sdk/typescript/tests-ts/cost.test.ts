@@ -220,7 +220,11 @@ describe("scan cost", () => {
       onUsageObservation: (observation) => observations.push(observation),
     });
     tracker.start(scanThreadId);
-    expect((await tracker.stop()).measurement.usage).toEqual(ownedSdkUsage);
+    expect((await tracker.stop()).measurement).toMatchObject({
+      coverage: "partial",
+      usage: ownedSdkUsage,
+      missingThreadCount: 1,
+    });
     expect(observations).toEqual([
       {
         tokensUpdatedAt: "2026-07-26T12:02:00.250Z",

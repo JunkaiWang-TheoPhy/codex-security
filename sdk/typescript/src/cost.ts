@@ -630,8 +630,8 @@ export class ScanCostTracker {
           tokensUpdatedAt = session.tokensUpdatedAt;
       }
     }
-    if (!complete) {
-      // The display retains the last complete aggregate while a worker is unmeasured.
+    if (!complete && this.#lastUsage !== null) {
+      // Keep the last complete total's time while a worker is unmeasured.
       tokensUpdatedAt = this.#lastObservation?.tokensUpdatedAt ?? null;
     } else if (
       usages
