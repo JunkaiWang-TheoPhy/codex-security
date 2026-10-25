@@ -651,6 +651,7 @@ describe("TypeScript package skeleton", () => {
       expect(steps[index]).not.toHaveProperty("continue-on-error");
       const mcp = steps[index + 1]!;
       expect(mcp).toMatchObject({
+        if: "${{ !cancelled() && (steps.sdk-audit.outcome == 'success' || steps.sdk-audit.outcome == 'failure') }}",
         "working-directory": "plugins/codex-security/mcp-app",
         run: `${launcher} audit --prod --audit-level high --config.lockfile-dir=.`,
       });
