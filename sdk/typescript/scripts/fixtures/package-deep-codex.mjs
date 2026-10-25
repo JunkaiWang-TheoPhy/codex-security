@@ -260,6 +260,7 @@ async function runWorker(args, config, resumed, model, signal) {
     existsSync(process.env.PACKAGE_DEEP_HOLD)
   ) {
     await trace({ phase: "held", scanId: env.CODEX_SECURITY_SCAN_ID });
+    await writeFile(process.env.PACKAGE_DEEP_HOLD, "held");
     await new Promise((resolve) => {
       const timer = setInterval(() => {}, 1_000);
       const stop = () => {
