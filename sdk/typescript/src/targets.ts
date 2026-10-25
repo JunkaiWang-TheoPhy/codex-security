@@ -159,7 +159,7 @@ export function resolveTargetPath(
   value: string,
   directory = process.cwd(),
 ): string {
-  if (process.platform === "win32") return resolve(directory, value);
+  if (sep === "\\") return resolve(directory, value);
   const base = isAbsolute(directory)
     ? directory
     : `${process.cwd()}/${directory}`;
