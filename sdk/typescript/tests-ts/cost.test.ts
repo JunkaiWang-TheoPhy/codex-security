@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { jsonLines } from "./support/json.js";
@@ -755,6 +756,73 @@ test.each(["missing", "short", "append", "split-utf8"] as const)(
     }
   },
 );
+
+test("includes worker usage appended during final event replay", async () => {
+  const home = await codexHome();
+  const parent = await writeSession(home, "scan-thread", {});
+  const worker = join(dirname(parent), "rollout-worker-thread.jsonl");
+  const workerMeta = {
+    type: "session_meta",
+    payload: {
+      id: "worker-thread",
+      ...parentMetadata("scan-thread", "source"),
+    },
+  };
+  const usage = (
+    inputTokens: number,
+    usedPercent: number,
+    timestamp: string,
+  ) => ({
+    type: "event_msg",
+    timestamp,
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { input_tokens: inputTokens, output_tokens: 0 },
+      },
+      rate_limits: { primary: { used_percent: usedPercent } },
+    },
+  });
+  await appendFile(
+    parent,
+    jsonLines([usage(10, 0, "2026-07-26T12:00:00.000Z")]) + "\n",
+  );
+  const initial = usage(0, 0, "2026-07-26T12:01:00.000Z");
+  const last = usage(5_000, 50, "2026-07-26T12:02:00.000Z");
+  const workerEvents: ScanSessionEvent["event"][] = [];
+  const observations: ScanUsageObservation[] = [];
+  const tracker = costTracker(home, {
+    onUsageObservation: (observation) => observations.push(observation),
+    onSessionEvent: ({ threadId, event }) => {
+      if (threadId === "worker-thread") workerEvents.push(event);
+      // The parent callback runs after the worker's first read and before its replay.
+      if (threadId === "scan-thread" && event["type"] === "response_item")
+        appendFileSync(worker, jsonLines([last]) + "\n");
+    },
+  });
+  tracker.start("scan-thread");
+  try {
+    await tracker.refresh();
+    writeFileSync(worker, jsonLines([workerMeta, initial]) + "\n");
+    appendFileSync(
+      parent,
+      jsonLines([{ type: "response_item", payload: progressMessage(2) }]) +
+        "\n",
+    );
+    const final = await tracker.stop();
+    expect(await filesystem.readFile(worker, "utf8")).toContain(last.timestamp);
+    expect(final.cost?.inputTokens).toBe(5_010);
+    expect(observations.at(-1)).toMatchObject({
+      tokensUpdatedAt: last.timestamp,
+      accountRateLimits: [
+        { observedAt: last.timestamp, primary: { usedPercent: 50 } },
+      ],
+    });
+    expect(workerEvents).toEqual([workerMeta, initial, last]);
+  } finally {
+    await tracker.stop();
+  }
+});
 
 test.each(["open", "read", "close"] as const)(
   "retries an association replay after %s fails without losing early events",

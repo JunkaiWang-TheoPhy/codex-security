@@ -12801,10 +12801,10 @@ describe("CodexSecurity orchestration", () => {
             ["save", "scope", inventory(5)],
             ["save", "review", progress("validation", 1, 5)],
             ["poll"],
-            ["save", "late", inventory(9)],
+            ["save", "anchor", inventory(9)],
             ["live", "review", progress("validation", 1, 5)],
             ...(exact ? [["poll"] as Step] : []),
-            ["live", "late", inventory(9)],
+            ["live", "anchor", inventory(9)],
             ...finish(
               progress("validation", 1, 5),
               progress("reporting", 2, 5),

@@ -2398,7 +2398,18 @@ export class ScanCostTracker {
           undefined,
           session.offset,
         );
-        if (replay.offset === session.offset) session.events = replay.events;
+        if (replay.offset === session.offset) {
+          session.events = replay.events;
+          // At stop there is no next poll to read usage appended during replay.
+          if (this.#timer === null)
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              progressThread,
+              "file-size",
+            );
+        }
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -2929,12 +2940,14 @@ async function readSessionUsage(
   session: SessionUsage,
   repository?: string,
   progressThread?: string,
-  throughOffset?: number,
+  throughOffset?: number | "file-size",
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
   try {
-    if ((await stat(path)).size === session.offset) return;
+    const size = (await stat(path)).size;
+    if (size === session.offset) return;
+    if (throughOffset === "file-size") throughOffset = size;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
