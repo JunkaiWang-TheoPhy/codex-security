@@ -3697,7 +3697,7 @@ test.each([
       reasoning_output_tokens: reasoning,
       total_tokens: input + output,
     });
-    const event = <Payload,>(
+    const event = <Payload>(
       second: number,
       type: string,
       payload: Payload,
