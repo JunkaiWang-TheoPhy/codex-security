@@ -2043,7 +2043,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ) {
               const acl = windowsAcl(workerLaunch.markerPath);
               assert.ok(!acl.includes(";;;WD)"));
-              assert.equal(invocation.cwd, fixture.root);
             }
             for (const name of [
               "LD_LIBRARY_PATH",
@@ -2069,6 +2068,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.sqliteHome, sqliteHome);
+            assert.equal(invocation.cwd, await realpath(workerCwd));
             assert.equal(invocation.thread.params.cwd, workerCwd);
             assert.deepEqual(invocation.temporaryEnvironment, {
               ...temporaryEnvironments[index],
@@ -2900,7 +2900,23 @@ async function testLargeScopeTransport() {
 }
 
 async function testScopeFileCleanup() {
+  const originalSpawn = childProcess.spawn;
   await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    process.env.CODEX_CLI_PATH = process.execPath;
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) =>
+      originalSpawn(
+        command,
+        command === process.execPath ||
+          command === path.toNamespacedPath(process.execPath)
+          ? [fixture.executablePath, ...args]
+          : args,
+        options,
+      )) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
     const executor = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
       artifactContext: {
@@ -2935,7 +2951,7 @@ async function testScopeFileCleanup() {
         run(controller, () => {
           if (prompt === "BLOCK_AFTER_START") controller.abort(reason);
         }),
-        /abort|fixture worker failed/i,
+        prompt === "BLOCK_AFTER_START" ? /abort/i : /fixture worker failed/i,
       );
       const invocation = await readJson(fixture.markerPath);
       await assert.rejects(readFile(invocation.scopeInput.file), {
@@ -2946,6 +2962,9 @@ async function testScopeFileCleanup() {
       (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
       false,
     );
+  }).finally(() => {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
   });
 }
 
