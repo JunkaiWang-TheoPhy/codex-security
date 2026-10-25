@@ -210,14 +210,15 @@ export function refreshDiffCandidateHistory(
       if (disposition === undefined && authoredResolutions.has(key))
         return surface;
       if (disposition === undefined) {
-        const item = pending ?? {
-          candidateId: candidate.candidate_id,
-          candidate,
-          reason: candidateReason(candidate),
-          ...(surface.finding === undefined
-            ? {}
-            : { finding: surface.finding }),
-        };
+        const item = pending ??
+          reopened.get(key) ?? {
+            candidateId: candidate.candidate_id,
+            candidate,
+            reason: candidateReason(candidate),
+            ...(surface.finding === undefined
+              ? {}
+              : { finding: surface.finding }),
+          };
         if (!deferred.includes(item)) deferred.push(item);
         if (!reopened.has(key)) reopened.set(key, item);
       } else if (generatedFollowUp) {

@@ -962,7 +962,8 @@ def _stopped_diff_candidate_decisions(
     }
     authoritative = finding_ids | authored_ids
     tracked = pending.keys() | generated.keys() | authoritative
-    if not tracked:
+    if not (pending or generated or authored_ids or marked_ids):
+        # Unmarked findings are merged from saved sources; there is no decision to freeze.
         return None
     coverage = {
         "surfaces": [],
@@ -1585,14 +1586,12 @@ def reconcile_candidate_outcomes(
     # Reopened work and selected checkpoint outcomes follow the saved source order.
     for relative, owner, candidate_id, disposition, order in outcomes:
         key = (owner, candidate_id)
-        if pending_surface_orders.get(key, (-1, -1)) >= order:
-            inactive_outcomes.add((relative, key))
-            continue
+        surface_reopened = pending_surface_orders.get(key, (-1, -1)) >= order
         if key not in ordered_candidates:
-            if relative == "parent" or relative in current_results:
+            if not surface_reopened and (relative == "parent" or relative in current_results):
                 resolved.setdefault(key, disposition)
             continue
-        if pending_candidate_orders.get(key, (-1, -1)) >= order or any(
+        if any(
             (
                 coverage_candidate(saved_owner, row)
                 or (saved_owner, _deferred_candidate_id(row, saved_owner, ambiguous_deferred))
@@ -1624,6 +1623,11 @@ def reconcile_candidate_outcomes(
             for (saved_owner, _), (saved_order, row, saved_relative) in active_deferred.items()
         ):
             inactive_outcomes.add((relative, key))
+            continue
+        if surface_reopened or pending_candidate_orders.get(key, (-1, -1)) >= order:
+            # A surface-only retry keeps the earlier dismissal as evidence.
+            if disposition == "reported":
+                inactive_outcomes.add((relative, key))
             continue
         previous = ordered_outcomes.get(key)
         if previous is None or (

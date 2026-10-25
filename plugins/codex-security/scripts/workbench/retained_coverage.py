@@ -1575,27 +1575,6 @@ def merge_saved_results(
             return attempt, order[1]
         return order
 
-    # Publish the same corroborated owner that was used to reconcile the parent.
-    for parent_coverage in [
-        coverage,
-        *(draft["coverage"] for _, draft, owner in all_sources if owner is None),
-    ]:
-        for field in ("surfaces", "explicitExclusions", "deferred"):
-            for row in _coverage_rows(parent_coverage, field):
-                if not isinstance(row, dict) or not isinstance(
-                    provenance := row.get("provenance"), dict
-                ):
-                    continue
-                key = coverage_candidate_key(row)
-                if (
-                    key is not None
-                    and isinstance(claimed := provenance.get("workerId"), str)
-                    and claimed in workers_by_id
-                    and key != coverage_candidate(None, row)
-                ):
-                    provenance.pop("workerId", None)
-                    provenance.pop("candidateId", None)
-
     reuse_candidate_task_ids(all_sources)
     deferred_rows = {
         relative: _coverage_rows(draft["coverage"], "deferred")
@@ -1775,6 +1754,43 @@ def merge_saved_results(
         candidate_order=candidate_order,
         valid_finding=valid_finding,
     )
+    worker_pending_keys = {
+        coverage_candidate_key(row, owner)
+        for _, draft, owner in sources
+        if owner is not None
+        for row in _coverage_rows(draft["coverage"], "deferred")
+        if isinstance(row, dict)
+    }
+    # Only discard a parent claim when it could hide pending work.
+    # Other parent edits can retain the historical worker in their provenance.
+    for parent_coverage in [
+        coverage,
+        *(draft["coverage"] for _, draft, owner in all_sources if owner is None),
+    ]:
+        for field in ("surfaces", "explicitExclusions", "deferred"):
+            for row in _coverage_rows(parent_coverage, field):
+                if not isinstance(row, dict) or not isinstance(
+                    provenance := row.get("provenance"), dict
+                ):
+                    continue
+                key = coverage_candidate_key(row)
+                if (
+                    key is not None
+                    and isinstance(claimed := provenance.get("workerId"), str)
+                    and claimed in workers_by_id
+                    and (
+                        field == "deferred"
+                        or (
+                            row.get("disposition") in ("rejected", "not_applicable")
+                            and key in worker_pending_keys
+                            and key not in resolved
+                        )
+                    )
+                    and key != coverage_candidate(None, row)
+                ):
+                    provenance.pop("workerId", None)
+                    provenance.pop("candidateId", None)
+
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
@@ -1818,7 +1834,7 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
-                            if not any(
+                            if ("parent", bound_key) not in inactive_outcomes and not any(
                                 saved_owner == bound_key[0]
                                 and _deferred_candidate_id(row, saved_owner, ambiguous_deferred)
                                 == bound_key[1]

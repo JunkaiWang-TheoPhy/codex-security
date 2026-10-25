@@ -332,10 +332,21 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
 
 
 @pytest.mark.parametrize(
-    "author, claimed_attempt, expected", [("worker", 1, 1), ("parent", 99, 1), ("parent", 1, 0)]
+    "author, claimed_attempt, worker_succeeded, expected",
+    [
+        ("worker", 1, True, 1),
+        ("parent", 99, True, 1),
+        ("parent", 1, True, 0),
+        ("parent", 99, False, 1),
+    ],
 )
 def test_stopped_candidate_counts_use_bound_worker_provenance(
-    tmp_path: Path, workbench_api, author: str, claimed_attempt: int, expected: int
+    tmp_path: Path,
+    workbench_api,
+    author: str,
+    claimed_attempt: int,
+    worker_succeeded: bool,
+    expected: int,
 ) -> None:
     module = workbench_api["saved_results"]
     scan_id = "bound-candidate"
@@ -355,15 +366,14 @@ def test_stopped_candidate_counts_use_bound_worker_provenance(
         complete=True,
         **({"surfaces": [rejection]} if author == "worker" else {"deferred": [pending]}),
     )
-    path = accepted_root / "result.json"
-    path.write_text(json.dumps(initial))
-    workers = [
-        {
-            **saved_discovery_worker(accepted_root, "accepted"),
-            "status": "succeeded",
-            "result_manifest_path": str(path),
-        }
-    ]
+    worker = saved_discovery_worker(accepted_root, "accepted")
+    if worker_succeeded:
+        path = accepted_root / "result.json"
+        path.write_text(json.dumps(initial))
+        worker.update(status="succeeded", result_manifest_path=str(path))
+    else:
+        write_checkpoint(accepted_root / "checkpoints", initial)
+    workers = [worker]
     if author == "worker":
         raw_root = tmp_path / "artifacts" / "unfinished"
         workers.append(saved_discovery_worker(raw_root, "unfinished"))

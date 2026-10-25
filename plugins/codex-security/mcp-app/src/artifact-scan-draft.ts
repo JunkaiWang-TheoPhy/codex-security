@@ -728,8 +728,14 @@ async function qualifyWorkerReceipts(
           return archived.slice(archived.indexOf("/") + 1) === localRef;
         });
         if (retained !== undefined) return retained;
-        // A same-name parent file cannot establish a candidate decision's receipt.
-        if (ref.startsWith(activePrefix) || requiresWorkerReceipt(surface))
+        // A pending worker may observe a shared file when it first records the
+        // reference. A later parent file cannot supply missing candidate proof.
+        if (
+          ref.startsWith(activePrefix) ||
+          (requiresWorkerReceipt(surface) &&
+            (surface.disposition !== "needs_follow_up" ||
+              previousRefs.includes(ref)))
+        )
           return ref;
         try {
           await requireRegularFile(join(scanRoot, ref), scanRoot, true);
@@ -830,7 +836,9 @@ async function preserveScanDraft(
     string,
     { pending: JsonObject; source: SavedScanDraft }
   >();
+  const authoredArchiveRows = new Map<SavedScanDraft, number>();
   for (const source of archived) {
+    authoredArchiveRows.set(source, source.input.coverage.deferred.length);
     const recovered = await recoverWorkerCandidateReceipts(
       source.input.coverage,
       {
@@ -989,12 +997,25 @@ async function preserveScanDraft(
       ),
     );
     const deferred = source.coverage.deferred.map((row) => {
-      if (typeof row.id === "string") return row;
-      const matching = savedDeferred.find(
+      const { id: rawId, ...rawContent } = row;
+      // Publication can rename a colliding candidate ID already owned by another row.
+      const published = previous?.coverage.deferred ?? [];
+      const renamed =
+        typeof rawId === "string" &&
+        typeof row.candidateId === "string" &&
+        published.some(
+          (other) =>
+            other.id === rawId && coverageKey(other) !== coverageKey(row),
+        );
+      if (typeof rawId === "string" && !renamed) return row;
+      const matching = (renamed ? published : savedDeferred).find(
         ({ id, ...content }) =>
           typeof id === "string" &&
           !reservedIds.has(id) &&
-          isDeepStrictEqual(content, row),
+          (!renamed ||
+            (id.startsWith(rawId + "-") &&
+              /^\d+$/.test(id.slice(rawId.length + 1)))) &&
+          isDeepStrictEqual(content, rawContent),
       );
       if (matching === undefined) return row;
       const id = matching.id as string;
@@ -1467,6 +1488,7 @@ async function preserveScanDraft(
             sameSavedFinding(
               current,
               containing.length === 1 ? finding : matches[0]!,
+              owner,
             ),
         ).length === 1
       ) {
@@ -1565,14 +1587,19 @@ async function preserveScanDraft(
       )
         currentSurfaces.push(structuredClone(surface));
     }
+    const authoredCount = authoredArchiveRows.get(savedSources[sourceIndex]!);
     const previousCoverage = {
       ...source.coverage,
-      deferred: source.coverage.deferred.filter((item) => {
+      deferred: source.coverage.deferred.filter((item, index) => {
         const candidateId = coverageKey(item);
+        const covered =
+          authoredCount !== undefined && index >= authoredCount
+            ? representedCandidateKeys
+            : resolvedCandidateKeys;
         return (
           (keepsGenericWork(item) ||
             typeof candidateId !== "string" ||
-            !resolvedCandidateKeys.has(candidateId)) &&
+            !covered.has(candidateId)) &&
           !closedDeferredIds.has(item.id as string) &&
           !coverageEntryPresent(
             result.coverage.deferred as unknown[],
@@ -2740,14 +2767,24 @@ function sameSavedFinding(
     return scanFindingIdentity(left) === scanFindingIdentity(right);
   if (
     owner === undefined &&
-    (findingCandidateId(left) !== undefined ||
-      findingCandidateId(right) !== undefined) &&
-    !isDeepStrictEqual(
-      findingCandidateOwner(left) ?? null,
-      findingCandidateOwner(right) ?? null,
+    (findingCandidateId(left) || findingCandidateId(right))
+  ) {
+    const leftOwner = findingCandidateOwner(left);
+    const rightOwner = findingCandidateOwner(right);
+    if (
+      leftOwner !== rightOwner &&
+      ((leftOwner !== undefined && rightOwner !== undefined) ||
+        [left, right].some((value) =>
+          [value.provenance, value.extensions].some(
+            (metadata) =>
+              isObject(metadata) &&
+              typeof metadata.sourceWorkerId === "string" &&
+              metadata.sourceWorkerId.trim(),
+          ),
+        ))
     )
-  )
-    return false;
+      return false;
+  }
   const leftExplicitCandidate = findingIdentityCandidate(left);
   const rightExplicitCandidate = findingIdentityCandidate(right);
   if (

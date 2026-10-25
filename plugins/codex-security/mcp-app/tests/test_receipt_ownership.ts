@@ -249,6 +249,39 @@ test("direct worker receipts fall back to an existing shared file without a loca
   }
 });
 
+test("a pending candidate keeps its nested shared receipt on retry", async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+  const ref = "artifacts/other/artifacts/retained-receipts/note.txt";
+  await receipt(f.root, ref, "Shared evidence");
+  const candidateId = "candidate-1";
+  const pending = draft([ref], { candidateId, disposition: "needs_follow_up" });
+  await recordCodexSecurityWorkerScanDraft(f.worker, {
+    ...pending,
+    complete: false,
+    coverage: {
+      ...pending.coverage,
+      completeness: "partial",
+      deferred: [{ candidateId, reason: "Verify the observation." }],
+    },
+  });
+  await archiveDirectory(
+    f.workerRoot,
+    path.join(path.dirname(f.workerRoot), "attempts/attempt-01"),
+  );
+  await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+  await rm(path.join(f.workerRoot, "result.json"));
+  await receipt(f.root, ref, "Updated shared evidence");
+  await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+  const sources = await readDeepReductionSources(f.reducer);
+  const [surface] = sources.discoveries[0].coverage.surfaces;
+  assert.deepEqual(surface.receiptRefs, [ref]);
+  assert.equal(
+    await readFile(path.join(f.root, surface.receiptRefs[0]), "utf8"),
+    "Updated shared evidence",
+  );
+});
+
 for (const update of ["notes", "receipt order"] as const) {
   test(`retained shared ownership survives changed ${update} and a local collision`, async () => {
     const f = await fixture();

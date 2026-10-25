@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { coverageReceiptComponents } from "./coverage-publication.js";
 import { isRecord as isObject } from "./record.js";
 import { isDeepStrictEqual } from "node:util";
@@ -17,7 +17,7 @@ export function workerCoverageReceiptLocation(
   context: ArtifactContext,
   surface: JsonObject,
   ref: string,
-): { context: ArtifactContext; components: string[] } {
+): { context: ArtifactContext; components: string[]; shared?: boolean } {
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
   const parent = dirname(context.root);
@@ -45,9 +45,22 @@ export function workerCoverageReceiptLocation(
         root: dirname(dirname(dirname(dirname(worker)))),
       },
       components,
+      shared,
     };
   }
   return { context, components };
+}
+
+function isRetainedWorkerReceipt(
+  location: ReturnType<typeof workerCoverageReceiptLocation>,
+  workerOutput: string,
+): boolean {
+  if (location.shared) return false;
+  const file = join(location.context.root, ...location.components);
+  const ref = relative(dirname(workerOutput), file).split(sep).join("/");
+  return /^(?:output|attempts\/[^/]+)\/artifacts\/retained-receipts\/[0-9a-f]{64}$/.test(
+    ref,
+  );
 }
 
 /** Keep receipts and candidate evidence bound to the worker attempt that saved them. */
@@ -58,23 +71,19 @@ export async function recoverWorkerCandidateReceipts(
 ): Promise<Set<string>> {
   const reopened = new Set<string>();
   const deferred = coverage.deferred as JsonObject[];
-  for (const surface of [
-    ...(coverage.surfaces as JsonObject[]),
-    ...(coverage.explicitExclusions as JsonObject[]),
-  ]) {
+  const surfaces = coverage.surfaces as JsonObject[];
+  const rows = [...surfaces, ...(coverage.explicitExclusions as JsonObject[])];
+  for (const [index, surface] of rows.entries()) {
+    const isSurface = index < surfaces.length;
     const candidateId =
       typeof surface.candidateId === "string" && surface.candidateId.trim()
         ? surface.candidateId
         : undefined;
-    if (
-      (coverage.explicitExclusions as JsonObject[]).includes(surface) &&
-      candidateId === undefined
-    )
-      continue;
+    if (!isSurface && candidateId === undefined) continue;
     if (
       !isTerminalCandidateDecision(surface) &&
       !(
-        (coverage.explicitExclusions as JsonObject[]).includes(surface) &&
+        !isSurface &&
         typeof surface.candidateId === "string" &&
         surface.receiptRefs !== undefined
       ) &&
@@ -85,6 +94,8 @@ export async function recoverWorkerCandidateReceipts(
       )
     )
       continue;
+    const pendingSurface =
+      isSurface && surface.disposition === "needs_follow_up";
     const retainedRefs: string[] = [];
     const refs = surface.receiptRefs === undefined ? [] : surface.receiptRefs;
     for (const ref of Array.isArray(refs) ? refs : [refs]) {
@@ -100,7 +111,7 @@ export async function recoverWorkerCandidateReceipts(
           throw new Error("Worker candidate receipt must be under artifacts/.");
         const location = workerCoverageReceiptLocation(
           source,
-          (coverage.surfaces as JsonObject[]).includes(surface) ? surface : {},
+          isSurface ? surface : {},
           ref,
         );
         contents = await readArtifactBytes(
@@ -108,6 +119,15 @@ export async function recoverWorkerCandidateReceipts(
           location.components,
           "Worker candidate receipt",
         );
+        // Open observations keep their owner; only this worker's existing
+        // sealed copy needs a new digest when recovered bytes have changed.
+        if (
+          !retainIn ||
+          (pendingSurface && !isRetainedWorkerReceipt(location, retainIn.root))
+        ) {
+          retainedRefs.push(ref);
+          continue;
+        }
       } catch (error) {
         if (candidateId !== undefined) reopened.add(candidateId);
         surface.disposition = "needs_follow_up";
@@ -119,9 +139,7 @@ export async function recoverWorkerCandidateReceipts(
           pending = {
             ...(candidateId === undefined ? {} : { candidateId }),
             reason: error instanceof Error ? error.message : String(error),
-            ...(typeof surface.id === "string" &&
-            surface.id.trim() &&
-            (coverage.surfaces as JsonObject[]).includes(surface)
+            ...(typeof surface.id === "string" && surface.id.trim() && isSurface
               ? { surfaceIds: [surface.id] }
               : {}),
           };
@@ -153,10 +171,6 @@ export async function recoverWorkerCandidateReceipts(
             pending[archive] = saved;
           }
         }
-        continue;
-      }
-      if (retainIn === undefined) {
-        retainedRefs.push(ref);
         continue;
       }
       const digest = createHash("sha256").update(contents).digest("hex");
