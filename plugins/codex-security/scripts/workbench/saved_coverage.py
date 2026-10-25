@@ -250,6 +250,7 @@ class SavedCoverageProjection:
         self.project_worker_coverage = project_worker_coverage
         self.legacy_surface_links = legacy_surface_links
         self.legacy_source_outputs: dict[int, dict[str, Any]] = {}
+        self.repaired_surface_refs: dict[str, list[str]] = {}
         self.worker_row_owners: dict[int, str] = {}
         self.worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
         self.source_owner_by_id = {
@@ -285,6 +286,13 @@ class SavedCoverageProjection:
             retained, original if original is not None else item, owner, field
         )
         return retained
+
+    def restore_repaired_receipts(self, surface):
+        if self.repaired_surface_refs and isinstance(surface, dict):
+            refs = self.repaired_surface_refs.get(json.dumps(surface, sort_keys=True))
+            if refs is not None:
+                return {**surface, "receiptRefs": refs}
+        return surface
 
     def retained_record(self, coverage, field, item, canonical_record):
         item = canonical_record(field, item)
@@ -370,9 +378,13 @@ class SavedCoverageProjection:
         # accepted surface's identity, disposition, or host-owned provenance.
         refs = surface["receiptRefs"]
         if merge_receipts:
-            accepted = published.setdefault("receiptRefs", [])
+            accepted = published.get("receiptRefs", [])
             if not isinstance(accepted, list):
                 return None
+            if any(ref not in accepted for ref in refs):
+                # Parent and reducer checkpoints can repeat the exact pre-repair row.
+                self.repaired_surface_refs[json.dumps(published, sort_keys=True)] = accepted
+            published["receiptRefs"] = accepted
             for ref in refs:
                 if ref not in accepted:
                     accepted.append(ref)

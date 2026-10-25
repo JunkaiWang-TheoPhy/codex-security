@@ -3150,6 +3150,8 @@ def merge_saved_results(
                         if field == "surfaces":
                             retained_surface_rows.add(id(source_item))
                         continue
+                if field == "surfaces" and (worker is None or worker["kind"] == "dedup"):
+                    item = projection.restore_repaired_receipts(item)
                 retain_coverage_row(
                     output, item, worker_id, field, source_item, projected_row or project_coverage
                 )

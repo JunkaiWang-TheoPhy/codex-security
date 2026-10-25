@@ -465,7 +465,7 @@ def _worker_checkpoint_heads(
             try:
                 head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
             except (ContractError, OSError) as exc:
-                if unreadable_warnings is None or worker["status"] == "succeeded":
+                if unreadable_warnings is None or worker["status"] != "canceled":
                     raise
                 unreadable_warnings.append(
                     f"Preserved unreadable checkpoint {relative}/checkpoint-head.json: {exc}"

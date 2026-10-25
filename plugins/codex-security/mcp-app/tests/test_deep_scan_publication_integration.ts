@@ -1198,7 +1198,7 @@ async function publicationFixture(
   t: TestContext,
   workflow = "deep-scan-mcp/v1",
 ) {
-  const fixture = await createFixture(t);
+  const fixture = await createFixture(t, {}, workflow);
   const { run, store, runWorkbench, environment } = fixture;
   const database = path.join(
     environment.CODEX_SECURITY_STATE_DIR,
@@ -1212,19 +1212,17 @@ async function publicationFixture(
         { env: environment },
       )
     ).stdout;
-  await sql(
-    `import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as c:
-    c.execute("UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?", (sys.argv[3], sys.argv[2]))
-`,
-    workflow,
-  );
   const claim = await store.claimCoordinator({
     scanId: run.scanId,
     threadId: owner,
   });
   assert.equal(claim.run.coordinatorGeneration, 2);
   const results = await commitReducers(fixture, [1, 2], [highId, lowId]);
+  const { persistedWorkers } = await store.get(run.scanId, owner);
+  const acceptedResultPath = persistedWorkers?.find(
+    (worker) => worker.id === lowId,
+  )?.acceptedResultPath;
+  assert.ok(acceptedResultPath);
   await mkdir(path.join(run.scanDir, "checkpoints"), { recursive: true });
   const draft: ScanDraftInput = {
     ...JSON.parse(await readFile(results[1], "utf8")),
@@ -1237,6 +1235,7 @@ with sqlite3.connect(sys.argv[1]) as c:
     ...fixture,
     sql,
     results,
+    acceptedResultPath,
     draft,
     publish: (runner = runWorkbench) =>
       recordCodexSecurityScanDraftViaWorkbench(
@@ -1244,7 +1243,7 @@ with sqlite3.connect(sys.argv[1]) as c:
         draft,
         runner,
         undefined,
-        { coordinatorGeneration: 2, resultPath: results[1] },
+        { coordinatorGeneration: 2, resultPath: acceptedResultPath },
       ),
     workers: async (): Promise<PublicationWorkers> =>
       JSON.parse(
@@ -1372,7 +1371,7 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
           assert.deepEqual(draft, expectedDraft);
           assert.deepEqual(publication, {
             coordinatorGeneration: 2,
-            resultPath: f.results[1],
+            resultPath: f.acceptedResultPath,
           });
           const context = await createScanArtifactContext(
             f.run.scanId,

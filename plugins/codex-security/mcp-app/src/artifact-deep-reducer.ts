@@ -122,7 +122,7 @@ export async function readDeepReductionSources(
         }
         return {
           workerId: worker.id,
-          attempt: worker.attempt,
+          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
