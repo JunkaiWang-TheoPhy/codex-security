@@ -18,6 +18,7 @@ def retain_unmerged_review_coverage(
     prefix = f"{worker['id']}-attempt-{worker['attempt']}"
     artifact_prefix = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()
     archive_prefix = f"{Path(artifact_prefix).parent.as_posix()}/attempts/"
+    recorded = Path(worker["accepted_result_path"]).parent.name == "checkpoints"
     surfaces = {
         item.get("id"): f"{prefix}-surface-{index + 1}"
         for index, item in enumerate(source.get("surfaces", []))
@@ -57,6 +58,7 @@ def retain_unmerged_review_coverage(
             source_provenance = item.get("provenance")
             if not isinstance(source_provenance, dict):
                 source_provenance = {}
+            scan_refs = source_provenance.pop("scanReceiptRefs", [])
             # Keep source descriptions; the accepted owner supplies identity.
             for key in ("workerId", "attempt", "sourceId", "candidateId"):
                 source_provenance.pop(key, None)
@@ -72,6 +74,7 @@ def retain_unmerged_review_coverage(
                 item["receiptRefs"] = [
                     ref
                     if ref.startswith((archive_prefix, f"{artifact_prefix}/"))
+                    or (recorded and isinstance(scan_refs, list) and ref in scan_refs)
                     else f"{artifact_prefix}/{ref}"
                     for ref in item.get("receiptRefs", [])
                 ]

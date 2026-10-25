@@ -102,6 +102,7 @@ def parse_args(description: str, *, execution_settings: bool = False) -> argpars
 
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
+    get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
 

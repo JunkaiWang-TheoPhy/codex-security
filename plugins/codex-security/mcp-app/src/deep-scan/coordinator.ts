@@ -32,12 +32,11 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
@@ -489,7 +488,7 @@ export class DeepScanCoordinator {
         error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -574,16 +573,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
@@ -1268,15 +1261,20 @@ export class DeepScanCoordinator {
         this.artifacts,
         resultPath,
         this.state.scanId,
-        this.state.workflowVersion === "deep-security-scan/v2",
-        true,
-        worker.artifactDir,
-        (resultPath === worker.acceptedResultPath
-          ? worker.acceptedResultSha256
-          : undefined) ??
-          (resultPath === claimedInput?.resultManifestPath
-            ? claimedInput.resultManifestSha256
-            : undefined),
+        {
+          ...this.state,
+          accepted: true,
+          validateWriteups:
+            this.state.workflowVersion === "deep-security-scan/v2",
+          artifactDir: worker.artifactDir,
+          resultSha256:
+            (resultPath === worker.acceptedResultPath
+              ? worker.acceptedResultSha256
+              : undefined) ??
+            (resultPath === claimedInput?.resultManifestPath
+              ? claimedInput.resultManifestSha256
+              : undefined),
+        },
       );
       recovered.push({
         id: worker.id,
@@ -1385,6 +1383,9 @@ export class DeepScanCoordinator {
           repoRoot: this.state.targetPath,
           scanId: this.state.scanId,
           layout: "reducer" as const,
+          scope: this.state.scope,
+          includePaths: this.state.includePaths,
+          filePaths: this.state.filePaths,
           deepReducer: {
             scanRoot: this.artifacts.scanDir,
             claimedWorkers: accepted.map((source) => ({

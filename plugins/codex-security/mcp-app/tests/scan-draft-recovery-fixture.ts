@@ -128,3 +128,23 @@ export const surfaceDisposition = ({
   id: string;
   disposition: string;
 }) => ({ id, disposition });
+
+/** Stop after the admitted raw checkpoint and before the projected checkpoint. */
+export async function interruptDraftAfterRaw(action: () => Promise<unknown>) {
+  const rename = fs.rename;
+  let checkpoints = 0;
+  fs.rename = async (source, destination) => {
+    if (
+      path.basename(path.dirname(String(destination))) === "checkpoints" &&
+      ++checkpoints === 2
+    )
+      throw new Error("interrupted projected checkpoint");
+    return rename(source, destination);
+  };
+  try {
+    await assert.rejects(action(), /interrupted projected checkpoint/);
+    assert.equal(checkpoints, 2);
+  } finally {
+    fs.rename = rename;
+  }
+}

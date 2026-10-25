@@ -18,6 +18,20 @@ from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
 
 
+def assert_budget_seal_receipt(scan, before_json, after_json):
+    before = json.loads(before_json)
+    after = json.loads(after_json)
+    sealed = [
+        json.loads((scan.scan_dir / name).read_bytes())
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    ]
+    for timestamp in ("completedAt", "sealedAt"):
+        del sealed[0]["scan"][timestamp]
+    canonical = json.dumps(sealed, sort_keys=True, separators=(",", ":")).encode()
+    assert after.pop("sealedPublicationSha256") == hashlib.sha256(canonical).hexdigest()
+    assert after == before
+
+
 def accept_unmerged(connection, scan):
     result = add_worker(connection, scan)
     worker_id = result.parent.name
@@ -426,10 +440,10 @@ def test_budget_replay_after_draft_commit_keeps_unmerged_coverage_once(
         connection.row_factory = sqlite3.Row
         budget(connection, args)
         assert connection.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-        assert (
-            connection.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
-            == selection
-        )
+        recorded = connection.execute(
+            "SELECT finalization_input_json FROM deep_scan_runs"
+        ).fetchone()
+        assert_budget_seal_receipt(scan, selection, recorded[0])
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for key in ("surfaces", "explicitExclusions", "deferred", "reviews"):
         assert coverage.get(key, []) == before.get(key, [])
@@ -662,7 +676,12 @@ os._exit(87)
         if sealed_bytes is not None:
             assert published_bytes(scan) == sealed_bytes
         if run["finalization_input_json"] is not None:
-            assert snapshot["afterSelection"] == run["finalization_input_json"]
+            if cut == "after-draft-commit":
+                assert_budget_seal_receipt(
+                    scan, run["finalization_input_json"], snapshot["afterSelection"]
+                )
+            else:
+                assert snapshot["afterSelection"] == run["finalization_input_json"]
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert len(findings) == int(has_reducer)
@@ -717,6 +736,8 @@ def test_budget_rejects_unrelated_incomplete_drafts(
     [
         "changed-findings",
         "late-findings",
+        "changed-warnings",
+        "removed-warnings",
         "wrong-scan",
         "running-discovery",
         "canceled",
@@ -760,6 +781,12 @@ def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
         else:
             document["scan"]["id"] = "69078890-d24c-4416-a6fa-c286825bef88"
         path.write_text(json.dumps(document))
+    elif state in {"changed-warnings", "removed-warnings"}:
+        document = json.loads(manifest.read_text())
+        assert document["scan"].pop("warnings") == [args.message]
+        if state == "changed-warnings":
+            document["scan"]["warnings"] = ["A substituted warning."]
+        manifest.write_text(json.dumps(document))
     elif state == "late-findings":
 
         def change_before_completion(*a, **kw):
@@ -831,9 +858,13 @@ def test_budget_resume_keeps_explicit_stop_and_unselected_guards(
         )
 
 
-@pytest.mark.parametrize("changed", [False, True], ids=["unchanged", "changed-publication"])
+@pytest.mark.parametrize(
+    "changed, interruption",
+    [(False, "exit"), (True, "exit"), (False, "exception")],
+    ids=["unchanged", "changed-publication", "interrupt-after-commit"],
+)
 def test_budget_selection_binds_publication_in_its_commit(
-    workbench_api, workbench_db, publication_scan, tmp_path, changed
+    workbench_api, workbench_db, publication_scan, tmp_path, changed, interruption
 ):
     scan = publication_scan()
     accept_reducer(workbench_db, scan)
@@ -857,6 +888,8 @@ api["deep_scan"].configure(SimpleNamespace(**{**api, "preserve_stopped_results":
 class CrashConnection(sqlite3.Connection):
     def commit(self):
         super().commit()
+        if sys.argv[5] == "exception":
+            raise SystemExit(73)
         os._exit(73)
 connection = sqlite3.connect(sys.argv[2], factory=CrashConnection)
 connection.row_factory = sqlite3.Row
@@ -873,6 +906,7 @@ raise AssertionError("budget selection did not commit")
             str(database),
             scan.scan_id,
             json.dumps(BUDGET_COST),
+            interruption,
         ],
         capture_output=True,
         text=True,

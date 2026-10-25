@@ -16,7 +16,15 @@ from test_workbench_db import BUDGET_COST
 @pytest.mark.parametrize("explicit_ids", [True, False], ids=["named-surfaces", "omitted-ids"])
 @pytest.mark.parametrize("replay", ["fresh", "legacy", "duplicated"])
 @pytest.mark.parametrize(
-    "receipt_origin", ["worker-relative", "archived-scan-relative", "current-scan-relative"]
+    "receipt_origin",
+    [
+        "worker-relative",
+        "archived-scan-relative",
+        "current-scan-relative",
+        "recorded-scan",
+        "direct-collision",
+        "legacy-direct-collision",
+    ],
 )
 def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
     workbench_api,
@@ -69,6 +77,13 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
             surface["id"] = f"source-surface-{index}"
         relative = f"artifacts/review-{index}.md"
         surface["receiptRefs"] = [relative]
+        if receipt_origin in {"recorded-scan", "direct-collision", "legacy-direct-collision"}:
+            surface["provenance"] = {**source_provenance, "scanReceiptRefs": [relative]}
+            shared = scan.scan_dir / relative
+            receipts[shared] = f"Shared review receipt {index}.\n".encode()
+            shared.write_bytes(receipts[shared])
+            if receipt_origin == "recorded-scan" and index == 1:
+                continue  # The verified receipt has no worker-local copy.
         receipt = output / relative
         receipt.parent.mkdir(exist_ok=True)
         receipts[receipt] = f"Independent review receipt {index}.\n".encode()
@@ -123,8 +138,16 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         }
     ).encode()
     digest = hashlib.sha256(contents).hexdigest()
-    accepted = output / "checkpoints" / f"{digest}.json"
-    accepted.parent.mkdir()
+    if receipt_origin == "direct-collision":
+        accepted = output / f"accepted-{digest}.json"
+    else:
+        checkpoint = hashlib.sha256(
+            json.dumps(json.loads(contents), separators=(",", ":")).encode()
+        ).hexdigest()
+        # Earlier direct fallback snapshots were named by the hash of the on-disk bytes.
+        name = digest if receipt_origin == "legacy-direct-collision" else checkpoint
+        accepted = output / "checkpoints" / f"{name}.json"
+        accepted.parent.mkdir()
     accepted.write_bytes(contents)
     # The mutable result may advance after acceptance. Publication must read the
     # accepted checkpoint, while receipt paths remain relative to its owner.
@@ -246,7 +269,7 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         }
         assert retained["receiptRefs"] == [
             (output / ref).relative_to(scan.scan_dir).as_posix()
-            if receipt_origin == "worker-relative"
+            if receipt_origin in {"worker-relative", "direct-collision", "legacy-direct-collision"}
             else ref
             for ref in original["receiptRefs"]
         ]

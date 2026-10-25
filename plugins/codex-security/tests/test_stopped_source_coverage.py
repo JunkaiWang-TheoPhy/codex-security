@@ -103,7 +103,13 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
                 coverage[field][:-1] if field == "deferred" else coverage[field]
             ) == source_coverage[field]
     else:
-        assert coverage["deferred"][0]["candidateId"] == "candidate-1"
+        task = coverage["deferred"][0]
+        reviewed = {
+            surface["disposition"]: surface["candidateId"] for surface in coverage["surfaces"]
+        }
+        assert task["candidateId"] == reviewed["needs_follow_up"]
+        assert task["candidateId"] != reviewed["rejected"]
+        assert task["provenance"] == source_coverage["deferred"][0]["provenance"]
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].preserve_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"],

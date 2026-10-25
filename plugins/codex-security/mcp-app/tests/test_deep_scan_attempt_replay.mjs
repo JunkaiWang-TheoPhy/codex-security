@@ -22,6 +22,8 @@ const bundle = await build({
     contents: [
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { DeepScanWorkerRunner } from "./src/deep-scan/worker-runner.ts";',
+      'export { recordCodexSecurityWorkerScanDraft } from "./src/artifact-scan-draft.ts";',
+      'export { readDeepReductionSources } from "./src/artifact-deep-reducer.ts";',
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createDeepScanArtifacts, ensureDeepScanDirectories } from "./src/deep-scan/artifacts.ts";',
     ].join("\n"),
@@ -30,6 +32,8 @@ const bundle = await build({
 const {
   WorkbenchDeepScanStore,
   DeepScanWorkerRunner,
+  recordCodexSecurityWorkerScanDraft,
+  readDeepReductionSources,
   DeepScanCoordinator,
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -98,14 +102,31 @@ async function testResponseLoss(responseLosses) {
   try {
     await mkdir(target);
     await writeFile(path.join(target, "fixture.py"), "print('fixture')\n");
+    const scanDir = path.join(root, "scan");
+    await mkdir(scanDir, { mode: 0o700 });
+    const registered = await raw([
+      "register-cli-scan",
+      "--scan-dir",
+      scanDir,
+      "--repository",
+      target,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "deep",
+        repository: target,
+        target: { kind: "paths", paths: ["fixture.py"] },
+      }),
+    ]);
     const run = await store.begin({
-      targetPath: target,
-      scope: ".",
+      scanId: registered.scanId,
       threadId: "fixture-owner",
       scanRoot: path.join(root, "scans"),
     });
     const artifacts = createDeepScanArtifacts(run.scanDir);
     await ensureDeepScanDirectories(artifacts);
+    const ref = "artifacts/evidence.txt";
+    await writeFile(path.join(run.scanDir, ref), "shared evidence\n");
     let executions = 0;
     const runner = new DeepScanWorkerRunner({
       run,
@@ -130,12 +151,21 @@ async function testResponseLoss(responseLosses) {
               configuration.claimedWorkerIds,
               workers.map((worker) => worker.id),
             );
-            assert.equal(
-              workers.every((worker) =>
-                worker.resultPath.includes("checkpoints"),
-              ),
-              true,
+            const { discoveries } = await readDeepReductionSources(
+              request.artifactContext,
             );
+            const evidence = await Promise.all(
+              discoveries.map(({ coverage }) =>
+                readFile(
+                  path.join(run.scanDir, coverage.surfaces[0].receiptRefs[0]),
+                  "utf8",
+                ),
+              ),
+            );
+            assert.deepEqual(evidence, [
+              "worker evidence\n",
+              "shared evidence\n",
+            ]);
             assert.deepEqual(
               workers.map((worker) => worker.attempt),
               [1, 1],
@@ -148,17 +178,47 @@ async function testResponseLoss(responseLosses) {
             findings: [],
             threatModel: { summary: "Synthetic fixture." },
           };
-          if (request.kind === "discovery")
+          const output = request.artifactContext.root;
+          if (request.kind === "discovery") {
+            const review = {
+              id: "review",
+              label: "Fixture",
+              disposition: "no_issue_found",
+              receiptRefs: [ref],
+            };
             draft.coverage = {
               completeness: "complete",
-              surfaces: [{ label: "Fixture", disposition: "no_issue_found" }],
+              surfaces: [review],
               explicitExclusions: [],
               deferred: [],
             };
-          await writeFile(
-            path.join(request.artifactContext.root, "result.json"),
-            JSON.stringify(draft),
-          );
+            if (executions === 2) {
+              // The draft writer confirms the shared file before a worker-local shadow exists.
+              await recordCodexSecurityWorkerScanDraft(
+                {
+                  ...request.artifactContext,
+                  scanId: run.scanId,
+                  repoRoot: target,
+                },
+                draft,
+              );
+            } else {
+              review.provenance = { scanReceiptRefs: [ref] };
+              await writeFile(
+                path.join(output, "result.json"),
+                JSON.stringify(draft),
+              );
+            }
+            await mkdir(path.dirname(path.join(output, ref)), {
+              recursive: true,
+            });
+            await writeFile(path.join(output, ref), "worker evidence\n");
+          } else {
+            await writeFile(
+              path.join(output, "result.json"),
+              JSON.stringify(draft),
+            );
+          }
           return { threadId: `fixture-session-${executions}` };
         },
       },
@@ -181,8 +241,12 @@ async function testResponseLoss(responseLosses) {
       "discovery-1",
     );
     assert.equal(discovery.status, "succeeded");
-    assert.match(discovery.worker.resultPath, /checkpoints/);
+    assert.notEqual(
+      discovery.worker.resultPath,
+      path.join(discovery.worker.artifactDir, "result.json"),
+    );
     const second = await runner.runDiscoveryWorker(randomUUID(), "discovery-2");
+    assert.equal(second.status, "succeeded", second.error?.message);
     // Acceptance receipts are operation-specific, so only the first discovery loses a response.
     await rm(path.join(discovery.worker.artifactDir, "result.json"));
     const merged = await runner.runReducer({
@@ -195,7 +259,10 @@ async function testResponseLoss(responseLosses) {
       })),
     });
     assert.equal(merged.error, undefined, merged.error?.stack);
-    assert.match(merged.resultPath, /checkpoints/);
+    const reducerOutput = merged.run.persistedWorkers.find(
+      (worker) => worker.id === merged.id,
+    ).artifactDir;
+    assert.notEqual(merged.resultPath, path.join(reducerOutput, "result.json"));
     assert.equal(merged.newFindings, 0);
     assert.equal(
       merged.run.persistedDedupInputs.filter(
@@ -227,7 +294,7 @@ async function testResponseLoss(responseLosses) {
       recovered.map((worker) => worker.resultPath),
       [discovery.worker.resultPath, second.worker.resultPath],
     );
-    await rm(path.join(path.dirname(merged.resultPath), "..", "result.json"));
+    await rm(path.join(reducerOutput, "result.json"));
     const reducers = await resumed.recoverCompletedReducers(recovered);
     assert.equal(reducers.resultPath, merged.resultPath);
     assert.deepEqual(reducers.result, merged.result);
@@ -235,6 +302,11 @@ async function testResponseLoss(responseLosses) {
       await readFile(merged.resultPath, "utf8"),
       beforeRecovery,
       "recovery cannot rewrite accepted bytes",
+    );
+    await writeFile(discovery.worker.resultPath, "\n", { flag: "a" });
+    await assert.rejects(
+      resumed.recoverAcceptedDiscoveries(),
+      /changed after acceptance/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -1,7 +1,8 @@
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   parseAcceptedDiscoveryDraft,
+  retainRecordedReceiptOwnership,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
@@ -31,14 +32,12 @@ export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext,
 ): Promise<DeepReductionSources> {
   const inputs = await readDeepReductionSources(context);
-  const { sourceCoverage: _coverage, ...previous } = inputs.previous ?? {};
   return {
     discoveries: inputs.discoveries.map(({ workerId, result }) => ({
       workerId,
       result,
     })),
-    previous:
-      inputs.previous === null ? null : (previous as DeepReductionInput),
+    previous: inputs.previous && deepReductionForPersistence(inputs.previous),
   };
 }
 
@@ -54,11 +53,17 @@ export async function readDeepReductionSources(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
+        const ownerDir = worker.artifactDir ?? dirname(worker.resultPath);
+        const stored = await readJsonObject(worker.resultPath, {
+          scanRoot: bound.artifacts.scanDir,
+          sha256: worker.resultSha256,
+        });
+        await retainRecordedReceiptOwnership(
+          { ...context, root: ownerDir, layout: "worker" },
+          stored,
+        );
         const result = parseStoredScanDraft(
-          await readJsonObject(worker.resultPath, {
-            scanRoot: bound.artifacts.scanDir,
-            sha256: worker.resultSha256,
-          }),
+          stored,
           "Accepted Standard worker " + worker.id,
           bound.scanId,
           parseAcceptedDiscoveryDraft,
@@ -69,26 +74,60 @@ export async function readDeepReductionSources(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        result.findings = result.findings.map((finding, index) => ({
-          ...finding,
-          provenance: {
-            ...finding.provenance,
-            sourceFindingIds: [`${worker.id}:${index}`],
-          },
-        }));
+        for (const [index, finding] of result.findings.entries()) {
+          const provenance = finding.provenance as Record<string, unknown>;
+          provenance.sourceFindingIds = [`${worker.id}:${index}`];
+        }
         const { coverage, ...reduction } = result;
+        const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
+        for (const [index, surface] of (
+          coverage.surfaces as Record<string, unknown>[]
+        ).entries()) {
+          const surfaceScanRefs = new Set<string>();
+          scanReceiptRefs.set(index, surfaceScanRefs);
+          for (const ref of (surface.receiptRefs as string[] | undefined) ??
+            []) {
+            const normalized = posix.normalize(ref);
+            const inheritedScanRefs = (
+              surface.provenance as Record<string, unknown> | undefined
+            )?.scanReceiptRefs;
+            if (
+              Array.isArray(inheritedScanRefs) &&
+              inheritedScanRefs.includes(normalized)
+            ) {
+              surfaceScanRefs.add(normalized);
+              continue;
+            }
+            try {
+              await requireRegularFile(
+                join(ownerDir, normalized),
+                ownerDir,
+                true,
+              );
+              continue;
+            } catch {
+              // Shared receipts are a fallback when no valid worker-local file was found.
+            }
+            try {
+              await requireRegularFile(
+                join(bound.artifacts.scanDir, normalized),
+                bound.artifacts.scanDir,
+                true,
+              );
+              surfaceScanRefs.add(normalized);
+            } catch {
+              // Worker-local receipts are qualified below; finalization validates evidence.
+            }
+          }
+        }
         return {
           workerId: worker.id,
-          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
+          attempt: worker.attempt,
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
-            relative(
-              bound.artifacts.scanDir,
-              worker.artifactDir ?? dirname(worker.resultPath),
-            )
-              .split(sep)
-              .join("/"),
+            relative(bound.artifacts.scanDir, ownerDir).split(sep).join("/"),
+            scanReceiptRefs,
           ),
           result: reduction,
         };

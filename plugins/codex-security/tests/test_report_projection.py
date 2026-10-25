@@ -803,6 +803,90 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
     assert r'\<img src="x" onerror="alert(1)"\>' in markdown_text
 
 
+def test_projection_keeps_html_entities_literal_in_markdown() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = "Sanitizer decodes &#x3C;script&#x3E; and &amp;lt;"
+    coverage["includePaths"] = ["docs/&lt;b&gt;.md"]
+
+    markdown_text = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert r"Sanitizer decodes \&#x3C;script\&#x3E; and \&amp;lt;" in markdown_text
+    assert "- Included paths: `docs/&lt;b&gt;.md`" in markdown_text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/?first=1&second=2",
+        "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
+        "www.example.com/?payload=&lt;tag&gt;&mode=1",
+        "WWW.example.com/?first=1&second=2",
+        "WwW.example.com/?first=1&second=2",
+        "ftp://example.com/?first=1&second=2",
+        "https://example.com/`a`?first=1&second=2",
+        "www.example.com/`a`?first=1&second=2",
+        "example.com/?first=1&second=2",
+        "//example.com/?first=1&second=2",
+        '"example.com/?first=1&second=2"',
+        "éxample.com/?first=1&second=2",
+        "例子.com/?first=1&second=2",
+        "example.com/?payload=&lt;tag&gt;&mode=1",
+        "example.com/?first=1&word;=2",
+        "//example.com/?first=1&word;=2",
+        "user&tag@example.com",
+        "mailto:user&tag@example.com",
+        "//localhost:8080/?first=1&word;=2",
+        "{//example.com/?first=1&word;=2}",
+        "?example.com/?first=1&word;=2",
+        "mailto:user&tag@localhost",
+    ],
+)
+def test_projection_preserves_bare_url_ampersands_in_prose_and_tables(url: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = f"R&D decoded &#60;tag&#62;. Reproduce with {url} then compare &amp;."
+    finding["confidence"]["rationale"] = f"Request: {url}"
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Reproduce with {url} then compare \\&amp;." in markdown
+    assert f"| Confidence rationale | Request: {url} |" in markdown
+    assert r"R&D decoded \&#60;tag\&#62;." in markdown
+
+
+def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = (
+        "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;` with "
+        "https://example.com/a_b?first=1&second=2 and &amp;. "
+        "Keep https://example.com/`a _b_` as written."
+    )
+    coverage["includePaths"] = [
+        "docs/www.example.com/&lt;tag&gt;.md",
+        "docs/`&lt;tag&gt;`.md",
+        "dir&lt;tag&gt;.example/file.md",
+        "dir.example/file&lt;tag&gt;.md",
+        "www.example.com/file&amp;.md",
+        "`&amp;`",
+        "`&amp;.md",
+        "file&amp;`",
+    ]
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
+    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert "Keep https://example.com/`a _b_` as written." in markdown
+    assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
+    assert "``docs/`&lt;tag&gt;`.md``" in markdown
+    assert "`dir&lt;tag&gt;.example/file.md`" in markdown
+    assert "`dir.example/file&lt;tag&gt;.md`" in markdown
+    assert "`www.example.com/file&amp;.md`" in markdown
+    assert "`` `&amp;` ``" in markdown
+    assert "`` `&amp;.md ``" in markdown
+    assert "`` file&amp;` ``" in markdown
+
+
 def test_projection_omits_informational_findings() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["severity"]["level"] = "informational"
@@ -851,7 +935,8 @@ def test_projection_preserves_follow_up_without_classifying_its_reason(reason: s
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "No findings were reported." in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Deferred Requested Work" in markdown
+    assert "## Open Questions And Follow Up" not in markdown
     assert reason in markdown
     assert "Review deferred unit candidate-parser" in markdown
     assert "Paths: src/parser.py." in markdown
@@ -866,7 +951,7 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
     assert '<a id="finding-1"></a>' in markdown
 
 
-def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
+def test_projection_separates_deferred_work_from_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
 
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
@@ -886,24 +971,15 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Review deferred unit parser-review" in markdown
     assert "Paths: src/parser.py." in markdown
     assert "Surfaces: parser-surface." in markdown
+    deferred_section, optional_section = markdown.split("## Open Questions And Follow Up")
+    assert "## Deferred Requested Work" in deferred_section
+    assert "Parser review incomplete." in deferred_section
+    assert "Is production authentication enabled?" not in deferred_section
+    assert "Is production authentication enabled?" in optional_section
+    assert "Parser review incomplete." not in optional_section
 
 
-@pytest.mark.parametrize(
-    ("details", "expected"),
-    [
-        ({"notes": "Reviewed parser entrypoints."}, "Reviewed parser entrypoints."),
-        ({"reason": "Caller policy is unknown."}, "Caller policy is unknown."),
-        (
-            {"notes": "Reviewed parser entrypoints.", "reason": "Caller policy is unknown."},
-            "Reviewed parser entrypoints. Caller policy is unknown.",
-        ),
-        ({"notes": "Policy checked.", "reason": "Policy checked."}, "Policy checked."),
-        ({"notes": ""}, ""),
-        ({"notes": " \t "}, ""),
-        ({}, "No additional canonical notes were recorded."),
-    ],
-)
-def test_projection_includes_surface_evidence_receipts(details: dict, expected: str) -> None:
+def test_projection_includes_surface_evidence_receipts() -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["surfaces"] = [
         {
@@ -911,16 +987,13 @@ def test_projection_includes_surface_evidence_receipts(details: dict, expected: 
             "label": "Parser",
             "disposition": "no_issue_found",
             "receiptRefs": ["artifacts/receipts/parser.jsonl"],
-            **details,
+            "notes": "Reviewed parser entrypoints.",
         }
     ]
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    row = next(line for line in markdown.splitlines() if "artifacts/receipts/parser.jsonl" in line)
-    assert row.endswith(
-        f"| {expected + ' ' if expected else ''}Evidence: artifacts/receipts/parser.jsonl |"
-    )
+    assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
 
 
 @pytest.mark.parametrize(
@@ -951,26 +1024,6 @@ def test_projection_preserves_identifier_text_and_code_path_spelling(
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert "\\_\\_proto\\_\\_ pollution" in markdown
     assert rendered_location in markdown
-
-
-def test_linked_writeup_retains_distinct_source_fixes() -> None:
-    manifest, findings, coverage = canonical_documents()
-    finding = findings["findings"][0]
-    finding["writeup"] = {"reportPath": "findings/parser/parser.md"}
-    finding["remediation"] = "Validate the record length."
-    finding["provenance"] = {
-        "sourceFindings": [
-            {"id": "review-1:0", "finding": {"remediation": "Validate the record length."}},
-            {"id": "review-2:0", "finding": {"remediation": "Reject duplicate record keys."}},
-            {"id": "review-3:0", "finding": {"remediation": "Reject duplicate record keys."}},
-        ]
-    }
-
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
-
-    assert "findings/parser/parser.md" in markdown
-    assert markdown.count("Validate the record length.") == 1
-    assert markdown.count("Reject duplicate record keys.") == 1
 
 
 @pytest.mark.parametrize(

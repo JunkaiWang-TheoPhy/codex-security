@@ -19,7 +19,7 @@ import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
   errorNameWithCode,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
@@ -182,6 +182,7 @@ export class DeepScanWorkerRunner {
           artifacts,
           resultPath,
           run.scanId,
+          run,
         );
         discoveryResult = draft.complete !== false ? draft : undefined;
         return draft;
@@ -252,7 +253,7 @@ export class DeepScanWorkerRunner {
         resultPath: persisted.acceptedResultPath ?? resultPath,
         result: discoveryResult!,
         completionSequence: persisted.completionSequence,
-        attempt: outcome.attempt,
+        attempt: persisted.attempt,
         threadId: outcome.threadId,
       },
     };
@@ -324,6 +325,9 @@ export class DeepScanWorkerRunner {
       repoRoot: run.targetPath,
       scanId: run.scanId,
       layout: "reducer" as const,
+      scope: run.scope,
+      includePaths: run.includePaths,
+      filePaths: run.filePaths,
       deepReducer: {
         scanRoot: artifacts.scanDir,
         persistSourceCoverage,
@@ -579,7 +583,7 @@ export class DeepScanWorkerRunner {
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
             status: replaceableFailureKind ? "canceled" : "failed",
-            error: boundedDeepScanErrorMessage(
+            error: deepScanErrorMessage(
               replaceableFailureKind
                 ? new Error(
                     `${replaceableFailureKind}: ${normalized.message}`,
@@ -604,7 +608,7 @@ export class DeepScanWorkerRunner {
         }
         await this.options.store.updateWorker({
           ...baseMutation,
-          error: boundedDeepScanErrorMessage(normalized),
+          error: deepScanErrorMessage(normalized),
         });
         if (
           validationStarted &&
@@ -820,8 +824,8 @@ function reducerCompletionContinuation(attempt: number): string {
 function reducerInputRecoveryInstructions(): string[] {
   return [
     "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
-    "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
-    "Persist fragments, cursor: nextCursor ?? null, and completion together in one serializable store value after each successful page. Never store an undefined cursor or append a page already committed before a later cell failure. Check MCP isError before parsing its text as a page.",
+    "If inputs have not been read yet, paginate all assigned findings and the previous aggregate. Follow nextCursor until absent and assemble the json fragments in order for each findingRef. Check MCP isError before reading a page.",
+    "Without code mode, call the input and submission tools directly. With code mode, persist fragments, cursor: nextCursor ?? null, and completion together in one store value after each successful page. Resume from the next unread page.",
     "Preserve pages already read and account for every finding before submitting the aggregate.",
   ];
 }
@@ -854,12 +858,7 @@ async function writeValidationRetryPrompt(input: {
   failedAttempt: number;
   error: Error;
 }): Promise<string> {
-  const maximumLength = 4_000;
-  const trimmed = input.error.message.trim();
-  const detail =
-    trimmed.length <= maximumLength
-      ? trimmed
-      : `${trimmed.slice(0, maximumLength)}...[truncated]`;
+  const detail = input.error.message.trim();
   const basePrompt = await fs.readFile(input.basePromptPath, "utf8");
   const errorData = validationErrorData(input.error, detail);
   const instructions =

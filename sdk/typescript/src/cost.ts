@@ -2,7 +2,9 @@ import { parseJson } from "./value.js";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import zlib from "node:zlib";
+import { z } from "zod";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -34,6 +36,43 @@ import {
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
+
+export interface ScanAccountRateLimitWindow {
+  readonly usedPercent: number;
+  readonly windowMinutes: number | null;
+  /** Unix time in seconds. */
+  readonly resetsAt: number | null;
+}
+
+export interface ScanAccountRateLimit {
+  readonly limitId: string;
+  readonly observedAt: string;
+  readonly primary: ScanAccountRateLimitWindow | null;
+  readonly secondary: ScanAccountRateLimitWindow | null;
+}
+
+export interface ScanUsageObservation {
+  /** Latest native measurement in the last reportable total, or null when its time is unknown. */
+  readonly tokensUpdatedAt: string | null;
+  readonly accountRateLimits: readonly ScanAccountRateLimit[];
+}
+
+const rateLimitWindow = z
+  .object({
+    used_percent: z.number(),
+    window_minutes: z.number().int().nullish(),
+    resets_at: z.number().int().nullish(),
+  })
+  .transform((window): ScanAccountRateLimitWindow => ({
+    usedPercent: window.used_percent,
+    windowMinutes: window.window_minutes ?? null,
+    resetsAt: window.resets_at ?? null,
+  }));
+const rateLimitSnapshot = z.object({
+  limit_id: z.string().nullish(),
+  primary: rateLimitWindow.nullish(),
+  secondary: rateLimitWindow.nullish(),
+});
 
 /** A persisted worker session discovered during this run. Contains no model text. */
 export interface ScanWorkerEvent {
@@ -67,6 +106,8 @@ interface SessionUsage {
   inheritedUsage: ScanTokenUsage | null;
   replaying: boolean;
   usage: ScanTokenUsage | null;
+  tokensUpdatedAt: string | null;
+  accountRateLimits: Map<string, ScanAccountRateLimit> | null;
   counterUsage: ScanTokenUsage | null;
   model: string | null;
   modelUsage: Map<string | null, ScanTokenUsage>;
@@ -104,6 +145,7 @@ interface ScanCostTrackerOptions {
   // Only reported when the full public estimate is unavailable.
   onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
+  onUsageObservation?: (observation: ScanUsageObservation) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -119,7 +161,7 @@ interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(): SessionUsage {
+function createSessionUsage(observeUsage: boolean): SessionUsage {
   return {
     offset: 0,
     compressedSize: null,
@@ -132,6 +174,8 @@ function createSessionUsage(): SessionUsage {
     inheritedUsage: null as ScanTokenUsage | null,
     replaying: false,
     usage: null,
+    tokensUpdatedAt: null,
+    accountRateLimits: observeUsage ? new Map() : null,
     counterUsage: null,
     model: null,
     modelUsage: new Map(),
@@ -174,6 +218,7 @@ export class ScanCostTracker {
   #lastCost: string | null = null;
   #lastCostLowerBound: string | null = null;
   #lastUsage: string | null = null;
+  #lastObservation: ScanUsageObservation | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
   #attribution: ScanExecutionAttribution | null = null;
@@ -222,6 +267,7 @@ export class ScanCostTracker {
       this.#options.onCost === undefined &&
       this.#options.onCostLowerBound === undefined &&
       this.#options.onUsage === undefined &&
+      this.#options.onUsageObservation === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -291,6 +337,7 @@ export class ScanCostTracker {
 
   async #readSessions(forceAttribution: boolean): Promise<void> {
     if (this.#threadId === null) return;
+    const observeUsage = this.#options.onUsageObservation !== undefined;
     const repository =
       this.#options.onActivity === undefined
         ? undefined
@@ -339,7 +386,7 @@ export class ScanCostTracker {
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
-            session = createSessionUsage();
+            session = createSessionUsage(observeUsage);
             this.#sessions.set(path, session);
           }
           try {
@@ -428,7 +475,7 @@ export class ScanCostTracker {
         session.events === undefined
       ) {
         // Replay only newly associated sessions, including their early events.
-        session = createSessionUsage();
+        session = createSessionUsage(observeUsage);
         session.events = [];
         await readSessionUsage(path, session, repository, this.#attribution);
         this.#sessions.set(path, session);
@@ -557,6 +604,7 @@ export class ScanCostTracker {
       }
       usage = addTokenUsage(usage, value);
     }
+    if (observeUsage) this.#reportUsageObservation(usages, !missingUsage);
     if (usage === null) {
       this.#snapshot = { usage: null, cost: null };
       return;
@@ -648,6 +696,55 @@ export class ScanCostTracker {
       },
       missingUsage,
     );
+  }
+
+  #reportUsageObservation(
+    usages: ReadonlyMap<string, ScanTokenUsage | null>,
+    complete: boolean,
+  ): void {
+    const limits = new Map<string, ScanAccountRateLimit>();
+    const timed = new Set<string>();
+    let tokensUpdatedAt: string | null = null;
+    for (const session of this.#sessions.values()) {
+      const id = session.threadId;
+      if (id === null || !usages.has(id) || session.accountRateLimits === null)
+        continue;
+      for (const limit of session.accountRateLimits.values())
+        retainLatestRateLimit(limits, limit);
+      if (
+        session.tokensUpdatedAt !== null &&
+        isDeepStrictEqual(usages.get(id), session.usage)
+      ) {
+        timed.add(id);
+        if (session.tokensUpdatedAt > (tokensUpdatedAt ?? ""))
+          tokensUpdatedAt = session.tokensUpdatedAt;
+      }
+    }
+    if (!complete) {
+      // The display retains the last complete aggregate while a worker is unmeasured.
+      tokensUpdatedAt = this.#lastObservation?.tokensUpdatedAt ?? null;
+    } else {
+      for (const [id, usage] of usages) {
+        if ((usage?.total_tokens ?? 0) > 0 && !timed.has(id)) {
+          // A newer SDK fallback can supersede its thread's timestamped rollout receipt.
+          tokensUpdatedAt = null;
+          break;
+        }
+      }
+    }
+    if (
+      this.#lastObservation === null &&
+      tokensUpdatedAt === null &&
+      limits.size === 0
+    )
+      return;
+    const observation = {
+      tokensUpdatedAt,
+      accountRateLimits: [...limits.values()],
+    };
+    if (isDeepStrictEqual(observation, this.#lastObservation)) return;
+    this.#lastObservation = observation;
+    this.#options.onUsageObservation?.(observation);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -774,7 +871,10 @@ async function readSessionUsage(
       throw error;
     }
     if (session.compressedSize === size) return;
-    Object.assign(session, createSessionUsage());
+    Object.assign(
+      session,
+      createSessionUsage(session.accountRateLimits !== null),
+    );
     const file = createReadStream(path);
     const stream = pipeline(file, zlib.createZstdDecompress(), () => {});
     try {
@@ -987,7 +1087,9 @@ function readSessionEvent(
     }
     const model =
       typeof payload["model"] === "string" ? payload["model"] : session.model;
-    session.usage = addTokenUsage(session.usage, usage);
+    const measured = addTokenUsage(session.usage, usage);
+    observeUsageEvent(session, event["timestamp"], measured);
+    session.usage = measured;
     session.modelUsage.set(
       model,
       addTokenUsage(session.modelUsage.get(model) ?? null, usage),
@@ -1127,13 +1229,16 @@ function readSessionEvent(
     }
     return;
   }
-  if (
-    event["type"] !== "event_msg" ||
-    payload["type"] !== "token_count" ||
-    !isRecord(payload["info"])
-  ) {
+  if (event["type"] !== "event_msg" || payload["type"] !== "token_count")
     return;
-  }
+  if (attributable && payload["rate_limits"] != null)
+    observeUsageEvent(
+      session,
+      event["timestamp"],
+      null,
+      payload["rate_limits"],
+    );
+  if (!isRecord(payload["info"])) return;
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
   if (usage === null) return;
   const ownUsage =
@@ -1187,8 +1292,47 @@ function readSessionEvent(
             session.counterUsage.total_tokens >= ownUsage.total_tokens
           ? session.counterUsage
           : ownUsage;
-    if (!session.responseUsageObserved) session.usage = session.counterUsage;
+    if (!session.responseUsageObserved) {
+      observeUsageEvent(session, event["timestamp"], session.counterUsage);
+      session.usage = session.counterUsage;
+    }
   }
+}
+
+function observeUsageEvent(
+  session: SessionUsage,
+  timestamp: unknown,
+  measured: ScanTokenUsage | null,
+  rateLimits?: unknown,
+): void {
+  if (session.accountRateLimits === null) return;
+  const time = sessionStartedAt(timestamp);
+  if (time === null) {
+    if (measured !== null && !isDeepStrictEqual(measured, session.usage))
+      session.tokensUpdatedAt = null;
+    return;
+  }
+  const observedAt = new Date(time).toISOString();
+  if (measured !== null && observedAt > (session.tokensUpdatedAt ?? ""))
+    session.tokensUpdatedAt = observedAt;
+  if (rateLimits == null) return;
+  const parsed = rateLimitSnapshot.safeParse(rateLimits);
+  if (parsed.success) {
+    retainLatestRateLimit(session.accountRateLimits, {
+      limitId: parsed.data.limit_id || "codex",
+      observedAt,
+      primary: parsed.data.primary ?? null,
+      secondary: parsed.data.secondary ?? null,
+    });
+  }
+}
+
+function retainLatestRateLimit(
+  limits: Map<string, ScanAccountRateLimit>,
+  limit: ScanAccountRateLimit,
+): void {
+  if (limit.observedAt >= (limits.get(limit.limitId)?.observedAt ?? ""))
+    limits.set(limit.limitId, limit);
 }
 
 function readSessionReasoning(

@@ -59,4 +59,5 @@ def test_empty_budget_report_does_not_deny_saved_validation(
     report = (scan.scan_dir / "report.md").read_text()
     assert "No findings were validated" not in report
     assert "No findings were reported." in report
-    assert "Open Questions And Follow Up" in report
+    assert "## Deferred Requested Work" in report
+    assert "Validation was deferred because the scan reached its cost limit." in report

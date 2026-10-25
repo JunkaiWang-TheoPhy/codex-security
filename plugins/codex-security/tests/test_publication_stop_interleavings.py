@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +33,15 @@ def saved_selection(connection, scan, accepted, omitted=None, *, reason="saturat
             (json.dumps(selection), reason, scan.scan_id),
         )
     return selection
+
+
+def reject_worker_candidate(scan, result):
+    reported = save_disposition(scan, result.parent, "reported")
+    result.write_text(json.dumps(reported))
+    save_disposition(scan, result.parent, "rejected")
+    # The selected head still wins when the filesystem timestamps cannot order the writes.
+    stamp = (result.parent / "checkpoint-head.json").stat().st_mtime_ns
+    os.utime(result, ns=(stamp, stamp))
 
 
 def stop_scan(api, connection, scan, cause):
@@ -143,9 +153,7 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
     scan = publication_scan()
     _, accepted, coverage = accept_reducer(workbench_db, scan)
     omitted = add_worker(workbench_db, scan)
-    rejected = save_disposition(scan, omitted.parent, "reported")
-    omitted.write_text(json.dumps(rejected))
-    save_disposition(scan, omitted.parent, "rejected")
+    reject_worker_candidate(scan, omitted)
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",
@@ -263,9 +271,7 @@ def test_stopped_publication_process_loss_keeps_frozen_rejection_and_original_se
     scan = publication_scan()
     _, accepted, _ = accept_reducer(workbench_db, scan)
     omitted = add_worker(workbench_db, scan)
-    reported = save_disposition(scan, omitted.parent, "reported")
-    omitted.write_text(json.dumps(reported))
-    save_disposition(scan, omitted.parent, "rejected")
+    reject_worker_candidate(scan, omitted)
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",

@@ -10,6 +10,7 @@ from functools import partial
 
 import pytest
 from test_accepted_publication_references import accept_reducer
+from test_budget_selection_publication import assert_budget_seal_receipt
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import saved_selection
@@ -499,10 +500,8 @@ def test_budget_replays_legacy_accepted_findings_after_publication_commit(
     assert_legacy_finding_published(scan, expected)
     assert accepted.read_bytes() == accepted_bytes
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-    assert (
-        workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
-        == receipt
-    )
+    recorded = workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()
+    assert_budget_seal_receipt(scan, receipt, recorded[0])
 
 
 @pytest.mark.parametrize("legacy_completeness", ["complete", "partial", "unknown"])

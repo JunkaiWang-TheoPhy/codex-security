@@ -249,8 +249,8 @@ def test_budget_completion_uses_one_accepted_snapshot(
     if cut == "selected-validation":
         original_check = api["saved_results"].require_selected_publication
 
-        def check(*args):
-            value = original_check(*args)
+        def check(*args, **kwargs):
+            value = original_check(*args, **kwargs)
             replace_canonical()
             return value
 

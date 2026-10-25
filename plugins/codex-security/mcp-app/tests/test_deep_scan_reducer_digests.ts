@@ -83,15 +83,10 @@ for (const [replaced, phase] of [
       await replaceInput();
       if (replaced === "discovery") {
         await assert.rejects(
-          validateDiscoveryArtifacts(
-            artifacts,
-            resultPath,
-            run.scanId,
-            true,
-            true,
-            dirname(resultPath),
-            digest(discoveryBytes),
-          ),
+          validateDiscoveryArtifacts(artifacts, resultPath, run.scanId, {
+            accepted: true,
+            resultSha256: digest(discoveryBytes),
+          }),
           /changed after acceptance/,
         );
       } else {

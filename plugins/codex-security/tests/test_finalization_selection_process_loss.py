@@ -10,11 +10,10 @@ from pathlib import Path
 
 import pytest
 from test_accepted_publication_references import accept_reducer
-from test_checkpoint_publication_authority import save_disposition
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from test_publication_stop_interleavings import published_bytes, stop_scan
+from test_publication_stop_interleavings import published_bytes, reject_worker_candidate, stop_scan
 
 _CRASH_SELECTION = """
 import io, json, os, runpy, sqlite3, sys
@@ -59,8 +58,7 @@ def test_selection_commit_loss_replays_accepted_identity_before_stopping(
     omissions = []
     if reason == "saturated":
         omitted = add_worker(workbench_db, scan)
-        omitted.write_text(json.dumps(save_disposition(scan, omitted.parent, "reported")))
-        save_disposition(scan, omitted.parent, "rejected")
+        reject_worker_candidate(scan, omitted)
         omissions.append(omitted.parent.name)
         with workbench_db:
             workbench_db.execute(
