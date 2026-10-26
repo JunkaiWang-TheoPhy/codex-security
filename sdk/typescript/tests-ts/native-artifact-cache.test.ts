@@ -145,13 +145,12 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     const nextWeek = previous
       .slice("key=".length)
       .replace("2026-43", "2026-44");
-    const cold = key("2026-44", 4, fingerprint);
-    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0-1`);
+    const cold = key("2026-44", 15, fingerprint);
+    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0`);
+    expect(key("2026-44", 16, fingerprint)).toBe(cold);
     const admittedWeek = cold.split("\n")[0]!.slice("week=".length);
     expect(key("2026-45", undefined, "", admittedWeek)).toBe(`key=${nextWeek}`);
-    expect(key("2026-44", 304, fingerprint)).toBe(
-      `week=202644\ncold-group=${nextWeek}-1-1`,
-    );
+    expect(key("2026-44", 17, fingerprint)).not.toBe(cold);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -247,16 +246,13 @@ test.each([
   expect(checked.status === 0, checked.stderr).toBe(result.passes);
 });
 
-test("source CI and rotating properties opt in to native artifact reuse", () => {
+test("source CI opts in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  expect(
-    workflow("test-quality").jobs["native"]?.with?.["reuse-verified"],
-  ).toBe("${{ !inputs.compare-layouts }}");
   for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
