@@ -505,8 +505,10 @@ function immutableSourceUrl(
     .replace(/\/$/, "");
   const path = location.path.split("/").map(encodeURIComponent).join("/");
   remote.pathname = `${repository}/blob/${target.revision}/${path}`;
-  // GitHub renders Markdown files; line anchors only work on the plain view.
-  if (/\.(?:md|markdown)$/i.test(location.path)) remote.search = "plain=1";
+  // GitHub renders Markdown previews without source line anchors.
+  const markdownPath =
+    /\.(?:md|markdown|mdown|mdwn|mkd|mkdn|mkdown|mdx|litcoffee|livemd|ronn|scd|workbook)$/i;
+  if (markdownPath.test(location.path)) remote.search = "plain=1";
   remote.hash = `L${location.startLine}${
     location.endLine === undefined || location.endLine === location.startLine
       ? ""

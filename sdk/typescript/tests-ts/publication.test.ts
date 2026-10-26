@@ -350,45 +350,12 @@ describe("scan publication preparation", () => {
     delete manifest.scan.target.snapshotDigest;
     await writeJson(manifestPath, manifest);
 
-    const { description } = (
-      await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      )
-    ).issues[0]!;
-
-    expect(description).toContain(
-      "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
-    );
-    expect(description).toContain(
-      "**Revision:** 0123456789abcdef0123456789abcdef01234567",
-    );
-    expect(description).not.toContain("Snapshot digest");
-  });
-
-  test("links Markdown source locations to the unrendered file", async () => {
-    const scanDirectory = await copyExample();
-    const manifestPath = join(scanDirectory, "scan-manifest.json");
-    const manifest = await readJson<ScanManifest>(manifestPath);
-    manifest.scan.target.kind = "git_revision";
-    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
-    delete manifest.scan.target.snapshotDigest;
-    await writeJson(manifestPath, manifest);
-
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = await readJson<FindingsDocument>(findingsPath);
-    findings.findings[0]!.codeEvidence = [
-      {
-        id: "markdown-path",
-        label: "Markdown path",
-        path: "docs/setup.md",
-        startLine: 3,
-        endLine: 5,
-        role: "source",
-        code: "curl https://example.com/install.sh | sh",
-        explanation: "The setup guide pipes a downloaded script into a shell.",
-      },
-    ];
+    findings.findings[0]!.locations.push(
+      { path: "docs/setup.md", startLine: 3, endLine: 5 },
+      { path: "docs/usage.MDX", startLine: 7 },
+    );
     await writeJson(findingsPath, findings);
     await reseal(scanDirectory);
 
@@ -400,11 +367,14 @@ describe("scan publication preparation", () => {
     ).issues[0]!;
 
     expect(description).toContain(
-      "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/docs/setup.md?plain=1#L3-L5",
-    );
-    expect(description).toContain(
       "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
     );
+    expect(description).toContain("/docs/setup.md?plain=1#L3-L5");
+    expect(description).toContain("/docs/usage.MDX?plain=1#L7");
+    expect(description).toContain(
+      "**Revision:** 0123456789abcdef0123456789abcdef01234567",
+    );
+    expect(description).not.toContain("Snapshot digest");
   });
 
   test.each([
