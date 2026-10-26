@@ -47,7 +47,7 @@ function answer(request: SeverityClassificationReviewRequest) {
 }
 
 test("binds assessments to exact UTF-8 snapshots without rewriting the original report", async () => {
-  const original = input();
+  const original = { ...input(), effort: "synthetic-effort" };
   const before = structuredClone(original);
   const requests: SeverityClassificationReviewRequest[] = [];
   const result = await classifySeverityRecords(original, {
@@ -55,7 +55,7 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
       async run(request) {
         requests.push(request);
         expect(request.model).toBe(original.model);
-        expect(request.effort).toBe("high");
+        expect(request.effort).toBe(original.effort);
         expect(JSON.parse(request.prompt).rubric).toEqual([
           original.rubric.markdown,
         ]);
@@ -88,28 +88,8 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
   expect(result.assessments[0]).not.toHaveProperty("findingId");
 });
 
-test.each(["none", "synthetic-effort"])(
-  "passes reasoning effort %p to the host unchanged",
-  async (effort) => {
-    const efforts: string[] = [];
-    const result = await classifySeverityRecords(
-      { ...input(), effort },
-      {
-        classificationRuns: 1,
-        reviewRunner: {
-          async run(request) {
-            efforts.push(request.effort);
-            return answer(request);
-          },
-        },
-      },
-    );
-    expect(result.status).toBe("completed");
-    expect(efforts).toEqual([effort]);
-  },
-);
-
 test.each([
+  "blank-effort",
   "rubric-hash",
   "finding-hash",
   "duplicate",
@@ -120,6 +100,7 @@ test.each([
   "unsafe-revision",
 ])("rejects %s before any host work", async (scenario) => {
   const data = input();
+  if (scenario === "blank-effort") data.effort = "   ";
   if (scenario === "rubric-hash") data.rubric.markdown += " ";
   if (scenario === "finding-hash") data.records[0]!.findingJson += " ";
   if (scenario === "duplicate") data.records.push(data.records[0]!);
@@ -317,7 +298,7 @@ test.each([
       capture().stream,
       deps,
     );
-    const params: ClassifySeverityRecordsInput = input();
+    const params: ClassifySeverityRecordsInput = { ...input(), effort: "none" };
     if (scenario === "default-rubric") delete params.rubric;
     const completed = [
       "completed",
