@@ -17,7 +17,6 @@ const regularSource = {
   "action-ci": "false",
   "eval-contracts": "true",
   "workflow-quality": "false",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -25,6 +24,7 @@ const regularSource = {
       { os: "ubuntu-latest", node: "24" },
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -42,13 +42,11 @@ const regularSource = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0"] }),
 };
 const fullQualification = {
   ...regularSource,
   "action-ci": "true",
   "workflow-quality": "true",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -57,6 +55,8 @@ const fullQualification = {
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "ubuntu-latest", node: "26" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "24" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -76,7 +76,6 @@ const fullQualification = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0", "24"] }),
 };
 
 const docs = {
@@ -85,10 +84,15 @@ const docs = {
   "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
-  "container-validate": "false",
 };
 
 test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+  const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
+    .map((file) => new URL(`../../${file}`, import.meta.url))
+    .find((file) => fs.existsSync(file));
+  const rules = fs.readFileSync(ignore, "utf8");
+  assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
+  assert.doesNotMatch(rules, /^\s*!/m);
   const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const files = join(cwd, "plugins/codex-security/tests");
@@ -120,6 +124,11 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
   commit("test_2fa.py", "conftest.py");
   const reduced = {
     ...fullQualification,
+    "compatibility-matrix": JSON.stringify({
+      include: JSON.parse(
+        fullQualification["compatibility-matrix"],
+      ).include.filter(({ os }) => os !== "windows-latest"),
+    }),
     "source-required": "false",
     "action-ci": "false",
     "eval-contracts": "false",
@@ -306,7 +315,9 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
     "plugins/codex-security/mcp-app/tests/support/fixture.ts",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);
-    assert.deepEqual(select(["README.md", path]), regularSource, path);
+    for (const guide of ["README.md", "sdk/typescript/docs/cli.md"]) {
+      assert.deepEqual(select([guide, path]), regularSource, path);
+    }
   }
 });
 
@@ -352,7 +363,7 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["sdk/typescript/.npmrc"],
     ["sdk/typescript/docs/unlisted.md"],
     ["RELEASING.md", "sdk/typescript/src/api.ts"],
-    ["sdk/typescript/docs/cli.md", "sdk/typescript/src/api.ts"],
+    ["sdk/typescript/docs/cli.md", "sdk/typescript/docs/unlisted.md"],
     ["plugins/codex-security/mcp-app/src/.npmrc"],
     ["pnpm-workspace.yaml"],
     ["sdk/typescript/pnpm-workspace.yaml"],
@@ -435,7 +446,6 @@ function successfulFullRun() {
       "plugin-host",
       "plugin-source",
       "windows-test",
-      "windows-verify",
       "workflow-quality",
       "container-validate",
     ].map((name) => [name, { result: "success" }]),
@@ -467,7 +477,14 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
     });
   const needs = successfulFullRun();
   for (const selected of [true, false]) {
-    const outputs = select([selected ? "Dockerfile" : "README.md"]);
+    const outputs = select(
+      [
+        selected
+          ? "Dockerfile"
+          : "plugins/codex-security/tests/test_workbench.py",
+      ],
+      { modifiedOnly: true },
+    );
     for (const result of ["success", "failure", "cancelled", "skipped"]) {
       const verdict = run({
         ...needs,
@@ -518,7 +535,6 @@ test("documentation requires static checks and explicit selection, without skipp
     "action-ci",
     "eval-contracts",
     "workflow-quality",
-    "container-validate",
   ]) {
     assert.deepEqual(
       failedChecks({
