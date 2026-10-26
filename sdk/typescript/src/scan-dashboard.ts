@@ -922,48 +922,64 @@ export class ScanDashboard {
         this.#components.length - rows,
       ),
     );
-    const costWidth = Math.max(
-      "Cost".length,
-      ...this.#components.map(({ dashboard }) =>
-        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
-      ),
-    );
-    const nameWidth = Math.max(
-      10,
-      width - 52 - (this.#showCost ? costWidth + 1 : 0),
-    );
+    const header = {
+      marker: " ",
+      name: "Component",
+      status: "Status",
+      files: "Files",
+      findings: "Findings",
+      cost: "Cost",
+    };
+    let filesWidth = 11;
+    let findingsWidth = header.findings.length;
+    let costWidth = header.cost.length;
+    const visible: (typeof header)[] = [];
+    for (const [index, { receipt, dashboard }] of this.#components.entries()) {
+      const progress = dashboard.#files;
+      const files =
+        progress === null
+          ? "—"
+          : `${formatCount(progress.filesCompleted)}/${formatCount(progress.filesTotal)}`;
+      const findings =
+        receipt.findingCount === undefined
+          ? "—"
+          : formatCount(receipt.findingCount);
+      const cost =
+        dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost);
+      filesWidth = Math.max(filesWidth, files.length);
+      findingsWidth = Math.max(findingsWidth, findings.length);
+      costWidth = Math.max(costWidth, cost.length);
+      if (index >= first && index < first + rows) {
+        visible.push({
+          marker: index === this.#selectedComponent ? "›" : " ",
+          name: receipt.name,
+          status:
+            receipt.status === "started"
+              ? dashboard.#stage
+              : componentStatus(receipt),
+          files,
+          findings,
+          cost,
+        });
+      }
+    }
+    const trailingWidth =
+      filesWidth + findingsWidth + (this.#showCost ? costWidth + 1 : 0);
+    const nameWidth = Math.max(10, width - 33 - trailingWidth);
     const cell = (value: string, width: number): string => {
       const text = fitLine(value, width);
       return text + " ".repeat(width - stringWidth(text));
     };
-    const row = (
-      marker: string,
-      name: string,
-      status: string,
-      files: string,
-      findings: string,
-      cost: string,
-    ): string =>
-      `  ${marker} ${cell(name, nameWidth)} ${cell(status, 24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
-    const table = this.#components
-      .slice(first, first + rows)
-      .map(({ receipt, dashboard }, index) => {
-        const files = dashboard.#files;
-        return row(
-          first + index === this.#selectedComponent ? "›" : " ",
-          receipt.name,
-          receipt.status === "started"
-            ? dashboard.#stage
-            : componentStatus(receipt),
-          files === null
-            ? "—"
-            : `${formatCount(files.filesCompleted)}/${formatCount(files.filesTotal)}`,
-          receipt.findingCount === undefined
-            ? "—"
-            : formatCount(receipt.findingCount),
-          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
-        );
-      });
+    const row = ({
+      marker,
+      name,
+      status,
+      files,
+      findings,
+      cost,
+    }: typeof header): string =>
+      `  ${marker} ${cell(name, nameWidth)} ${cell(status, 24)} ${files.padStart(filesWidth)} ${findings.padStart(findingsWidth)}${this.#showCost ? ` ${cost}` : ""}`;
+    const table = visible.map(row);
     if (table.length === 0) table.push(`  ${this.#stage}…`);
     while (table.length < rows) table.push("");
     const count = (status: ComponentReceipt["status"]) =>
@@ -984,7 +1000,7 @@ export class ScanDashboard {
       divider,
       `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("failed")} failed`,
       "",
-      row(" ", "Component", "Status", "Files", "Findings", "Cost"),
+      row(header),
       ...table,
       divider,
       `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
