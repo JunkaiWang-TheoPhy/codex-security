@@ -350,15 +350,6 @@ describe("scan publication preparation", () => {
     delete manifest.scan.target.snapshotDigest;
     await writeJson(manifestPath, manifest);
 
-    const findingsPath = join(scanDirectory, "findings.json");
-    const findings = await readJson<FindingsDocument>(findingsPath);
-    findings.findings[0]!.locations.push(
-      { path: "docs/setup.md", startLine: 3, endLine: 5 },
-      { path: "docs/usage.MDX", startLine: 7 },
-    );
-    await writeJson(findingsPath, findings);
-    await reseal(scanDirectory);
-
     const { description } = (
       await prepareScanPublication(
         scanDirectory,
@@ -369,8 +360,6 @@ describe("scan publication preparation", () => {
     expect(description).toContain(
       "https://github.com/example/repo/blob/0123456789abcdef0123456789abcdef01234567/src/extract.py#L41-L44",
     );
-    expect(description).toContain("/docs/setup.md?plain=1#L3-L5");
-    expect(description).toContain("/docs/usage.MDX?plain=1#L7");
     expect(description).toContain(
       "**Revision:** 0123456789abcdef0123456789abcdef01234567",
     );
@@ -650,7 +639,7 @@ describe("scan publication preparation", () => {
     expect(await readFile(findingsPath, "utf8")).toBe(saved);
   });
 
-  test("preserves nested historical evidence coordinates and source-link rules", async () => {
+  test("links code and Markdown source lines at nested historical evidence coordinates", async () => {
     const scanDirectory = await copyExample();
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = await readJson<FindingsDocument>(findingsPath);
@@ -664,7 +653,7 @@ describe("scan publication preparation", () => {
         code: "canonical_nested_location()",
         explanation: "Canonical explanation.",
         location: {
-          path: "src/canonical-nested.py",
+          path: "docs/canonical-nested.md",
           startLine: 20,
           endLine: 24,
         },
@@ -690,7 +679,7 @@ describe("scan publication preparation", () => {
       {
         id: "reversed-range",
         code: "reversed_range()",
-        location: { path: "src/reversed.py", startLine: 48, endLine: 47 },
+        location: { path: "docs/reversed.MDX", startLine: 48, endLine: 47 },
       },
       {
         id: "path-only",
@@ -725,7 +714,7 @@ describe("scan publication preparation", () => {
       )
     ).issues[0]!;
 
-    expect(description).toContain("src/canonical-nested.py#L20-L24)");
+    expect(description).toContain("docs/canonical-nested.md?plain=1#L20-L24)");
     expect(description).toContain("[``app/api/`id`/route.ts:7``]");
     expect(description).toContain("app/api/%60id%60/route.ts#L7)");
     expect(description).toContain("`` `route`.ts ``");
@@ -733,7 +722,7 @@ describe("scan publication preparation", () => {
     expect(description).toContain("src/nested.py:12-15");
     expect(description).toContain("src/nested.py#L12-L15)");
     expect(description).not.toContain("src/shadow.py");
-    expect(description).toContain("src/reversed.py#L48)");
+    expect(description).toContain("docs/reversed.MDX?plain=1#L48)");
     expect(description).not.toContain("#L48-L47");
     expect(description).toContain("`src/path-only.py`");
     expect(description).not.toContain("[`src/path-only.py");
