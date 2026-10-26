@@ -187,7 +187,7 @@ describe("interactive patch finding browser", () => {
           'const token = "sk-proj-SYNTHETIC_KEY_123";',
         ].join("\n"),
       );
-      await writeFile(join(repository, "eof.ts"), "//\r\n".repeat(9) + "\r\n");
+      await writeFile(join(repository, "eof.ts"), "\r\n".repeat(10));
       const outside = join(directory, "outside.ts");
       await writeFile(outside, "OUTSIDE_PRIVATE_SOURCE");
       await symlink(outside, join(repository, "src", "outside-link.ts"));
