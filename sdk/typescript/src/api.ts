@@ -2076,7 +2076,7 @@ export class CodexSecurity {
         prompts,
       } = inputs;
       options = { ...options, ...prompts };
-      let severityRubric =
+      const severityRubric =
         options.severityRubric === undefined
           ? options.resumeScanId === undefined
             ? await getDefaultSeverityRubric(signal)
@@ -2618,7 +2618,6 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
           );
-        severityRubric = savedRubric;
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
