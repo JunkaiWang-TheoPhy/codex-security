@@ -35,7 +35,6 @@
     "mcp/server.mjs.br.part-002",
     "references/access-advisory.md",
     "references/artifact-storage.md",
-    "references/baseline-auditor.md",
     "references/core-scan.md",
     "references/final-report.md",
     "references/finding-detail-fields.md",
