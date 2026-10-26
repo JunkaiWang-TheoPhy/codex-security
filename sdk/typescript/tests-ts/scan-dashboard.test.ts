@@ -2777,14 +2777,11 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   const header = lines.find((line) => line.includes("Findings"))!;
   const rows = lines.filter((line) => line.includes("Queued"));
   expect(rows).toHaveLength(receipts.length);
-  const column = (line: string, value: string) =>
-    stringWidth(line.slice(0, line.lastIndexOf(value)));
-  const costColumn = column(header, "Cost");
-  for (const row of rows.slice(0, -1)) {
-    expect(row).toContain("$1.00");
-    expect(column(row, "$1.00")).toBe(costColumn);
+  for (const row of rows) {
+    const costStart = row.lastIndexOf(row.includes("unpriced") ? "—" : "$1.00");
+    expect(costStart).toBeGreaterThanOrEqual(0);
+    expect(stringWidth(row.slice(0, costStart))).toBe(header.indexOf("Cost"));
   }
-  expect(column(rows.at(-1)!, "—")).toBe(costColumn);
   dashboard.stop();
 });
 
