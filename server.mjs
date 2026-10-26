@@ -17,6 +17,10 @@ export const server = http.createServer(async (req, res) => {
     res.writeHead(400).end('Missing name');
     return;
   }
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(name)) {
+    res.writeHead(400).end('Invalid filename');
+    return;
+  }
   try {
     const filename = path.resolve(publicRoot, name);
     const content = await readFile(filename);
