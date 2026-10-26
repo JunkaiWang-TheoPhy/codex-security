@@ -47,7 +47,7 @@ export const classifySeverityRecordsInputSchema = z
       .strict()
       .optional(),
     model: text,
-    effort: text,
+    effort: z.string(),
     records: z.array(
       z
         .object({

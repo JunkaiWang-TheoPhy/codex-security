@@ -46,8 +46,9 @@ function answer(request: SeverityClassificationReviewRequest) {
   };
 }
 
-test("binds assessments to exact UTF-8 snapshots without rewriting the original report", async () => {
-  const original = input(" synthetic-effort ");
+const efforts = ["", "\t", " synthetic-effort "];
+test.each(efforts)("preserves UTF-8 records and effort %p", async (effort) => {
+  const original = input(effort);
   const before = structuredClone(original);
   const requests: SeverityClassificationReviewRequest[] = [];
   const result = await classifySeverityRecords(original, {
@@ -89,7 +90,8 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
 });
 
 test.each([
-  "blank-effort",
+  "missing-effort",
+  "numeric-effort",
   "rubric-hash",
   "finding-hash",
   "duplicate",
@@ -100,7 +102,8 @@ test.each([
   "unsafe-revision",
 ])("rejects %s before any host work", async (scenario) => {
   const data = input();
-  if (scenario === "blank-effort") data.effort = "   ";
+  if (scenario === "missing-effort") Reflect.deleteProperty(data, "effort");
+  if (scenario === "numeric-effort") Reflect.set(data, "effort", 1);
   if (scenario === "rubric-hash") data.rubric.markdown += " ";
   if (scenario === "finding-hash") data.records[0]!.findingJson += " ";
   if (scenario === "duplicate") data.records.push(data.records[0]!);
