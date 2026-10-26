@@ -923,7 +923,7 @@ export class ScanDashboard {
       ),
     );
     const costWidth = Math.max(
-      8,
+      "Cost".length,
       ...this.#components.map(({ dashboard }) =>
         dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
       ),

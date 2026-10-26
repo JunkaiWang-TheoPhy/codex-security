@@ -2738,7 +2738,7 @@ function failingDashboardOutput(output: string[]) {
 test("aligns component columns by terminal width and retains trailing cost", async () => {
   const stderr = capture(true);
   const dashboard = createDashboard(
-    { ...stderr.stream, columns: 160, rows: 24 },
+    { ...stderr.stream, columns: 132, rows: 24 },
     { presentation: "components", showCost: true },
   );
   const receipts: ComponentReceipt[] = [
@@ -2755,6 +2755,7 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   }));
   dashboard.start();
   dashboard.setComponents(receipts);
+  expect(stderr.text()).toContain(receipts[0]!.name);
   for (const receipt of receipts.slice(0, -1))
     dashboard.recordComponentEvent({
       componentId: receipt.id,
@@ -2780,6 +2781,7 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   for (const row of rows) {
     const costStart = row.lastIndexOf(row.includes("unpriced") ? "—" : "$1.00");
     expect(costStart).toBeGreaterThanOrEqual(0);
+    expect(row).not.toEndWith("…");
     expect(stringWidth(row.slice(0, costStart))).toBe(header.indexOf("Cost"));
   }
   dashboard.stop();
