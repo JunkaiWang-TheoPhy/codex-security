@@ -1,4 +1,5 @@
 import { runNodePython } from "./support/python-probe.js";
+import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
@@ -422,21 +423,27 @@ describe("plugin runtime preparation", () => {
       expect(initialized.status, initialized.stderr).toBe(0);
     }
 
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) => [
-      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-      "--repo",
-      repository,
-      "--scope",
-      ".",
-      "--out",
-      destination,
-    ];
+    const generatorArguments = (destination: string) =>
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        destination,
+      ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = runNodePython(python!, generatorArguments(destination));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(destination),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -462,7 +469,13 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = runNodePython(python!, generatorArguments(posixOutput));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(posixOutput),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -486,34 +499,39 @@ describe("plugin runtime preparation", () => {
         join(repository, "source.ts:synthetic-stream"),
         "export const hidden = true;\n",
       );
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-
-      const inventory = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        "source.ts:synthetic-stream",
-        "--out",
-        join(root, "inventory.txt"),
-      ]);
+      const inventory = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(inventory.status).toBe(2);
-      expect(inventory.stderr).toContain("NTFS alternate data streams");
+      expect(inventory.stderr).toContain("NTFS alternate data stream");
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
-      const scopeInput = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-scope-input",
-        "--repo",
-        repository,
-        "--scopes-file",
-        scopes,
-        "--out",
-        join(root, "scope-input.jsonl"),
-      ]);
+      const scopeInput = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          join(root, "scope-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(scopeInput.status).toBe(1);
       expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
@@ -2955,6 +2973,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2973,6 +2992,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
+    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
+      "1",
+    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -2990,6 +3012,25 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
+  });
+
+  test("forwards the external import setting to the plugin helper", () => {
+    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
+    const node = Bun.which("node")!;
+    const environment: NodeJS.ProcessEnv = Object.assign(
+      Object.create({ [flag]: "1" }),
+      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
+    );
+    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
+    const run = () =>
+      spawnSync(node, [helper, "list-external-findings", "--help"], {
+        env: pluginExecutionEnvironment(node, environment),
+      }).status;
+
+    expect(run()).toBe(0);
+    environment[flag] = undefined;
+    environment["Codex_Security_Enable_External_Imports"] = "1";
+    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
@@ -6272,23 +6313,20 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "runs plugin helpers with UTF-8 standard streams",
+    "runs Node inventory helpers with UTF-8 standard streams",
     async () => {
       const root = await temporaryDirectory("codex-security-python-utf8-");
       const repository = join(root, "repository");
       const output = join(root, "出力.jsonl");
       await mkdir(repository);
       await writeFile(join(repository, "source.py"), "value = 1\n");
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["."]));
       const result = spawnSync(
-        python!,
+        nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-scope-input",
           "--repo",
           repository,
@@ -6299,10 +6337,11 @@ describe("runtime directories and plugin Python boundary", () => {
         ],
         {
           encoding: "utf8",
-          env: pluginExecutionEnvironment(python!, {
+          env: {
             ...process.env,
             pythonutf8: "0",
-          }),
+            PYTHON: "missing-python",
+          },
         },
       );
 
