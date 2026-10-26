@@ -55,9 +55,15 @@ Confirm review concerns against source or, in standard mode, focused execution b
 
 When a Codex Security workbench request includes a scan ID, occurrence ID, remediation request ID, action token, and expected version, follow only the requested remediation stage. The stage boundary changes when code may be written, but it does not weaken the validation requirements above.
 
-- **Generate**: Keep the selected target checkout unchanged. Use an isolated worktree or temporary copy when edits are needed to develop or test the fix. Apply the patch contract and verification requirements above, write one canonical unified diff containing the complete source and regression-test change, then record `generated` or `failed` using the supplied workbench identity.
+- **Generate.** Develop the source and regression-test changes in an isolated worktree or temporary copy, keeping the selected target checkout unchanged. Call `set_codex_security_finding_remediation` with the supplied workbench identity and `state: "generated"`.
+  - In a clean disposable Git worktree at the request's baseline, work from the selected target directory. Stage only the intended modified, added, and deleted paths with `git add -- <paths>`, including new regression tests. Generate the target-relative patch with `git diff --cached --binary --relative -- .`.
+  - For an unversioned target or a baseline with local changes, copy the selected target into temporary sibling directories `a` and `b`, excluding Git metadata. Keep `a` unchanged and make only the intended changes in `b`. From their parent, run `git diff --no-index --binary --no-prefix -- a b`. Exit 1 means the copies differ.
+  - Send the exact unified diff in `patch`, preserving any final newline. Use a string for UTF-8 text. If the diff contains non-UTF-8 bytes, base64-encode the original bytes and send `patch: { encoding: "base64", content: "..." }`. The workbench checks that Git can parse the diff before saving it and returning its path and digest.
+  - For an existing scan-local patch, pass `patchPath` and `patchDigest` and omit `patch`. Reuse the recorded path and digest when retrying a failed Generate request that already has a reviewed patch.
 - **Apply**: Verify the recorded base revision and patch digest, then apply exactly that patch to the selected working tree without unrelated edits. Record `applied` or `failed`. Do not verify or close the finding in this stage.
 - **Verify**: Do not modify source. Apply the selected mode's verification gates above against the recorded patch. Record `verified` only when evidence establishes that the original vulnerable path is closed, legitimate behavior remains intact, and the required checks pass; preserve exact evidence and any commands run in the verification summary. Otherwise record `failed` and state the failing gate or proof gap. Do not close the finding.
+
+If a stage fails, call `set_codex_security_finding_remediation` with `state: "failed"`. Name the failing step and its error in `summary`. If saving the patch failed, include the error from the setter.
 
 When a parent thread delegates a remediation stage, the worker owns that stage through its terminal workbench update. The parent remains an orchestrator and must not duplicate the worker's edits or treat a chat response as completion.
 

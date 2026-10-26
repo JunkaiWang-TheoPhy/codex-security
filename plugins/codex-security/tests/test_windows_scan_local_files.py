@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
+from test_deep_scan_publication_authority import emulate_windows_atomic_write
 from workbench_test_support import load_script
 
 pytestmark = pytest.mark.native_windows
@@ -84,6 +87,79 @@ def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path
     WINDOWS_FILES.unlink_if_exists(scan_dir, "exports/results.sarif")
     assert not (scan_dir / "exports" / "results.sarif").exists()
     WINDOWS_FILES.unlink_if_exists(scan_dir, "exports/results.sarif")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
+def test_create_only_write_reports_existing_patch_when_disk_is_full(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "reviewed.patch"
+    patch = b"previously saved patch"
+    destination.write_bytes(patch)
+
+    def disk_full(*args):
+        raise OSError(errno.ENOSPC, "synthetic disk full")
+
+    monkeypatch.setattr(WINDOWS_FILES, "_write_all", disk_full)
+    with pytest.raises(FileExistsError):
+        WINDOWS_FILES.atomic_write(tmp_path, destination.name, patch, replace_existing=False)
+    assert destination.read_bytes() == patch
+
+
+@pytest.mark.parametrize("outcome", ["publish", "archive", "abandon", "collision", "substitution"])
+def test_staged_patch_is_visible_only_after_publication(tmp_path, monkeypatch, outcome):
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    destination = scan_dir / "reviewed.patch"
+    patch = b"generated patch\n"
+    with ExitStack() as files:
+        backend = WINDOWS_FILES
+        if os.name != "nt":
+            backend = emulate_windows_atomic_write(
+                monkeypatch, load_script("finalize_scan_contract"), files
+            )
+        with backend.stage_write(scan_dir, destination.name, patch) as publish:
+            assert not destination.exists()
+            if outcome in {"publish", "archive"}:
+                if outcome == "archive":
+                    archived = tmp_path / "archived-scan"
+                    scan_dir.rename(archived)
+                    scan_dir.mkdir()
+                    destination = archived / destination.name
+                saved, change = publish(destination.parent)
+                assert destination.read_bytes() == patch
+                with destination.open("rb") as current:
+                    metadata = os.fstat(current.fileno())
+                    assert os.path.samestat(saved, metadata)
+                    assert (saved.st_size, saved.st_mtime_ns) == (
+                        metadata.st_size,
+                        metadata.st_mtime_ns,
+                    )
+                    assert change == backend.file_change_time(current.fileno())
+            elif outcome == "collision":
+                destination.write_bytes(b"competing patch\n")
+                with pytest.raises(FileExistsError):
+                    publish()
+            elif outcome == "substitution":
+                (temp,) = scan_dir.glob(".*.tmp")
+                # Keep the original inode alive. Match the temp size and timestamp.
+                original = temp.rename(scan_dir / "original")
+                temp.write_bytes(b"different bytes\n")
+                original_stat = original.stat()
+                os.utime(temp, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                with pytest.raises(backend.WindowsScanLocalPathError, match="staged patch changed"):
+                    publish()
+        if outcome == "substitution":
+            assert temp.read_bytes() == b"different bytes\n"
+            assert not destination.exists()
+        else:
+            assert not list(destination.parent.glob(".*.tmp"))
+        if outcome == "abandon":
+            assert not destination.exists()
+        elif outcome == "collision":
+            assert destination.read_bytes() == b"competing patch\n"
+        elif outcome == "archive":
+            assert not list(scan_dir.iterdir())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 reparse-point behavior")

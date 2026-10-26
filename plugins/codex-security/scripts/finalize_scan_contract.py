@@ -18,6 +18,8 @@ import secrets
 import stat
 import struct
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
@@ -557,7 +559,9 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
         os.close(descriptor)
 
 
-def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+def _open_scan_local_directory(
+    root_fd: int, parts: tuple[str, ...], *, create: bool, owner_read_write: bool = False
+) -> int:
     descriptor = os.dup(root_fd)
     try:
         for part in parts:
@@ -567,6 +571,14 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
                 except FileExistsError:
                     # The open below verifies that an existing entry is a real directory.
                     pass
+                else:
+                    if owner_read_write:
+                        mode = os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode
+                        if mode & stat.S_IRWXU != stat.S_IRWXU:
+                            os.rmdir(part, dir_fd=descriptor)
+                            raise ScanLocalIOError(
+                                f"{part}: process umask prevents owner access to the new directory"
+                            )
             next_descriptor = os.open(
                 part,
                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -763,6 +775,40 @@ def _sha256_scan_local_file(scan_dir: Path, relative_path: str, context: str) ->
     return digest.hexdigest()
 
 
+def scan_local_file_version(descriptor: int) -> tuple[os.stat_result, int]:
+    metadata = os.fstat(descriptor)
+    changed = (
+        _windows_scan_local_files().file_change_time(descriptor)
+        if _is_windows()
+        else metadata.st_ctime_ns
+    )
+    return metadata, changed
+
+
+def _scan_local_write_path(
+    scan_dir: Path, relative_path: str, external_name: bool
+) -> tuple[Path, str]:
+    scan_dir = _require_scan_directory(scan_dir)
+    if external_name:
+        if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
+            raise ContractError("external output path: expected a safe file name")
+    else:
+        relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
+    return scan_dir, relative_path
+
+
+@contextmanager
+def _windows_write_errors(backend: Any, relative_path: str) -> Iterator[None]:
+    try:
+        yield
+    except FileExistsError:
+        raise
+    except backend.WindowsScanLocalPathError as exc:
+        raise ContractError(f"{relative_path}: {exc}") from exc
+    except OSError as exc:
+        raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
+
+
 def write_scan_local_bytes(
     scan_dir: Path,
     relative_path: str,
@@ -771,38 +817,68 @@ def write_scan_local_bytes(
     external_name: bool = False,
     expected_root_identity: tuple[int, int] | None = None,
     owner_read_write: bool = False,
+    replace_existing: bool = True,
 ) -> None:
-    scan_dir = _require_scan_directory(scan_dir)
-    if external_name:
-        if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
-            raise ContractError("external output path: expected a safe file name")
-    else:
-        relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
-    path = scan_dir / relative_path
-    if not _descriptor_relative_writes_available():
-        if not _is_windows():
-            raise ContractError("scan-local output requires descriptor-relative file operations")
+    if _is_windows() and not _descriptor_relative_writes_available():
+        scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
         backend = _windows_scan_local_files()
-        try:
+        with _windows_write_errors(backend, relative_path):
             backend.atomic_write(
                 scan_dir,
                 relative_path,
                 payload,
                 expected_root_identity=expected_root_identity,
+                replace_existing=replace_existing,
             )
-        except backend.WindowsScanLocalPathError as exc:
-            raise ContractError(f"{relative_path}: {exc}") from exc
-        except OSError as exc:
-            raise ScanLocalIOError(f"{relative_path}: {exc}") from exc
+        return
+    with stage_scan_local_bytes(
+        scan_dir,
+        relative_path,
+        payload,
+        external_name=external_name,
+        expected_root_identity=expected_root_identity,
+        owner_read_write=owner_read_write,
+        replace_existing=replace_existing,
+    ) as publish:
+        publish()
+
+
+@contextmanager
+def stage_scan_local_bytes(
+    scan_dir: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    external_name: bool = False,
+    expected_root_identity: tuple[int, int] | None = None,
+    owner_read_write: bool = False,
+    replace_existing: bool = False,
+) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
+    path = scan_dir / relative_path
+    if not _descriptor_relative_writes_available():
+        if not _is_windows():
+            raise ContractError("scan-local output requires descriptor-relative file operations")
+        backend = _windows_scan_local_files()
+        with _windows_write_errors(backend, relative_path):
+            with backend.stage_write(
+                scan_dir,
+                relative_path,
+                payload,
+                expected_root_identity=expected_root_identity,
+                replace_existing=replace_existing,
+            ) as publish:
+                yield publish
         return
     root_fd: int | None = None
     parent_fd: int | None = None
-    temp_name: str | None = None
     try:
         root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
         parts = PurePosixPath(relative_path).parts
         try:
-            parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=True)
+            parent_fd = _open_scan_local_directory(
+                root_fd, parts[:-1], create=True, owner_read_write=owner_read_write
+            )
         except OSError as exc:
             raise _scan_local_directory_error(
                 f"{relative_path}: expected a path inside the scan directory", exc
@@ -815,6 +891,8 @@ def write_scan_local_bytes(
         except FileNotFoundError:
             pass
         else:
+            if not replace_existing:
+                raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), relative_path)
             if not stat.S_ISREG(metadata.st_mode):
                 raise ContractError(f"{relative_path}: expected a regular non-symlink file")
             try:
@@ -843,6 +921,7 @@ def write_scan_local_bytes(
                                 if _windows_scan_local_files().stream_matches_payload(
                                     handle, payload
                                 ):
+                                    yield lambda _directory=None: (opened, opened.st_ctime_ns)
                                     return
                         except OSError:
                             # A failed content comparison still allows an atomic replacement.
@@ -850,32 +929,38 @@ def write_scan_local_bytes(
                 finally:
                     if existing_fd >= 0:
                         os.close(existing_fd)
-        temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
-        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
-        with os.fdopen(temp_fd, "wb") as handle:
-            if owner_read_write:
-                # Generated Markdown must remain editable under a restrictive umask.
-                os.fchmod(handle.fileno(), 0o600)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        temp_name = None
+        candidate = f".{path.name}.{secrets.token_hex(8)}.tmp"
+        from posix_scan_local_files import publish_new_file, stage_file
+
+        with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
+            staged = os.fstat(staged_fd)
+
+            def publish(_directory: Path | None = None) -> tuple[os.stat_result, int]:
+                if replace_existing:
+                    os.replace(candidate, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    return staged, staged.st_ctime_ns
+                named = os.stat(candidate, dir_fd=parent_fd, follow_symlinks=False)
+                if not os.path.samestat(staged, named) or staged.st_ctime_ns != named.st_ctime_ns:
+                    raise ContractError(f"{relative_path}: staged file changed before publication")
+                publish_new_file(parent_fd, candidate, parts[-1])
+                published = os.fstat(staged_fd)
+                if (staged.st_size, staged.st_mtime_ns) != (
+                    published.st_size,
+                    published.st_mtime_ns,
+                ):
+                    raise ContractError(
+                        f"{relative_path}: staged contents changed during publication"
+                    )
+                return published, published.st_ctime_ns
+
+            yield publish
     finally:
         try:
-            if temp_name is not None and parent_fd is not None:
-                try:
-                    os.unlink(temp_name, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    # The temporary file is already gone, so cleanup is complete.
-                    pass
+            if parent_fd is not None:
+                os.close(parent_fd)
         finally:
-            try:
-                if parent_fd is not None:
-                    os.close(parent_fd)
-            finally:
-                if root_fd is not None:
-                    os.close(root_fd)
+            if root_fd is not None:
+                os.close(root_fd)
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:

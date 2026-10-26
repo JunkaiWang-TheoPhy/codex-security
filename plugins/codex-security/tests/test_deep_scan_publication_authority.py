@@ -304,14 +304,19 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
         paths[descriptor] = path
         return backend._OwnedHandle(descriptor)
 
-    def rename_handle(handle, destination):
-        os.replace(paths[handle], destination)
+    def rename_handle(handle, destination, replace_existing):
+        if replace_existing:
+            os.replace(paths[handle], destination)
+        else:
+            os.link(paths[handle], destination)
+            paths[handle].unlink()
         paths[handle] = destination
 
     def close_handle(handle):
         if handle >= 0:
             streams[handle].close()
         if handle in pending_deletions:
+            pending_deletions.remove(handle)
             paths[handle].unlink()
 
     def attributes(handle):
@@ -326,6 +331,22 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     monkeypatch.setattr(backend, "_require_windows", lambda: None)
     monkeypatch.setattr(backend, "_validate_existing_output", lambda path: None)
     monkeypatch.setattr(backend, "_create_file", create_file)
+
+    def reopen_file(handle, *_):
+        return os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+
+    monkeypatch.setattr(backend, "_ReOpenFile", reopen_file, raising=False)
+    monkeypatch.setattr(backend, "file_change_time", lambda fd: os.fstat(fd).st_ctime_ns)
+    monkeypatch.setattr(
+        backend,
+        "_msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda handle, flags: (
+                os.open(paths[handle], flags) if handle < 0 else handle
+            )
+        ),
+    )
+    monkeypatch.setattr(os, "O_BINARY", getattr(os, "O_BINARY", 0), raising=False)
     monkeypatch.setattr(backend, "_close_handle", close_handle)
     monkeypatch.setattr(backend, "_attributes", attributes)
     monkeypatch.setattr(
