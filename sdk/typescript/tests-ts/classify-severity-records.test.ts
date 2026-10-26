@@ -12,7 +12,7 @@ import { capture, dependencies } from "./cli-fixtures.js";
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
-function input(): ClassifySeverityRecordsInput & {
+function input(effort = "high"): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
 } {
   const markdown =
@@ -23,7 +23,7 @@ function input(): ClassifySeverityRecordsInput & {
     version: 1,
     rubric: { revision: 4, markdown, sha256: hash(markdown) },
     model: "synthetic-model",
-    effort: "high",
+    effort,
     records: [
       {
         id: "canonical-one",
@@ -47,7 +47,7 @@ function answer(request: SeverityClassificationReviewRequest) {
 }
 
 test("binds assessments to exact UTF-8 snapshots without rewriting the original report", async () => {
-  const original = { ...input(), effort: "synthetic-effort" };
+  const original = input(" synthetic-effort ");
   const before = structuredClone(original);
   const requests: SeverityClassificationReviewRequest[] = [];
   const result = await classifySeverityRecords(original, {
@@ -298,7 +298,7 @@ test.each([
       capture().stream,
       deps,
     );
-    const params: ClassifySeverityRecordsInput = { ...input(), effort: "none" };
+    const params: ClassifySeverityRecordsInput = input("none");
     if (scenario === "default-rubric") delete params.rubric;
     const completed = [
       "completed",
