@@ -134,6 +134,7 @@ export {
   ConfigurationError,
   ContractValidationError,
   DeduplicationReviewError,
+  InvalidDeduplicationDecision,
   IncompleteScanError,
   InvalidTargetError,
   LocalPluginBootstrapError,

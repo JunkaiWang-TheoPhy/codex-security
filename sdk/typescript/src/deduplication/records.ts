@@ -19,6 +19,44 @@ import type {
   DeduplicationReviewRunner,
 } from "./review.js";
 
+class RecordsReviewRefusal extends Error {
+  constructor(readonly refusal: DeduplicationReviewError) {
+    super(refusal.message, { cause: refusal });
+  }
+}
+
+function reviewValidation<T>(
+  validator: CodexReview<T>["validate"] | undefined,
+  signal: AbortSignal | undefined,
+  detailedErrors: boolean | undefined,
+) {
+  let cancellation: { reason: unknown } | undefined;
+  const check = (value: unknown, final: boolean): T => {
+    if (cancellation) throw cancellation.reason;
+    const currentSignal = signal;
+    currentSignal?.throwIfAborted();
+    const validate = validator;
+    if (!validate) throw new Error("The review has already ended.");
+    if (final) validator = undefined;
+    try {
+      return validate(value, final ? detailedErrors : true);
+    } finally {
+      currentSignal?.throwIfAborted();
+    }
+  };
+  return {
+    result: (value: unknown) => check(value, true),
+    preflight: (value: unknown): void => {
+      check(value, false);
+    },
+    close: () => {
+      if (signal?.aborted) cancellation = { reason: signal.reason };
+      validator = undefined;
+      signal = undefined;
+    },
+  };
+}
+
 export function recordsReviewAttribution(
   findingIds: readonly string[] | undefined,
   references: ReadonlyMap<string, string>,
@@ -69,6 +107,8 @@ export interface DeduplicateRecordsInput extends z.infer<
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
+  /** Opt in to typed failures instead of the legacy unresolved result. */
+  throwReviewErrors?: boolean;
 }
 export interface DeduplicateRecordsResult {
   version: 1;
@@ -89,7 +129,9 @@ export async function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
 ): Promise<DeduplicateRecordsResult> {
-  options.signal?.throwIfAborted();
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const { throwReviewErrors } = options;
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
@@ -138,42 +180,53 @@ export async function deduplicateRecords(
       findingIds,
       ...review
     }: CodexReview<T>): Promise<T> {
+      const validation = reviewValidation(validate, signal, throwReviewErrors);
       try {
         return await abortable(async () => {
-          options.signal?.throwIfAborted();
-          return validate(
-            await options.reviewRunner.run(
-              {
-                ...review,
-                requestId: randomUUID(),
-                attribution: recordsReviewAttribution(
-                  findingIds,
-                  references,
-                  relationships,
-                ),
-                trustedInstructions: [
-                  sourceReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningInstructions
-                    : pairReviewInstructions,
-                  review.stage === "screening"
-                    ? screeningFindingFormatInstructions
-                    : pairFindingFormatInstructions,
-                ].join("\n\n"),
-                findingSchema: structuredClone(findingSchema()),
-              },
-              { signal: options.signal },
-            ),
-          );
-        }, options.signal);
+          try {
+            signal?.throwIfAborted();
+            return validation.result(
+              await options.reviewRunner.run(
+                {
+                  ...review,
+                  requestId: randomUUID(),
+                  attribution: recordsReviewAttribution(
+                    findingIds,
+                    references,
+                    relationships,
+                  ),
+                  trustedInstructions: [
+                    sourceReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningInstructions
+                      : pairReviewInstructions,
+                    review.stage === "screening"
+                      ? screeningFindingFormatInstructions
+                      : pairFindingFormatInstructions,
+                  ].join("\n\n"),
+                  findingSchema: structuredClone(findingSchema()),
+                },
+                Object.defineProperty({ signal }, "validate", {
+                  value: validation.preflight,
+                  writable: true,
+                  configurable: true,
+                }),
+              ),
+            );
+          } finally {
+            validation.close();
+          }
+        }, signal);
       } catch (error) {
         // Records mode discards the batch after any failed review.
         if (
           error instanceof DeduplicationReviewError &&
           error.metadata.category === "refusal"
         )
-          throw new Error(error.message, { cause: error });
+          throw new RecordsReviewRefusal(error);
         throw error;
+      } finally {
+        validation.close();
       }
     },
   });
@@ -190,16 +243,18 @@ export async function deduplicateRecords(
       },
     },
     reviewer,
-    options.signal,
+    signal,
     1,
   );
   let groups: string[][];
   try {
     const decisions = await algorithm.run(sourceFindingIds);
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
+    if (throwReviewErrors)
+      throw error instanceof RecordsReviewRefusal ? error.refusal : error;
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,

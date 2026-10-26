@@ -26,6 +26,10 @@ export interface DeduplicationReviewRequest {
 export interface DeduplicationReviewRunner {
   run(
     request: DeduplicationReviewRequest,
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /** Validate a candidate before ending its live review. Does not commit it. */
+      validate?: (value: unknown) => void;
+    },
   ): Promise<unknown>;
 }

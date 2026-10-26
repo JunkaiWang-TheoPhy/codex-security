@@ -43,6 +43,9 @@ export class DeduplicationReviewError extends CodexSecurityError {
   }
 }
 
+/** A model decision rejected by deduplication validation. */
+export class InvalidDeduplicationDecision extends CodexSecurityError {}
+
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}

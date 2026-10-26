@@ -1,7 +1,12 @@
 import { expect, test, mock, onTestFinished, spyOn } from "bun:test";
+import { throws } from "node:assert/strict";
+import { z } from "zod";
+import { InvalidDeduplicationDecision } from "../src/index.js";
+import { requireFinding } from "../src/deduplication/finding-schema.js";
+import { validateReview } from "../src/deduplication/deduplication-reviewer.js";
 import * as records from "../src/deduplication/records.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { DeduplicationReviewError } from "../src/errors.js";
+import { CodexSecurityError, DeduplicationReviewError } from "../src/errors.js";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -854,4 +859,403 @@ test("records isolates each host review's finding schema", async () => {
       else delete annotated["description"];
     }
   }
+});
+
+test.each(["refusal", "cleanup", "decision"])(
+  "SDK preserves failure classification and identity: %s",
+  async (kind) => {
+    const refusal = new DeduplicationReviewError({
+      stage: "screening",
+      model: "synthetic",
+      category: "refusal",
+      attempts: 1,
+      reason: "Synthetic refusal",
+    });
+    let expected: Error = refusal;
+    if (kind === "cleanup")
+      expected = new Error("Cleanup failed", { cause: refusal });
+    const runMock = mock(async () => {
+      if (kind !== "decision") throw expected;
+      return {};
+    });
+    const failure = await deduplicateRecords(input(), {
+      throwReviewErrors: true,
+      reviewRunner: { run: runMock },
+    }).catch((error: unknown) => error);
+    if (kind === "decision") {
+      expect(failure).toBeInstanceOf(InvalidDeduplicationDecision);
+      expect(failure).toBeInstanceOf(CodexSecurityError);
+    } else expect(failure).toBe(expected);
+    expect(runMock).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("SDK validation propagates cancellation even after the runner receives a candidate", async () => {
+  const controller = new AbortController();
+  const started = Promise.withResolvers<(value: unknown) => void>();
+  const finish = Promise.withResolvers<unknown>();
+  const reason = new Error("Review deadline expired");
+  const done = deduplicateRecords(input(), {
+    signal: controller.signal,
+    throwReviewErrors: true,
+    reviewRunner: {
+      run(_request, options) {
+        started.resolve(options!.validate!);
+        return finish.promise;
+      },
+    },
+  });
+  const validate = await started.promise;
+  controller.abort(reason);
+  await expect(done).rejects.toBe(reason);
+  expect(() => validate({})).toThrow(reason);
+  finish.resolve({});
+  await finish.promise;
+  expect(() => validate({})).toThrow(reason);
+});
+
+test("Finding feedback identifies the invalid field while legacy failures stay compact", async () => {
+  const message =
+    "Record must satisfy the Finding schema, including provenance.";
+  const result = await deduplicateRecords(input(), {
+    reviewRunner: {
+      async run(request, options) {
+        const value = answer(request) as { mergedFinding?: Finding };
+        const finding = value.mergedFinding;
+        if (finding) {
+          finding.locations[0]!.path = 1 as never;
+          throws(() => requireFinding(finding), { message });
+          throws(() => validateReview(value, [finding]), { message });
+          expect(() => options!.validate!(value)).toThrow("/locations/0/path");
+        }
+        return value;
+      },
+    },
+  });
+  expect(result.status).toBe("unresolved");
+  for (const entry of result.unresolved) expect(entry.message).toBe(message);
+});
+
+test("repeated invalid entries do not amplify Finding feedback", () => {
+  const messages = [1, 2].map((count) => {
+    const finding = structuredClone(document.findings[0]!);
+    finding.codeEvidence = Array(count).fill({});
+    try {
+      requireFinding(finding, true);
+      throw new Error("Expected invalid finding");
+    } catch (error) {
+      return (error as Error).message;
+    }
+  });
+  expect(messages[0]).toContain("/codeEvidence/0");
+  expect(messages[1]).toBe(messages[0]);
+});
+
+test("concurrent SDK invocations retain their starting error policy", async () => {
+  const resume = Promise.withResolvers<void>();
+  const options = {
+    throwReviewErrors: false,
+    reviewRunner: {
+      async run() {
+        await resume.promise;
+        return {};
+      },
+    },
+  };
+  const legacy = deduplicateRecords(input(), options);
+  options.throwReviewErrors = true;
+  const typed = deduplicateRecords(input(), options).catch(
+    (error: unknown) => error,
+  );
+  resume.resolve();
+  expect((await legacy).status).toBe("unresolved");
+  expect(await typed).toBeInstanceOf(InvalidDeduplicationDecision);
+});
+
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "preserves preflight diagnostics (typed: %p, rewritten: %p)",
+  async (typed, rewritten) => {
+    let failure: Error | undefined;
+    const result = await deduplicateRecords(input(), {
+      throwReviewErrors: typed,
+      reviewRunner: {
+        async run(request, options) {
+          const candidate = answer(request) as { mergedFinding?: Finding };
+          if (!candidate.mergedFinding) return candidate;
+          candidate.mergedFinding.title = "";
+          try {
+            options!.validate!(candidate);
+          } catch (error) {
+            failure = error as Error;
+            if (rewritten) failure.message = "Correction budget exhausted";
+            throw error;
+          }
+          return candidate;
+        },
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(InvalidDeduplicationDecision);
+    if (typed) expect(result).toBe(failure);
+    else {
+      const unresolved = (result as { unresolved: Array<{ message: string }> })
+        .unresolved;
+      expect(unresolved.length).toBeGreaterThan(0);
+      for (const entry of unresolved)
+        expect(entry.message).toBe(failure!.message);
+    }
+  },
+);
+
+test.each(["valid", "invalid", "adapter error"])(
+  "preflight preserves synchronous cancellation (%s)",
+  async (kind) => {
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    const adapterFault = new Error("Synthetic adapter failure");
+    let observed: unknown;
+    await expect(
+      deduplicateRecords(input(), {
+        signal: controller.signal,
+        reviewRunner: {
+          async run(request, options) {
+            const candidate = answer(request) as { decisions: unknown };
+            try {
+              options!.validate!({
+                get decisions() {
+                  controller.abort(reason);
+                  if (kind === "adapter error") throw adapterFault;
+                  return kind === "invalid" ? null : candidate.decisions;
+                },
+              });
+            } catch (error) {
+              observed = error;
+            }
+            return candidate;
+          },
+        },
+      }),
+    ).rejects.toBe(reason);
+    expect(observed).toBe(reason);
+  },
+);
+
+test.each([false, true])(
+  "retained validators close after review (failure: %p)",
+  async (fail) => {
+    const callbacks: Array<(value: unknown) => void> = [];
+    const fault = new Error("Synthetic runner failure");
+    await deduplicateRecords(input(), {
+      reviewRunner: {
+        async run(request, options) {
+          callbacks.push(options!.validate!);
+          if (fail) throw fault;
+          return answer(request);
+        },
+      },
+    });
+    expect(callbacks.length).toBeGreaterThan(0);
+    for (const validate of callbacks) {
+      expect(() => validate({})).toThrow("The review has already ended.");
+    }
+  },
+);
+
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "settling the runner revokes preflight (signal: %p, rejection: %p)",
+  async (withSignal, reject) => {
+    const data = input();
+    data.observations = data.observations.slice(0, 2);
+    data.candidateRelationships = [
+      { observationId: "a", candidateObservationIds: ["b"] },
+    ];
+    const ready = Promise.withResolvers<(value: unknown) => void>();
+    const finish = Promise.withResolvers<unknown>();
+    const candidate = {
+      decisions: {
+        "pair-1": { decision: "DISTINCT", rationale: "Synthetic distinction" },
+      },
+    };
+    let finalChecked = false;
+    const done = deduplicateRecords(data, {
+      signal: withSignal ? new AbortController().signal : undefined,
+      reviewRunner: {
+        run(_request, options) {
+          ready.resolve(options!.validate!);
+          return finish.promise;
+        },
+      },
+    });
+    const validate = await ready.promise;
+    if (reject) finish.reject(new Error("Synthetic runner rejection"));
+    else
+      finish.resolve({
+        get decisions() {
+          finalChecked = true;
+          expect(() => validate(candidate)).toThrow(
+            "The review has already ended.",
+          );
+          return candidate.decisions;
+        },
+      });
+    const late = Promise.withResolvers<unknown>();
+    queueMicrotask(() => {
+      try {
+        validate(candidate);
+        late.resolve(undefined);
+      } catch (error) {
+        late.resolve(error);
+      }
+    });
+    expect((await done).status).toBe(reject ? "unresolved" : "completed");
+    expect(finalChecked).toBe(!reject);
+    expect(await late.promise).toBeInstanceOf(Error);
+    expect(((await late.promise) as Error).message).toBe(
+      "The review has already ended.",
+    );
+  },
+);
+
+test.each([
+  ["preflight", "Zod"],
+  ["final", "Zod"],
+  ["preflight", "import"],
+  ["final", "import"],
+])("%s preserves adapter %s errors", async (stage, kind) => {
+  let fault: unknown = new z.ZodError([]);
+  if (kind === "import") {
+    try {
+      requireFinding({});
+    } catch (error) {
+      fault = error;
+    }
+  }
+  const candidate = Object.defineProperty({}, "decisions", {
+    enumerable: true,
+    get() {
+      throw fault;
+    },
+  });
+  const result = await deduplicateRecords(input(), {
+    throwReviewErrors: true,
+    reviewRunner: {
+      async run(_request, options) {
+        if (stage === "preflight") options!.validate!(candidate);
+        return candidate;
+      },
+    },
+  }).catch((error: unknown) => error);
+  expect(result).toBe(fault);
+});
+
+test.each([false, true])(
+  "preflight permits correction without changing final acceptance (throw errors: %p)",
+  async (typed) => {
+    let calls = 0;
+    let preflights = 0;
+    const result = await deduplicateRecords(input(), {
+      throwReviewErrors: typed,
+      reviewRunner: {
+        async run(request, options) {
+          calls++;
+          expect(structuredClone(options)).toEqual({ signal: undefined });
+          expect(() => options!.validate!({})).toThrow(
+            InvalidDeduplicationDecision,
+          );
+          const value = answer(request);
+          // Existing pair normalization strips extra fields in both error modes.
+          const candidate =
+            request.stage === "pair-review"
+              ? { ...(value as object), extra: true }
+              : value;
+          expect(options!.validate!(candidate)).toBeUndefined();
+          preflights++;
+          return candidate;
+        },
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(
+      result.groups.map((group) => [...group.observationIds].sort()),
+    ).toEqual([["a", "b"], ["c", "neighbor"], ["d"]]);
+    expect(calls).toBe(6);
+    expect(preflights).toBe(calls);
+  },
+);
+
+test.each([false, true])(
+  "final validation rejects an answer changed after preflight (throw errors: %p)",
+  async (typed) => {
+    const result = await deduplicateRecords(input(), {
+      throwReviewErrors: typed,
+      reviewRunner: {
+        async run(request, options) {
+          const candidate = answer(request) as { mergedFinding?: Finding };
+          options!.validate!(candidate);
+          if (candidate.mergedFinding) candidate.mergedFinding.title = "";
+          return candidate;
+        },
+      },
+    }).catch((error: unknown) => error);
+    if (typed) {
+      expect(result).toBeInstanceOf(InvalidDeduplicationDecision);
+      expect((result as Error).message).toContain("/title");
+    } else {
+      expect(result).toMatchObject({ status: "unresolved", groups: [] });
+    }
+  },
+);
+
+test("Finding feedback reuses its validator after failures and exceptions", () => {
+  const valid = document.findings[0]!;
+  requireFinding(valid);
+  const compile = spyOn(Ajv2020.prototype, "compile");
+  try {
+    const invalid = { ...valid, title: 1 };
+    expect(() => requireFinding(invalid, true)).toThrow("/title");
+    const fault = new Error("Synthetic adapter failure");
+    const throwing = {
+      ...valid,
+      get title(): string {
+        throw fault;
+      },
+    };
+    throws(
+      () => requireFinding(throwing, true),
+      (error) => error === fault,
+    );
+    expect(requireFinding(valid, true)).toBe(valid);
+    expect(requireFinding(valid)).toBe(valid);
+    expect(compile).not.toHaveBeenCalled();
+  } finally {
+    compile.mockRestore();
+  }
+});
+
+test("review-scoped provider getters retain their existing lifecycle", async () => {
+  let providers = 0;
+  const result = await deduplicateRecords(input(), {
+    get reviewRunner() {
+      providers++;
+      let closed = false;
+      return {
+        async run(request: DeduplicationReviewRequest) {
+          if (closed) throw new Error("Synthetic provider already closed");
+          closed = true;
+          return answer(request);
+        },
+      };
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(providers).toBe(6);
 });

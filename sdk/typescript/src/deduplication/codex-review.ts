@@ -59,7 +59,7 @@ export interface CodexReview<T> extends Pick<
 > {
   /** Exact comparison participants, supplied by the structured reviewer. */
   findingIds?: readonly string[];
-  validate(value: unknown): T;
+  validate(value: unknown, detailedErrors?: boolean): T;
 }
 
 class ReviewAttemptError extends Error {

@@ -26,6 +26,20 @@ const result = await deduplicateRecords(input, {
 The entry point validates the input structure, unique identities, and candidate
 references before any review.
 
+### SDK validation feedback
+
+A custom review runner can check a proposed answer before closing its review.
+Call `options.validate(candidate)` on the original options object. Cloning or
+spreading it omits this callback. A valid candidate returns normally.
+
+When `InvalidDeduplicationDecision` is thrown, send its `message` back to the
+same open review and request a correction within the runner’s attempt and time
+budgets. Propagate other errors. Stop accepting submissions before resolving
+`run`. The SDK validates the returned answer again.
+
+By default a failed review produces an unresolved batch. Set `throwReviewErrors`
+to `true` to receive the original exception, including a typed invalid decision.
+
 ## Input and identities
 
 Send one UTF-8 JSON object per line, using JSON-RPC 2.0. Keep stdin open until the
