@@ -1,4 +1,5 @@
 import { runNodePython } from "./support/python-probe.js";
+import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
@@ -43,7 +44,7 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -366,10 +367,20 @@ describe("plugin runtime preparation", () => {
       /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
         runtime,
       )?.[0];
+    const candidateSource =
+      /function findingIdentityCandidate\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    const identitySource =
+      /function scanFindingIdentity\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
     expect(source).toBeDefined();
+    expect(candidateSource).toBeDefined();
+    expect(identitySource).toBeDefined();
     const buildFindings = new Function(
       "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
+      `${candidateSource}\n${identitySource}\n${source}\nreturn buildFindings;`,
     )((value: string, fallback: string) => value || fallback) as (
       findings: Array<{
         title: string;
@@ -412,21 +423,27 @@ describe("plugin runtime preparation", () => {
       expect(initialized.status, initialized.stderr).toBe(0);
     }
 
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) => [
-      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-      "--repo",
-      repository,
-      "--scope",
-      ".",
-      "--out",
-      destination,
-    ];
+    const generatorArguments = (destination: string) =>
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        destination,
+      ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = runNodePython(python!, generatorArguments(destination));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(destination),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -452,7 +469,13 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = runNodePython(python!, generatorArguments(posixOutput));
+      const inventory = spawnSync(
+        nodeCommand().command,
+        generatorArguments(posixOutput),
+        {
+          encoding: "utf8",
+        },
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -476,34 +499,39 @@ describe("plugin runtime preparation", () => {
         join(repository, "source.ts:synthetic-stream"),
         "export const hidden = true;\n",
       );
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-
-      const inventory = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        "source.ts:synthetic-stream",
-        "--out",
-        join(root, "inventory.txt"),
-      ]);
+      const inventory = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "generate-in-scope-files",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(inventory.status).toBe(2);
-      expect(inventory.stderr).toContain("NTFS alternate data streams");
+      expect(inventory.stderr).toContain("NTFS alternate data stream");
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
-      const scopeInput = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-scope-input",
-        "--repo",
-        repository,
-        "--scopes-file",
-        scopes,
-        "--out",
-        join(root, "scope-input.jsonl"),
-      ]);
+      const scopeInput = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          join(root, "scope-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
       expect(scopeInput.status).toBe(1);
       expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
@@ -1156,7 +1184,12 @@ for await (const line of createInterface({ input: process.stdin })) {
           lines.close();
           child.stdin.end();
           child.kill();
-          await closed;
+          const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
+          try {
+            await closed;
+          } finally {
+            clearTimeout(timeout);
+          }
         }
       };
       // Drain both clients before fixture cleanup, including when one fails.
@@ -2940,6 +2973,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2958,6 +2992,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
+    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
+      "1",
+    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -2975,6 +3012,25 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
+  });
+
+  test("forwards the external import setting to the plugin helper", () => {
+    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
+    const node = Bun.which("node")!;
+    const environment: NodeJS.ProcessEnv = Object.assign(
+      Object.create({ [flag]: "1" }),
+      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
+    );
+    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
+    const run = () =>
+      spawnSync(node, [helper, "list-external-findings", "--help"], {
+        env: pluginExecutionEnvironment(node, environment),
+      }).status;
+
+    expect(run()).toBe(0);
+    environment[flag] = undefined;
+    environment["Codex_Security_Enable_External_Imports"] = "1";
+    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
@@ -3312,20 +3368,84 @@ describe("runtime directories and plugin Python boundary", () => {
     await release();
   });
 
-  test("protects active and stalled credential-lock owners and recovers after a crash with a reused PID", async () => {
+  test("protects active and stalled credential-lock owners during slow legacy startup and recovers after a crash with a reused PID", async () => {
     const root = await temporaryDirectory();
+    const runtime = join(root, "delayed-runtime.mjs");
+    await writeFile(
+      runtime,
+      `export * from ${JSON.stringify(new URL("../src/runtime.ts", import.meta.url).href)};
+       // Exceed the old holder lifetime and allow a heartbeat during legacy startup.
+       const mode = process.argv[4];
+       if (mode === "hold" || mode === "legacy") {
+         await new Promise(resolve => setTimeout(resolve, mode === "hold" ? 21_000 : 6_000));
+       }
+      `,
+    );
     await promisify(execFile)(
       process.execPath,
       [
         fileURLToPath(
           new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
         ),
-        new URL("../src/runtime.ts", import.meta.url).href,
+        pathToFileURL(runtime).href,
         join(root, "state"),
       ],
-      { timeout: 25_000, windowsHide: true },
+      { timeout: 120_000, windowsHide: true },
     );
-  });
+  }, 125_000);
+
+  test("credential-lock fixture diagnoses an owner exit during legacy startup", async () => {
+    const root = await temporaryDirectory();
+    const runtime = join(root, "exiting-runtime.mjs");
+    const runtimeUrl = JSON.stringify(
+      new URL("../src/runtime.ts", import.meta.url).href,
+    );
+    await writeFile(
+      runtime,
+      `export * from ${runtimeUrl};
+       import { acquireCodexSecurityCredentialHomeLock as acquire } from ${runtimeUrl};
+       import { existsSync } from "node:fs";
+       import { writeFile } from "node:fs/promises";
+       import { join } from "node:path";
+       import { once } from "node:events";
+       const exitMarker = join(process.argv[3], "exit-holder");
+       export async function acquireCodexSecurityCredentialHomeLock(...args) {
+         const release = await acquire(...args);
+         if (process.argv[4] === "hold") {
+           setInterval(() => {
+             if (existsSync(exitMarker)) process.exit(23);
+           }, 25);
+         }
+         return release;
+       }
+       if (process.argv[4] === "legacy") {
+         // Coordinate an explicit exit: Windows reports external termination as
+         // an exit code instead of a Unix signal.
+         await writeFile(exitMarker, "exit");
+         // Stay in startup until the parent notices the owner exit and cleans up.
+         process.stdin.resume();
+         await once(process.stdin, "end");
+       }
+      `,
+    );
+    await expect(
+      promisify(execFile)(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+          ),
+          pathToFileURL(runtime).href,
+          join(root, "state"),
+        ],
+        { timeout: 120_000, windowsHide: true },
+      ),
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(
+        /Credential-lock holder exited during legacy contender startup.*code=23, signal=null, watchdog=false/,
+      ),
+    });
+  }, 125_000);
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
     const root = await temporaryDirectory();
@@ -4107,17 +4227,22 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test("preserves Windows credential ACL subprocess failures while streaming", async () => {
+  test("preserves complete Windows credential ACL subprocess failures while streaming", async () => {
+    const prefixLength = 70 * 1024;
+    const failure = "\nsynthetic ACL inspection failure at end";
     await expect(
       streamWindowsCredentialAclDescriptors(
         process.execPath,
         [
           "--eval",
-          'process.stderr.write("synthetic ACL inspection failure"); process.exitCode = 1',
+          `process.stderr.write("x".repeat(${prefixLength}) + ${JSON.stringify(failure)}); process.exitCode = 1`,
         ],
         async () => {},
       ),
-    ).rejects.toMatchObject({ stderr: "synthetic ACL inspection failure" });
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: "x".repeat(prefixLength) + failure,
+    });
   });
 
   test("accepts managed Windows ACLs with trusted system principals", () => {
@@ -5177,15 +5302,16 @@ describe("runtime directories and plugin Python boundary", () => {
     [
       ["test-command"],
       ["test-command", "--message=出力\0literal\nsecond line"],
+      ["test-command", `--message=${"detail ".repeat(20_000)}final cause`],
       [
         "test-command",
         "--message=\0high\ud800.low\udfff.pair😀",
         "path-\udcff",
       ],
       ["finding-issues"],
-    ].map((args) => ({ args })),
+    ].map((args, index) => ({ args, index })),
   )(
-    "runs custom workbench $args without output limits, credentials, or generated bytecode",
+    "runs custom workbench case $index without argument/output limits, credentials, or generated bytecode",
     async ({ args }) => {
       const root = await temporaryDirectory();
       const pluginRoot = join(root, "plugin");
@@ -6187,23 +6313,20 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.skipIf(process.platform !== "win32")(
-    "runs plugin helpers with UTF-8 standard streams",
+    "runs Node inventory helpers with UTF-8 standard streams",
     async () => {
       const root = await temporaryDirectory("codex-security-python-utf8-");
       const repository = join(root, "repository");
       const output = join(root, "出力.jsonl");
       await mkdir(repository);
       await writeFile(join(repository, "source.py"), "value = 1\n");
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["."]));
       const result = spawnSync(
-        python!,
+        nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-scope-input",
           "--repo",
           repository,
@@ -6214,10 +6337,11 @@ describe("runtime directories and plugin Python boundary", () => {
         ],
         {
           encoding: "utf8",
-          env: pluginExecutionEnvironment(python!, {
+          env: {
             ...process.env,
             pythonutf8: "0",
-          }),
+            PYTHON: "missing-python",
+          },
         },
       );
 
