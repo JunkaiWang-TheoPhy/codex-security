@@ -185,10 +185,9 @@ describe("interactive patch finding browser", () => {
           "  audit.record(tenant);",
           "}",
           'const token = "sk-proj-SYNTHETIC_KEY_123";',
-          "",
-          "",
-        ].join("\r\n"),
+        ].join("\n"),
       );
+      await writeFile(join(repository, "eof.ts"), "//\r\n".repeat(9) + "\r\n");
       const outside = join(directory, "outside.ts");
       await writeFile(outside, "OUTSIDE_PRIVATE_SOURCE");
       await symlink(outside, join(repository, "src", "outside-link.ts"));
@@ -201,7 +200,7 @@ describe("interactive patch finding browser", () => {
           endLine: 6,
           role: "sink",
         },
-        { path: "src/finding-1.ts", startLine: 10 },
+        { path: "eof.ts", startLine: 10 },
         { path: "../outside.ts", startLine: 1 },
         { path: "src/outside-link.ts", startLine: 1 },
       ];
