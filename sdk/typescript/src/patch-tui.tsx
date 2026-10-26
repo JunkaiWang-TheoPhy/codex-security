@@ -391,16 +391,21 @@ export function PatchTui({
     Math.min(focused - visibleRows + 1, findings.length - visibleRows),
   );
   const current = findings[focused]!;
+  const detailWidth = Math.max(18, Math.floor(columns * 0.58) - 7);
   const details = useMemo(
-    () =>
-      findingLines(
-        current,
-        repository,
-        Math.max(18, Math.floor(columns * 0.58) - 7),
-      ),
-    [columns, current, repository],
+    () => findingLines(current, repository, detailWidth),
+    [current, repository, detailWidth],
   );
-  const maximumOffset = Math.max(0, details.length - visibleRows);
+  const scrollDetails = (delta: number) => {
+    const finding = findings[focusedFinding.current]!;
+    const lineCount =
+      finding === current
+        ? details.length
+        : findingLines(finding, repository, detailWidth).length;
+    setOffset((previous) =>
+      Math.max(0, Math.min(lineCount - visibleRows, previous + delta)),
+    );
+  };
   const accent = color ? "cyan" : undefined;
   const muted = color ? "gray" : undefined;
   const instructionColor = color ? "magentaBright" : undefined;
@@ -493,20 +498,10 @@ export function PatchTui({
         setFocused(focusedFinding.current);
         setOffset(0);
       } else {
-        setOffset((previous) =>
-          Math.max(0, Math.min(maximumOffset, previous + direction)),
-        );
+        scrollDetails(direction);
       }
     } else if (key.pageUp || key.pageDown) {
-      setOffset((previous) =>
-        Math.max(
-          0,
-          Math.min(
-            maximumOffset,
-            previous + (key.pageDown ? 1 : -1) * visibleRows,
-          ),
-        ),
-      );
+      scrollDetails(key.pageDown ? visibleRows : -visibleRows);
     } else if (input === " ") {
       const next = new Set(selected);
       const occurrenceId = findings[focusedFinding.current]!.occurrenceId;

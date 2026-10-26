@@ -404,6 +404,28 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("DETAILS  30–42/");
   });
 
+  test("clamps batched paging to the newly focused finding", async () => {
+    const items = findings(["high", "medium"]);
+    items[0]!.summary = "A longer description. ".repeat(300);
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: items,
+        color: false,
+        onComplete: () => {},
+      }),
+    );
+
+    const down = "\u001B[B";
+    const pages = "\u001B[6~".repeat(10) + "\u001B[5~";
+    await press(app, down + pages);
+    const batched = app.lastFrame();
+    await press(app, "\u001B[A");
+    await press(app, down);
+    await press(app, pages);
+    expect(batched).toBe(app.lastFrame());
+  });
+
   test("allows selecting none and canceling without patching", async () => {
     for (const input of ["q", "\r"]) {
       const selected: (PatchSelection | null)[] = [];
