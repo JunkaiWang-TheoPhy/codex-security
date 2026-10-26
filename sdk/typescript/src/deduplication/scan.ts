@@ -26,6 +26,7 @@ import {
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
 import { FindingsClient, type FindingsRequest } from "../findings-client.js";
+import type { waitForRetry } from "./retry.js";
 import type {
   FindingSearchScope,
   FindingSourceSnapshot,
@@ -104,6 +105,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   resolveReviewEnvironment?: typeof comparisonEnvironment;
   fetch?: FindingsRequest;
+  waitForRetry?: typeof waitForRetry;
 };
 
 /** @internal */
@@ -212,6 +214,7 @@ async function deduplicateResolvedScan(
       options.findingsUrl!,
       options.signal,
       dependencies.fetch,
+      { wait: dependencies.waitForRetry },
     );
   const workflow =
     options.workflowId === undefined
@@ -221,7 +224,7 @@ async function deduplicateResolvedScan(
           environment,
           workbench,
           undefined,
-          repositoryPath,
+          { protectedRoot: repositoryPath },
         );
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
@@ -271,12 +274,12 @@ async function deduplicateResolvedScan(
         (saved.pendingWrite.local?.inputDigest !== local.inputDigest ||
           workflowDigest(saved.pendingWrite.local.source) !==
             workflowDigest(
-              await workflow!.sourceSnapshot(
-                repositoryPath,
-                saved.pendingWrite.local.gitDisabled,
-                (saved.pendingWrite.local.source["privateStatePaths"] ??
-                  []) as string[],
-              ),
+              await workflow!.sourceSnapshot(repositoryPath, {
+                gitDisabled: saved.pendingWrite.local.gitDisabled,
+                privateStatePaths: (saved.pendingWrite.local.source[
+                  "privateStatePaths"
+                ] ?? []) as string[],
+              }),
             ))
       ) {
         throw new CodexSecurityError(
@@ -328,7 +331,7 @@ async function deduplicateResolvedScan(
       }
     }
     const source = workflow
-      ? await workflow.sourceSnapshot(repositoryPath, false, privateStatePaths)
+      ? await workflow.sourceSnapshot(repositoryPath, { privateStatePaths })
       : undefined;
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(
