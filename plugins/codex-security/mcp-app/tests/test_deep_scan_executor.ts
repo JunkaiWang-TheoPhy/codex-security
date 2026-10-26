@@ -4075,7 +4075,6 @@ function testUsageLimitClassification() {
     "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
     "You’ve hit your usage limit. Try again later.",
     "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
-    "Error running remote compact task: Quota exceeded. Check your plan and billing details.",
     "Error running remote compact task: You’ve hit your usage limit. Try again later.",
   ]) {
     const error = codexWorkerTurnError(message);
@@ -4114,7 +4113,8 @@ async function testWorkerTerminalEvents() {
   process.env.CODEX_CLI_PATH = process.execPath;
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
-    const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const quotaMessage =
+      "Error running remote compact task: Quota exceeded. Check your plan and billing details.";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
@@ -4134,15 +4134,9 @@ async function testWorkerTerminalEvents() {
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const onNonRetryableError = mock.fn();
-          const execution = new CodexSdkWorkerExecutor({
-            parentSandbox: trustedParentSandbox,
-          }).run({
+          const execution = runWorker(promptPath, fixture.root, {
             kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
             resumeThreadId,
-            signal: new AbortController().signal,
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
