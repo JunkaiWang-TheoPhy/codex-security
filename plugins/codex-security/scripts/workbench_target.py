@@ -482,9 +482,16 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            detail = os.fsdecode(completed.stderr)
+            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
+                "\r\n", "\n"
+            )
+            detail = re.sub(
+                r"[\x00-\x08\x0b-\x1f\x7f-\x9f]",
+                lambda control: f"\\x{ord(control[0]):02x}",
+                detail,
+            )
             raise SystemExit(
-                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\r\n")
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
             )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
