@@ -392,19 +392,26 @@ export function PatchTui({
   );
   const current = findings[focused]!;
   const detailWidth = Math.max(18, Math.floor(columns * 0.58) - 7);
-  const details = useMemo(
-    () => findingLines(current, repository, detailWidth),
-    [current, repository, detailWidth],
-  );
+  const detailsFor = useMemo(() => {
+    let cached: { finding: Finding; lines: string[] } | undefined;
+    return (finding: Finding) => {
+      if (cached?.finding !== finding) {
+        cached = {
+          finding,
+          lines: findingLines(finding, repository, detailWidth),
+        };
+      }
+      return cached.lines;
+    };
+  }, [repository, detailWidth]);
+  const details = detailsFor(current);
   const scrollDetails = (delta: number) => {
-    const finding = findings[focusedFinding.current]!;
-    const lineCount =
-      finding === current
-        ? details.length
-        : findingLines(finding, repository, detailWidth).length;
-    setOffset((previous) =>
-      Math.max(0, Math.min(lineCount - visibleRows, previous + delta)),
-    );
+    setOffset((previous) => {
+      // Only scrolls after the last focus change survive its offset reset.
+      const maximumOffset =
+        detailsFor(findings[focusedFinding.current]!).length - visibleRows;
+      return Math.max(0, Math.min(maximumOffset, previous + delta));
+    });
   };
   const accent = color ? "cyan" : undefined;
   const muted = color ? "gray" : undefined;
