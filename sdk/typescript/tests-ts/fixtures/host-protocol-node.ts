@@ -18,6 +18,7 @@ function validation(
 type Operation = Parameters<typeof runHostProtocol>[2];
 const reviewOperation = { label: "Review", requestMethod: "review.run" };
 export type Frame = {
+  jsonrpc: string;
   id: string;
   method?: string;
   result?: { status?: string; usage?: number };
