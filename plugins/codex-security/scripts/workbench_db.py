@@ -1738,7 +1738,6 @@ def register_cli_scan(
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
-        "phase": scan["phase"],
         **policy,
         "prepareScopedInventory": (
             mode == "standard"
