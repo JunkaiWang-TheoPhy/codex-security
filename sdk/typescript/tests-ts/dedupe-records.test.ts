@@ -564,28 +564,42 @@ test.each([
   },
 );
 
-test.each(["request", "compact", "brief"] as const)(
+test.each(["request", "compact", "brief", "receipt"] as const)(
   "a %s encoding failure exits as a transport error without replay",
   async (mode) => {
     const detail = "synthetic diagnostic".repeat(1024);
     const frameLimit = mode === "brief" ? 6_000 : detail.length + 1000;
     const serialize = JSON.stringify;
-    const encoder = spyOn(JSON, "stringify");
-    encoder.mockImplementation((value, ...options) => {
-      const args = [value, ...options];
-      const encoded: string = Reflect.apply(serialize, JSON, args);
-      if (
-        (mode === "request" && value?.method === "review.run") ||
-        (value?.id === run.id && value?.error && encoded.length > frameLimit)
-      )
-        throw new RangeError("Synthetic frame limit");
-      return encoded;
-    });
+    const encoder = spyOn(JSON, "stringify").mockImplementation(
+      (value, ...options) => {
+        const encoded: string = Reflect.apply(serialize, JSON, [
+          value,
+          ...options,
+        ]);
+        if (
+          (mode === "request" && value?.method === "review.run") ||
+          (mode === "receipt" && value?.id === "check" && value?.result) ||
+          (value?.id === run.id && value?.error && encoded.length > frameLimit)
+        )
+          throw new RangeError("Synthetic frame limit");
+        return encoded;
+      },
+    );
     onTestFinished(() => encoder.mockRestore());
     const error = { ...hostRejection, message: detail };
-    const host = fakeHost(({ id }, send) => send({ jsonrpc, id, error }));
+    const reply =
+      mode === "receipt"
+        ? validation
+        : (review: Message) => rejected(review, error);
+    const host = fakeHost((review, send) => send(reply(review)));
     expect(await runHost(host)).toBe(2);
     if (mode === "request") return expect(host.messages).toEqual([]);
+    if (mode === "receipt") {
+      const failure = { code: -32603, data: { kind: "internal_failure" } };
+      expectTerminalError(host, failure);
+      expectReceiptError(host, failure);
+      return expect(reviewRequests(host)).toHaveLength(1);
+    }
     expectTerminalError(host, {
       code: -32603,
       message: expect.stringContaining("could not serialize error data"),
@@ -637,16 +651,13 @@ test.each([
       (message, send) => {
         if (unframedNext && reviewRequests(host).length === 2) {
           const reply = scenario.endsWith("error")
-            ? { jsonrpc, id: message.id, error: hostRejection }
+            ? rejected(message)
             : answered(message);
           return void host.stream.end(JSON.stringify(reply));
         }
         current = message;
-        const check = validation(
-          message,
-          "check",
-          adapterFault ? {} : undefined,
-        );
+        const result = adapterFault ? {} : undefined;
+        const check = validation(message, "check", result);
         if (scenario === "wrong-review") check.params.requestId = "stale";
         send(check);
       },
@@ -657,27 +668,26 @@ test.each([
           return;
         }
         expect(message.result).toEqual({ valid: true });
-        if (unframedNext) send(answered(current));
+        if (unframedNext || scenario === "answered-disconnect")
+          send(answered(current));
         if (scenario === "cancel") send(cancelRun);
-        if (scenario === "answered-disconnect") send(answered(current));
         if (scenario.endsWith("disconnect")) host.stream.end();
         if (scenario === "invalid-final") send(answered(current, {}));
         if (scenario === "truncated") host.stream.end('{"jsonrpc":');
-        if (scenario === "unterminated" || scenario === "cr-only")
-          host.stream.end(
-            JSON.stringify(answered(current)) +
-              (scenario === "cr-only" ? "\r" : ""),
-          );
+        if (scenario === "unterminated" || scenario === "cr-only") {
+          const suffix = scenario === "cr-only" ? "\r" : "";
+          host.stream.end(JSON.stringify(answered(current)) + suffix);
+        }
         if (scenario === "wrong-id") send({ jsonrpc, id: "wrong", result: {} });
       },
     );
     expect(await runHost(host)).toBe(2);
     expect(reviewRequests(host)).toHaveLength(unframedNext ? 2 : 1);
     if (scenario === "wrong-review" || adapterFault)
-      expect(host.messages.at(-2)).toMatchObject({
-        id: "check",
-        error: adapterFault ? { code, data: { kind } } : { code },
-      });
+      expectReceiptError(
+        host,
+        adapterFault ? { code, data: { kind } } : { code },
+      );
     expectTerminalError(host, { code, data: { kind } });
   },
 );
@@ -1002,7 +1012,14 @@ function answered(review: Message, result = answer(review.params)) {
   return { jsonrpc, id: review.id, result };
 }
 
+function rejected(review: Message, error = hostRejection) {
+  return { jsonrpc, id: review.id, error };
+}
+
 type TestHost = ReturnType<typeof fakeHost>;
+function expectReceiptError(host: TestHost, error: object) {
+  expect(host.messages.at(-2)).toMatchObject({ id: "check", error });
+}
 function expectTerminalError(host: TestHost, error: object) {
   const final = host.messages.at(-1)!;
   expect(host.messages.filter(({ id }) => id === run.id)).toEqual([final]);
@@ -1605,23 +1622,28 @@ test.each([
   ["cancel", true, -32000, "", "EOF"],
   ["malformed", true, -32000, "", "EOF"],
   ["malformed", false, -32700, "", "EOF"],
+  ["bad-version", false, -32600, "", "open"],
+  ["rejection", false, -32009, "", "cancel"],
 ] as const)(
   "first %s frame (LF only: %p, code: %i, suffix: %s) on %s",
   async (kind, lfOnly, code, suffix, teardown) => {
     const feedback = kind !== "cancel" && kind !== "malformed";
     const host = controlledHost((review, callback) => {
-      if (review.method !== "review.run") return callback();
-      if (feedback) setImmediate(() => setImmediate(callback));
+      if (review.method !== "review.run") {
+        if (teardown !== "cancel") return callback();
+        return host.stream.write(JSON.stringify(cancelRun) + "\r");
+      }
+      const open = teardown === "open" || teardown === "cancel";
+      if (feedback && !open) setImmediate(() => setImmediate(callback));
       else callback();
       let frameText: string;
       if (kind === "malformed") frameText = "{truncated";
       else if (kind === "cancel") frameText = JSON.stringify(cancelRun);
       else
         frameText = JSON.stringify(
-          kind === "rejection"
-            ? { jsonrpc, id: review.id, error: hostRejection }
-            : validationFor(review, kind),
+          kind === "rejection" ? rejected(review) : validationFor(review, kind),
         );
+      if (open) return host.stream.write(frameText + "\r");
       const padding = feedback && (suffix || (teardown === "EOF" && !lfOnly));
       const tail = frameText + (padding ? "\r".repeat(32) : "") + suffix;
       if (teardown === "EOF") host.stream.end(tail);
@@ -1633,16 +1655,15 @@ test.each([
       }
     });
     expect(await runHost(host, run.params, lfOnly)).toBe(2);
-    const error = host.messages.at(-1)?.error;
-    expect(host.messages).toHaveLength(2);
-    expect(error?.code).toBe(code);
-    if (feedback)
-      expect(error).toHaveProperty(
-        "data.kind",
+    expectTerminalError(host, { code });
+    expect(host.messages).toHaveLength(kind === "bad-version" ? 3 : 2);
+    if (feedback && kind !== "bad-version") {
+      const expected =
         code === hostRejection.code
           ? "permanent_rejection"
-          : "uncertain_acceptance",
-      );
+          : "uncertain_acceptance";
+      expect(host.messages.at(-1)?.error).toHaveProperty("data.kind", expected);
+    }
   },
 );
 
@@ -1692,15 +1713,12 @@ test.each([
       const deliver = () => {
         const id = phase === "queued" ? "queued" : "check";
         if (overtake) {
-          host.send(
-            validationFor(review, action, action === "run-id" ? run.id : id),
-          );
+          const requestId = action === "run-id" ? run.id : id;
+          host.send(validationFor(review, action, requestId));
           host.send(answered(review));
         } else {
           if (phase === "queued") host.send(validation(review, id));
-          if (action === "reject")
-            host.send({ jsonrpc, id: review.id, error: hostRejection });
-          else host.send(cancelRun);
+          host.send(action === "reject" ? rejected(review) : cancelRun);
         }
       };
       if (message === review && overtake) {
@@ -1710,14 +1728,13 @@ test.each([
       deliver();
       setImmediate(callback);
     });
-    const { messages } = host;
     expect(await runHost(host)).toBe(2);
     expectTerminalError(host, { code });
     if (overtake) {
       expectTerminalError(host, { data: { feedbackVersion: 1 } });
       expect(results(host)).toHaveLength(phase === "queued" ? 1 : 0);
       if (phase === "initial" && action !== "run-id")
-        expect(messages.at(-2)).toMatchObject({ id: "check", error: { code } });
+        expectReceiptError(host, { code });
     }
     if (action === "reject") {
       const { data } = hostRejection;
@@ -1725,9 +1742,9 @@ test.each([
         data: { kind: data.kind, host: { code, data } },
       });
     }
-    if (phase === "queued")
-      expect(messages.filter(({ id }) => id === "queued")).toMatchObject([
-        { error: { code } },
-      ]);
+    if (phase === "queued") {
+      const queued = host.messages.filter(({ id }) => id === "queued");
+      expect(queued).toMatchObject([{ error: { code } }]);
+    }
   },
 );

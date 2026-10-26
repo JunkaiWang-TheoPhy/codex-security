@@ -258,35 +258,30 @@ test.each([
     expect(outcome.destroyed).toBe(true);
   const messages = outcome.messages as Frame[];
   const final = messages.at(-1);
+  const previous = messages.at(-2);
+  const results = messages.filter(({ result }) => result !== undefined);
+  const statuses = results.map(({ result }) => result?.status);
   const terminal = messages.filter((message) => message.id === "run-1");
   if (isScenario("drained-cancel-output", "reentrant-cancel-receipt")) {
     expect(messages.map(({ method }) => method)).toContain("execution.cancel");
     expect(terminal[0]?.result).toEqual({ status: "cancelled", usage: 7 });
   }
   if (code === 0) expect(terminal).toEqual([completed]);
-  else
-    expect(messages.map(({ result }) => result?.status)).not.toContain(
-      "completed",
-    );
+  else expect(statuses).not.toContain("completed");
   const error = { code: errorCode };
-  const terminalId = scenario.startsWith("destroy-before-start")
-    ? null
-    : run.id;
-  if (errorCode !== undefined)
-    expect(final).toMatchObject({ id: terminalId, error });
+  const id = scenario.startsWith("destroy-before-start") ? null : run.id;
+  if (errorCode !== undefined) expect(final).toMatchObject({ id, error });
   const ids = messages.map(({ id }) => id);
   if (family === "correction" && code === 0)
     expect(ids).toEqual(["review-1", "check-1", "check-2", run.id]);
   if (failedReceiptId)
-    expect(messages.at(-2)).toMatchObject({ id: failedReceiptId, error });
+    expect(previous).toMatchObject({ id: failedReceiptId, error });
   if (isScenario("eof-next-review", "eof-selected-result")) {
     const reviews = messages.filter(({ method }) => method === "review.run");
     expect(reviews).toHaveLength(1);
   }
   if (isScenario("repeated-pending-validation", "eof-queued-validation"))
-    expect(messages.filter(({ result }) => result !== undefined)).toHaveLength(
-      1,
-    );
+    expect(results).toHaveLength(1);
   if (scenario.startsWith("abort:") || scenario.startsWith("abort-reusable:")) {
     expect(outcome.destroyed).toBe(scenario.startsWith("abort:"));
     expect(messages).toHaveLength(2);
@@ -296,10 +291,7 @@ test.each([
     });
   }
   if (isScenario("eof-validation-drain", "drain:malformed"))
-    expect(messages.at(-2)).toMatchObject({
-      id: "check",
-      result: { valid: true },
-    });
+    expect(previous).toMatchObject({ id: "check", result: { valid: true } });
   if (errorCode === -32009)
     expect(final?.error?.data).toHaveProperty("kind", "permanent_rejection");
   if (

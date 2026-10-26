@@ -1,11 +1,13 @@
+import { strictEqual } from "node:assert";
 import { PassThrough, Writable } from "node:stream";
 import { constants as bufferLimits } from "node:buffer";
 import { runHostProtocol } from "../../src/host-protocol.js";
 
 const jsonrpc = "2.0";
+const reviewId = "review-1";
 
 function validation(
-  requestId = "review-1",
+  requestId = reviewId,
   id = "check",
   result: unknown = "valid",
 ) {
@@ -16,7 +18,6 @@ function validation(
 type Operation = Parameters<typeof runHostProtocol>[2];
 const reviewOperation = { label: "Review", requestMethod: "review.run" };
 export type Frame = {
-  jsonrpc: string;
   id: string;
   method?: string;
   result?: { status?: string; usage?: number };
@@ -28,6 +29,7 @@ const cancelRun = { jsonrpc, method: "cancel", params: { id: start.id } };
 const afterIO = (callback: () => void) =>
   setImmediate(() => setImmediate(callback));
 const syntheticInputError = new Error("Synthetic input error");
+const lateError = new Error("Late destroy error");
 const rejection = { code: -32009, message: "Synthetic rejection" };
 function accepted(id: string, result: unknown = "valid") {
   return { jsonrpc, id, result };
@@ -48,6 +50,7 @@ function validatingReviews(...checks: ReviewCheck[]) {
 }
 
 type PipeOptions = ConstructorParameters<typeof PassThrough>[0];
+type TestOperation = Pick<Operation, "run"> & Partial<Operation>;
 function protocolFixture(options?: PipeOptions) {
   const input = new PassThrough({
     emitClose: !scenario.startsWith("silent-input-"),
@@ -82,23 +85,13 @@ function protocolFixture(options?: PipeOptions) {
       }),
     cancel: () => send(cancelRun),
     interrupt: () => controller.abort(),
-    async finish(
-      output: Writable,
-      operation: Pick<Operation, "run"> & Partial<Operation>,
-    ) {
+    async finish(output: Writable, operation: TestOperation) {
       const options = { ...reviewOperation, ...operation };
-      const errorOnly = (event: "error") => {
-        if (event !== "error")
-          throw new Error(`Unsupported output adapter event ${event}`);
-      };
+      const errorOnly = (event: "error") => strictEqual(event, "error");
+      const listeners =
+        scenario === "sync-adapter" ? { on: errorOnly, off: errorOnly } : {};
       const sink = isScenario("sync-adapter", "plain-cancel-adapter")
-        ? {
-            write: output.write.bind(output),
-            ...(scenario === "sync-adapter" && {
-              on: errorOnly,
-              off: errorOnly,
-            }),
-          }
+        ? { write: output.write.bind(output), ...listeners }
         : output;
       const done = runHostProtocol(input, sink, options, controller.signal);
       if (!input.destroyed) send(start);
@@ -129,6 +122,7 @@ if (scenario === "cli") {
           if (scenario === "silent-input-legacy-output")
             setImmediate(() => input.destroy());
         });
+  const legacyOutput = scenario === "silent-input-legacy-output";
   const stop = {
     "abort-output": interrupt,
     "cancel-output": cancel,
@@ -145,13 +139,9 @@ if (scenario === "cli") {
     setImmediate(stop);
   }
   await finish(output, {
-    lineFeedOnly: !isScenario(
-      "silent-terminal-output",
-      "silent-input-legacy-output",
-    ),
+    lineFeedOnly: !legacyOutput && scenario !== "silent-terminal-output",
     run:
-      (stop && !isScenario("close-output", "failed-output")) ||
-      scenario === "silent-input-legacy-output"
+      legacyOutput || (stop && !isScenario("close-output", "failed-output"))
         ? runRequests(undefined)
         : runRequests(),
   });
@@ -164,9 +154,7 @@ if (scenario === "cli") {
     emitClose: !beforeStart && !scenario.includes("silent-late"),
     destroy(error, callback) {
       if (silentPending) {
-        const cause = scenario.endsWith("-error")
-          ? new Error("Late destroy error")
-          : error;
+        const cause = scenario.endsWith("-error") ? lateError : error;
         releaseDestroy = () => callback(cause);
       } else if (scenario.endsWith("late"))
         afterIO(() => callback(syntheticInputError));
@@ -182,15 +170,15 @@ if (scenario === "cli") {
         );
       });
     } else if (message.method === "review.run") {
-      const check = validation("review-1", "check-1", "invalid");
+      const check = validation(reviewId, "check-1", "invalid");
       if (scenario === "sync-invalid-params")
         Reflect.deleteProperty(check.params, "result");
       send(check);
     } else if (message.id === "check-1" && message.result) {
       const next = scenario === "reused-validation-id" ? "check-1" : "check-2";
-      setImmediate(() => sendCheck("review-1", next, "corrected"));
+      setImmediate(() => sendCheck(reviewId, next, "corrected"));
     } else if (message.id === "check-2") {
-      send(accepted("review-1", "corrected"));
+      send(accepted(reviewId, "corrected"));
       if (scenario === "sync-half-close") input.end();
     }
   });
@@ -238,15 +226,15 @@ if (scenario === "cli") {
       ) {
         if (scenario === "repeated-pending-validation") sendCheck();
         else {
-          sendCheck("review-1", "second");
-          sendCheck("review-1", "third");
+          sendCheck(reviewId, "second");
+          sendCheck(reviewId, "third");
         }
         if (scenario === "eof-queued-validation") input.end();
-        else send(accepted("review-1"));
+        else send(accepted(reviewId));
         return setImmediate(() => {
           if (output.destroyed || output.listenerCount("close") > 3)
             throw new Error(
-              "Validation flush lost its output or retained extra listeners",
+              "Validation flush lost output or retained listeners",
             );
           callback();
         });
@@ -269,7 +257,7 @@ if (scenario === "cli") {
           return interrupt();
         }
         if (scenario.startsWith("destroy-output-selected"))
-          send(accepted("review-1"));
+          send(accepted(reviewId));
         setImmediate(() => {
           output.destroy();
           if (!scenario.endsWith("-open")) input.end();
@@ -277,7 +265,7 @@ if (scenario === "cli") {
         return;
       }
       if (scenario !== "eof-validation-drain") {
-        const id = scenario === "eof-wrong-review" ? "wrong" : "review-1";
+        const id = scenario === "eof-wrong-review" ? "wrong" : reviewId;
         const reply = scenario.endsWith("selected-rejection")
           ? rejected(id)
           : accepted(id);
@@ -303,11 +291,10 @@ if (scenario === "cli") {
       afterIO(callback);
     } else callback();
   }, !scenario.startsWith("destroy-output-"));
+  const checks: ReviewCheck[] = [accept];
+  if (scenario.endsWith("next-review")) checks.push(undefined);
   await finish(output, {
-    ...validatingReviews(
-      accept,
-      ...(scenario.endsWith("next-review") ? [undefined] : []),
-    ),
+    ...validatingReviews(...checks),
     errorCode: () => -32009,
     errorData: () => ({ feedbackVersion: 1, kind: "permanent_rejection" }),
   });
@@ -370,13 +357,13 @@ if (scenario === "cli") {
     flushError: () => Boolean(fault),
     async run(_params, execute) {
       if (scenario.startsWith("legacy-answer-eof")) {
-        await execute("review-1", {});
+        await execute(reviewId, {});
         await new Promise<void>((resolve) => setImmediate(resolve));
       } else if (
         fault ||
         isScenario("eof-stale-validation", "cancel-validation-write")
       )
-        await execute("review-1", {}, undefined, accept);
+        await execute(reviewId, {}, undefined, accept);
       return { status: "completed" };
     },
   });
@@ -384,15 +371,15 @@ if (scenario === "cli") {
   const { input, writer, send, sendCheck, cancel, finish } = protocolFixture();
   const stale = scenario.includes("validation-stale")
     ? validation()
-    : accepted("review-1", "duplicate");
+    : accepted(reviewId, "duplicate");
   const output = writer((message, callback) => {
     if (message.method === "review.run" && scenario === "eof-initial-run-id") {
       queueMicrotask(() => {
-        sendCheck("review-1", "run-1");
+        sendCheck(reviewId, "run-1");
         input.end();
       });
       afterIO(callback);
-    } else if (message.method === "review.run" && message.id === "review-1") {
+    } else if (message.method === "review.run" && message.id === reviewId) {
       callback();
       queueMicrotask(() => sendCheck());
     } else if (message.id === "check") {
@@ -408,7 +395,7 @@ if (scenario === "cli") {
         const blocked = scenario.endsWith("stale-blocked-next-review");
         if (blocked) output.cork();
         queueMicrotask(() => {
-          send(accepted("review-1"));
+          send(accepted(reviewId));
           if (blocked)
             setImmediate(() => {
               send(stale);
@@ -427,8 +414,8 @@ if (scenario === "cli") {
         const id = scenario.endsWith("conflicting-validation")
           ? start.id
           : "queued";
-        sendCheck("review-1", id);
-        if (scenario === "eof-overtaking-final") send(accepted("review-1"));
+        sendCheck(reviewId, id);
+        if (scenario === "eof-overtaking-final") send(accepted(reviewId));
         if (scenario === "cancel-conflicting-validation") cancel();
         input.end();
         afterIO(callback);
@@ -474,7 +461,7 @@ if (scenario === "cli") {
         queueMicrotask(() => sendCheck());
       }
     } else if (message.id === "check") {
-      sendCheck("review-1", "queued");
+      sendCheck(reviewId, "queued");
       queueMicrotask(() =>
         scenario === "socket-close-validation-drain"
           ? input.emit("close", false)

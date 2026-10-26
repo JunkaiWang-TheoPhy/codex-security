@@ -167,8 +167,9 @@ export async function runHostProtocol(
   let buffered: string[] = [];
   let bufferedLength = 0;
   let waitingForLF = false;
+  let negotiatedLF = false;
   const requiresLF = () =>
-    operation.lineFeedOnly || waitingForLF || operation.flushError?.();
+    operation.lineFeedOnly || waitingForLF || negotiatedLF;
   let peerReadReview = false;
   let inputFailure: Error | undefined;
   let destroyObserver: (() => void) | undefined;
@@ -201,12 +202,15 @@ export async function runHostProtocol(
       }
     | undefined;
   type Ending = "lf" | "cr" | "eof";
-  const feedbackFrame = (terminated: boolean, requestId: unknown) => {
-    if (pending && requestId === pending.id) peerReadReview = true;
+  function feedbackFrame(ending: Ending, id: unknown, acceptCR = false) {
+    if (pending && id === pending.id) peerReadReview = true;
+    if (ending === "lf") negotiatedLF = true;
+    const terminated =
+      ending === "lf" || (acceptCR && ending === "cr" && !requiresLF());
     if (terminated) operation.onFeedback?.();
     else waitingForLF = true;
     return terminated;
-  };
+  }
   const { promise: completion, resolve: resolveCompletion } =
     Promise.withResolvers<number>();
   const complete = (code: number) => {
@@ -354,13 +358,13 @@ export async function runHostProtocol(
         const check = validationEnvelope.safeParse(frame).data;
         const reply = response.safeParse(frame).data;
         if (check && validationAvailable)
-          feedbackFrame(false, check.params?.requestId);
+          feedbackFrame("eof", check.params?.requestId);
         else if (
           reply?.id === pending.id &&
           (requiresLF() ||
             ("error" in reply && operation.isFeedbackError?.(reply.error.data)))
         )
-          feedbackFrame(false, reply.id);
+          feedbackFrame("eof", reply.id);
       } catch {
         /* An unfinished frame cannot establish that the peer read this request. */
       }
@@ -569,18 +573,18 @@ export async function runHostProtocol(
     }
     const validationHeader = validationEnvelope.safeParse(message);
     if (validationHeader.success && validationAvailable) {
-      if (
-        !feedbackFrame(ending === "lf", validationHeader.data.params?.requestId)
-      )
-        return false;
-      const validationId = validationHeader.data.id;
+      const { id: validationId, params } = validationHeader.data;
       const reject = (message: string, code = -32600) =>
         fail(code, message, { validationId, flushBuffered: true });
+      const wellFormed = validationRequestEnvelope.safeParse(message).success;
+      if (ending === "cr" && !wellFormed)
+        return reject("Malformed validation request.");
+      if (!feedbackFrame(ending, params?.requestId)) return false;
       if (validationId === runId)
         return reject("Validation ID conflicts with the active run.");
       const validation = validationRequest.safeParse(message);
       if (!validation.success)
-        return validationRequestEnvelope.safeParse(message).success
+        return wellFormed
           ? reject("Invalid validation parameters.", -32602)
           : reject("Malformed validation request.");
       if (!pending?.validate || validation.data.params.requestId !== pending.id)
@@ -597,10 +601,12 @@ export async function runHostProtocol(
       }
       try {
         const result = pending.validate(validation.data.params.result);
+        const receipt =
+          JSON.stringify({ jsonrpc: "2.0", id: validationId, result }) + "\n";
         validationWriting = true;
         validationIds.add(validationId);
         validationFlush = write(
-          { jsonrpc: "2.0", id: validationId, result },
+          receipt,
           () =>
             queueMicrotask(() => {
               if (inputClosed || input.destroyed || input.readableEnded)
@@ -640,10 +646,7 @@ export async function runHostProtocol(
     if (
       "error" in reply.data &&
       operation.isFeedbackError?.(reply.data.error.data) &&
-      !feedbackFrame(
-        ending === "lf" || (ending === "cr" && !requiresLF()),
-        reply.data.id,
-      )
+      !feedbackFrame(ending, reply.data.id, true)
     )
       return false;
     const execution = pending;
