@@ -234,6 +234,35 @@ describe("interactive patch finding browser", () => {
     }
   });
 
+  test("stops source excerpts at the end of a file with a trailing newline", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-"));
+    try {
+      await writeFile(join(directory, "end.ts"), "one\ntwo\nthree\n");
+      const [finding] = findings(["high"]);
+      finding!.locations = [{ path: "end.ts", startLine: 3 }];
+      const app = render(
+        createElement(PatchTui, {
+          repository: directory,
+          findings: [finding!],
+          color: false,
+          onComplete: () => {},
+        }),
+      );
+
+      const frames = [app.lastFrame() ?? ""];
+      for (let page = 0; page < 12; page += 1) {
+        await press(app, "\u001B[6~");
+        frames.push(app.lastFrame() ?? "");
+      }
+      const reviewed = frames.join("\n");
+
+      expect(reviewed).toContain("› 3 │ three");
+      expect(reviewed).not.toMatch(/ 4 │/u);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("combines severity presets with individual finding selection", async () => {
     const selected: (PatchSelection | null)[] = [];
     const app = render(
