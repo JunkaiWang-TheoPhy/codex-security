@@ -471,7 +471,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> bool:
+) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
             target,
@@ -482,14 +482,16 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            return False
+            detail = os.fsdecode(completed.stderr)
+            raise SystemExit(
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\r\n")
+            )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
         for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
-    return True
 
 
 def worktree_content_digest(target: Path) -> str:
@@ -571,7 +573,7 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    tracked_ok = _update_digest_field_from_git(
+    _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
@@ -600,7 +602,7 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if not tracked_ok or untracked is None:
+    if untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
