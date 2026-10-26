@@ -14,6 +14,7 @@ function validation(
 }
 
 type Operation = Parameters<typeof runHostProtocol>[2];
+const reviewOperation = { label: "Review", requestMethod: "review.run" };
 export type Frame = {
   jsonrpc: string;
   id: string;
@@ -46,9 +47,8 @@ function validatingReviews(...checks: ReviewCheck[]) {
   return { flushError: () => true, run: runRequests(...checks) };
 }
 
-function protocolFixture(
-  options?: ConstructorParameters<typeof PassThrough>[0],
-) {
+type PipeOptions = ConstructorParameters<typeof PassThrough>[0];
+function protocolFixture(options?: PipeOptions) {
   const input = new PassThrough({
     emitClose: !scenario.startsWith("silent-input-"),
     ...options,
@@ -75,9 +75,9 @@ function protocolFixture(
     sendCheck: (...args: Parameters<typeof validation>) =>
       send(validation(...args)),
     writer,
-    observe: (handle: (frame: Frame) => void) =>
+    observe: (handle?: (frame: Frame) => void) =>
       writer((frame, done) => {
-        handle(frame);
+        handle?.(frame);
         done();
       }),
     cancel: () => send(cancelRun),
@@ -86,11 +86,7 @@ function protocolFixture(
       output: Writable,
       operation: Pick<Operation, "run"> & Partial<Operation>,
     ) {
-      const options = {
-        label: "Review",
-        requestMethod: "review.run",
-        ...operation,
-      };
+      const options = { ...reviewOperation, ...operation };
       const errorOnly = (event: "error") => {
         if (event !== "error")
           throw new Error(`Unsupported output adapter event ${event}`);
@@ -118,10 +114,7 @@ if (scenario === "cli") {
   await (await import("../../src/cli.js")).main(process.argv.slice(3));
 } else if (scenario === "idle-host") {
   const { observe, finish } = protocolFixture();
-  void finish(
-    observe(() => {}),
-    { run: runRequests(undefined) },
-  );
+  void finish(observe(), { run: runRequests(undefined) });
 } else if (family === "output") {
   const { input, interrupt, cancel, observe, finish } = protocolFixture();
   const output =
@@ -175,9 +168,9 @@ if (scenario === "cli") {
           ? new Error("Late destroy error")
           : error;
         releaseDestroy = () => callback(cause);
-      } else if (scenario.endsWith("late")) {
+      } else if (scenario.endsWith("late"))
         afterIO(() => callback(syntheticInputError));
-      } else setImmediate(callback, error);
+      else setImmediate(callback, error);
     },
   });
   const output = observe((message) => {
@@ -258,7 +251,7 @@ if (scenario === "cli") {
           callback();
         });
       }
-      if (scenario.startsWith("silent-input-after-validation")) {
+      if (scenario === "silent-input-after-validation") {
         callback();
         return void setImmediate(() => input.destroy());
       }

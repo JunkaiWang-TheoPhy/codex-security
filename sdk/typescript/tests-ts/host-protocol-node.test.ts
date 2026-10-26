@@ -73,11 +73,8 @@ function launch(...args: string[]) {
 }
 
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: {} };
-const completed = {
-  jsonrpc: "2.0",
-  id: run.id,
-  result: { status: "completed" },
-};
+const result = { status: "completed" };
+const completed = { jsonrpc: run.jsonrpc, id: run.id, result };
 
 test("Node dispatches a legacy carriage-return frame while stdin stays open", async () => {
   await using host = launch("legacy");
@@ -277,10 +274,9 @@ test.each([
     : run.id;
   if (errorCode !== undefined)
     expect(final).toMatchObject({ id: terminalId, error });
-  if (family === "correction" && code === 0) {
-    const ids = messages.map(({ id }) => id);
+  const ids = messages.map(({ id }) => id);
+  if (family === "correction" && code === 0)
     expect(ids).toEqual(["review-1", "check-1", "check-2", run.id]);
-  }
   if (failedReceiptId)
     expect(messages.at(-2)).toMatchObject({ id: failedReceiptId, error });
   if (isScenario("eof-next-review", "eof-selected-result")) {

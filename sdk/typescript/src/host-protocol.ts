@@ -201,11 +201,11 @@ export async function runHostProtocol(
       }
     | undefined;
   type Ending = "lf" | "cr" | "eof";
-  const feedbackFrame = (ending: Ending, requestId: unknown) => {
+  const feedbackFrame = (terminated: boolean, requestId: unknown) => {
     if (pending && requestId === pending.id) peerReadReview = true;
-    if (ending === "lf") operation.onFeedback?.();
+    if (terminated) operation.onFeedback?.();
     else waitingForLF = true;
-    return ending === "lf";
+    return terminated;
   };
   const { promise: completion, resolve: resolveCompletion } =
     Promise.withResolvers<number>();
@@ -224,11 +224,13 @@ export async function runHostProtocol(
     writeStream?.off("close", outputClosed).destroy();
   };
   const write = async (
-    line: string,
+    frame: string | object,
     onFlushed?: () => void,
     nonterminal = false,
   ) => {
     if (completed) return;
+    const line =
+      typeof frame === "string" ? frame : `${JSON.stringify(frame)}\n`;
     destroyObserver ??= observeDestroyed(input, inputClose);
     if (!writeStream) {
       output.write(line);
@@ -259,8 +261,6 @@ export async function runHostProtocol(
     }
     return promise;
   };
-  const send = (message: object, onFlushed?: () => void, nonterminal = false) =>
-    write(`${JSON.stringify(message)}\n`, onFlushed, nonterminal);
   const fail = (
     code: number,
     message: string,
@@ -354,13 +354,13 @@ export async function runHostProtocol(
         const check = validationEnvelope.safeParse(frame).data;
         const reply = response.safeParse(frame).data;
         if (check && validationAvailable)
-          feedbackFrame("eof", check.params?.requestId);
+          feedbackFrame(false, check.params?.requestId);
         else if (
           reply?.id === pending.id &&
           (requiresLF() ||
             ("error" in reply && operation.isFeedbackError?.(reply.error.data)))
         )
-          feedbackFrame("eof", reply.id);
+          feedbackFrame(false, reply.id);
       } catch {
         /* An unfinished frame cannot establish that the peer read this request. */
       }
@@ -432,7 +432,7 @@ export async function runHostProtocol(
     if (controller.signal.aborted) return;
     controller.abort(new Error(cancelMessage));
     if (pending)
-      void send({
+      void write({
         jsonrpc: "2.0",
         method: "execution.cancel",
         params: { requestId: pending.id },
@@ -497,7 +497,7 @@ export async function runHostProtocol(
               pending = { id, resolve, reject, onProgress, validate };
               validationIds.clear();
               validationAvailable ||= validate !== undefined;
-              void send(
+              void write(
                 {
                   jsonrpc: "2.0",
                   id,
@@ -515,7 +515,7 @@ export async function runHostProtocol(
           controller.signal,
           (event) => {
             if (terminalCode === undefined)
-              void send({
+              void write({
                 jsonrpc: "2.0",
                 method: operation.progressMethod ?? "scan.progress",
                 params: { id: runId, event },
@@ -535,7 +535,7 @@ export async function runHostProtocol(
             terminalCode = code;
             try {
               terminalWriteStarted = true;
-              await send({ jsonrpc: "2.0", id: runId, result }, () =>
+              await write({ jsonrpc: "2.0", id: runId, result }, () =>
                 complete(code),
               );
             } catch {
@@ -569,7 +569,9 @@ export async function runHostProtocol(
     }
     const validationHeader = validationEnvelope.safeParse(message);
     if (validationHeader.success && validationAvailable) {
-      if (!feedbackFrame(ending, validationHeader.data.params?.requestId))
+      if (
+        !feedbackFrame(ending === "lf", validationHeader.data.params?.requestId)
+      )
         return false;
       const validationId = validationHeader.data.id;
       const reject = (message: string, code = -32600) =>
@@ -597,7 +599,7 @@ export async function runHostProtocol(
         const result = pending.validate(validation.data.params.result);
         validationWriting = true;
         validationIds.add(validationId);
-        validationFlush = send(
+        validationFlush = write(
           { jsonrpc: "2.0", id: validationId, result },
           () =>
             queueMicrotask(() => {
@@ -638,7 +640,10 @@ export async function runHostProtocol(
     if (
       "error" in reply.data &&
       operation.isFeedbackError?.(reply.data.error.data) &&
-      !feedbackFrame(ending, reply.data.id)
+      !feedbackFrame(
+        ending === "lf" || (ending === "cr" && !requiresLF()),
+        reply.data.id,
+      )
     )
       return false;
     const execution = pending;

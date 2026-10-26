@@ -537,6 +537,8 @@ test.each([
     const host = fakeHost((review, send, stream) => {
       const reply = { jsonrpc, id: mismatch ? "wrong" : review.id, error };
       if (cancel) stream.write(encodeFrames(reply, cancelRun));
+      else if (kind === "permanent_rejection")
+        stream.write(`${JSON.stringify(reply)}\r`);
       else send(reply);
     });
     expect(await runHost(host, run.params, cancel)).toBe(
@@ -562,42 +564,35 @@ test.each([
   },
 );
 
-test.each([false, true])(
-  "unserializable host metadata preserves a fitting diagnostic (oversized=%s)",
-  async (oversized) => {
+test.each(["request", "compact", "brief"] as const)(
+  "a %s encoding failure exits as a transport error without replay",
+  async (mode) => {
     const detail = "synthetic diagnostic".repeat(1024);
-    const frameLimit = oversized ? 6_000 : detail.length + 1000;
+    const frameLimit = mode === "brief" ? 6_000 : detail.length + 1000;
     const serialize = JSON.stringify;
     const encoder = spyOn(JSON, "stringify");
     encoder.mockImplementation((value, ...options) => {
-      const encoded: string = Reflect.apply(serialize, JSON, [
-        value,
-        ...options,
-      ]);
-      if (value?.id === run.id && value?.error && encoded.length > frameLimit)
+      const args = [value, ...options];
+      const encoded: string = Reflect.apply(serialize, JSON, args);
+      if (
+        (mode === "request" && value?.method === "review.run") ||
+        (value?.id === run.id && value?.error && encoded.length > frameLimit)
+      )
         throw new RangeError("Synthetic frame limit");
       return encoded;
     });
     onTestFinished(() => encoder.mockRestore());
-    const host = fakeHost((review, send) =>
-      send({
-        jsonrpc,
-        id: review.id,
-        error: {
-          code: -32009,
-          message: detail,
-          data: { feedbackVersion: 1, kind: "permanent_rejection" },
-        },
-      }),
-    );
+    const error = { ...hostRejection, message: detail };
+    const host = fakeHost(({ id }, send) => send({ jsonrpc, id, error }));
     expect(await runHost(host)).toBe(2);
+    if (mode === "request") return expect(host.messages).toEqual([]);
     expectTerminalError(host, {
       code: -32603,
       message: expect.stringContaining("could not serialize error data"),
       data: {
         kind: "permanent_rejection",
-        message: oversized ? detail.slice(0, 4096) : detail,
-        host: { code: -32009 },
+        message: mode === "brief" ? detail.slice(0, 4096) : detail,
+        host: { code: hostRejection.code },
       },
     });
     expect(reviewRequests(host)).toHaveLength(1);
@@ -1594,16 +1589,16 @@ test("review-scoped provider getters retain their existing lifecycle", async () 
 });
 
 test.each([
-  ["rejection", false, -32000, "", "EOF"],
+  ["rejection", false, -32009, "", "EOF"],
   ["validation", false, -32000, "", "EOF"],
   ["validation", true, -32000, "", "EOF"],
   ["rejection", true, -32000, "", "EOF"],
   ["missing-result", false, -32000, "", "EOF"],
   ["missing-result", true, -32000, "", "EOF"],
   ["validation", false, -32000, "{", "EOF"],
-  ["rejection", false, -32000, "{", "EOF"],
+  ["rejection", false, -32009, "{", "EOF"],
   ["validation", false, -32000, "{", "error"],
-  ["rejection", false, -32000, "{", "close"],
+  ["rejection", false, -32009, "{", "close"],
   ["validation", false, -32000, "", "error"],
   ["rejection", false, -32000, "", "close"],
   ["cancel", false, -32800, "", "EOF"],
@@ -1611,7 +1606,7 @@ test.each([
   ["malformed", true, -32000, "", "EOF"],
   ["malformed", false, -32700, "", "EOF"],
 ] as const)(
-  "unframed first %s (LF only: %p, code: %i, suffix: %s) on %s",
+  "first %s frame (LF only: %p, code: %i, suffix: %s) on %s",
   async (kind, lfOnly, code, suffix, teardown) => {
     const feedback = kind !== "cancel" && kind !== "malformed";
     const host = controlledHost((review, callback) => {
@@ -1642,7 +1637,12 @@ test.each([
     expect(host.messages).toHaveLength(2);
     expect(error?.code).toBe(code);
     if (feedback)
-      expect(error).toHaveProperty("data.kind", "uncertain_acceptance");
+      expect(error).toHaveProperty(
+        "data.kind",
+        code === hostRejection.code
+          ? "permanent_rejection"
+          : "uncertain_acceptance",
+      );
   },
 );
 
