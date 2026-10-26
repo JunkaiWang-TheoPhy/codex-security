@@ -32,6 +32,10 @@ import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import {
+  bundledSeverityRubric,
+  severityRubricInstructions,
+} from "../src/severity-rubric.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -46,6 +50,7 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
+    | "severityRubric"
   > & { config?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -197,7 +202,11 @@ async function interruptedScan(
     ],
     JSON.stringify({
       recipe,
-      userContext: "Keep the original scan instructions.",
+      userContext:
+        "Keep the original scan instructions." +
+        (settings.severityRubric === undefined
+          ? ""
+          : "\n\n" + severityRubricInstructions(settings.severityRubric)),
     }),
   );
   const scanId = registration["scanId"] as string;
@@ -1033,6 +1042,7 @@ test.each([
       safetyIdentifier:
         auth === "chatgpt" ? undefined : "synthetic-original-user",
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
+      severityRubric: { ...bundledSeverityRubric, revision: 17 },
     };
     const f = await interruptedScan("deep", bulk, settings, true);
     f.environment.OPENAI_API_KEY = "synthetic-resume-key";
@@ -1080,6 +1090,9 @@ test.each([
                   expect(prompt).toContain(
                     "Keep the original scan instructions.",
                   );
+                  expect(prompt).toContain(
+                    JSON.stringify({ severityRubric: settings.severityRubric }),
+                  );
                   const deepConfigPath =
                     options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
                   expect(deepConfigPath).toBe(
@@ -1126,6 +1139,7 @@ test.each([
                   ]);
                   expect(saved["recipe"]).toMatchObject({
                     cyberAccessProgram: settings.cyberAccessProgram,
+                    severityRubric: settings.severityRubric,
                   });
                   await finishDiscovery(f);
                 }

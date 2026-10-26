@@ -135,6 +135,7 @@ import {
   type ClassifySeverityRecordsInput,
 } from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
+import { severityRubricSchema } from "./severity-rubric.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
@@ -1073,6 +1074,7 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
@@ -4642,7 +4644,7 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "Use --rubric to override the built-in policy or --records for host-provided classification.",
+      hint: "Use --rubric to override the shared default policy or --records for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4672,7 +4674,7 @@ export async function main(
         rubric: optionValue("--rubric")
           .optional()
           .describe(
-            "Classification policy document; omit to classify with the built-in severity rubric.",
+            "Classification policy document; omit to resolve the shared default severity rubric.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))
@@ -5460,6 +5462,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        severityRubric: recipe.severityRubric,
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
@@ -7338,6 +7341,9 @@ async function prepareScanArgumentsFromRecipe(
   }
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
+  const severityRubric = severityRubricSchema
+    .optional()
+    .parse(recipe["severityRubric"]);
   if (
     (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
     (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
@@ -7361,6 +7367,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
     ownerSuggestions: ownerSuggestions.data,
+    ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
@@ -9559,6 +9566,9 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.severityRubric === undefined
+        ? {}
+        : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}

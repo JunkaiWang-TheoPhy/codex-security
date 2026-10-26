@@ -27,6 +27,7 @@ import {
   type ScanExecutor,
 } from "../src/scan-executor.js";
 import { main } from "../src/cli.js";
+import * as rubricSource from "../src/severity-rubric.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -43,6 +44,37 @@ import { writeSource } from "./support/shell.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
+
+test("hosted scans echo one immutable default snapshot and preserve explicit host policies", async () => {
+  const resolve = spyOn(
+    rubricSource,
+    "getDefaultSeverityRubric",
+  ).mockResolvedValue({
+    ...rubricSource.bundledSeverityRubric,
+    revision: 19,
+  });
+  try {
+    for (const explicit of [false, true]) {
+      const input = await fixture();
+      if (!explicit) delete input.severityRubric;
+      const expected = explicit
+        ? input.severityRubric!
+        : { ...rubricSource.bundledSeverityRubric, revision: 19 };
+      const executor = draftExecutor();
+      const result = await runHostedScan(input, { executor });
+      expect(result.status).toBe("completed");
+      expect(result.severityRubric).toEqual(expected);
+      const request = executor.run.mock.calls[0]![0];
+      expect(request.severityRubric).toEqual(expected);
+      expect(request.prompt).toContain(
+        JSON.stringify({ severityRubric: expected }),
+      );
+    }
+    expect(resolve).toHaveBeenCalledTimes(1);
+  } finally {
+    resolve.mockRestore();
+  }
+});
 
 test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
   for (const enabled of [false, true]) {
@@ -143,6 +175,7 @@ async function fixture(
     stateDirectory: join(root, "run", "attempt", "state"),
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
+    severityRubric: { ...rubricSource.bundledSeverityRubric },
     identity: {
       runId: "run-1",
       attemptId: "attempt-1",
@@ -1239,10 +1272,14 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     version: 2,
     status: "completed",
     identity: fixture.run.params.identity,
+    severityRubric: fixture.run.params.severityRubric,
     scope: fixture.run.params.scope,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });
+  expect(fixture.execution.params.severityRubric).toEqual(
+    fixture.run.params.severityRubric,
+  );
 });
 
 test("standalone SDK rejects local scan options and configuration before dispatch", async () => {

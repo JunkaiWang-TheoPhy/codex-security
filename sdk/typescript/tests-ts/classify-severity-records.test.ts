@@ -1,5 +1,6 @@
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import * as rubricSource from "../src/severity-rubric.js";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import {
@@ -10,8 +11,46 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
+beforeEach(() => {
+  spyOn(rubricSource, "getDefaultSeverityRubric").mockResolvedValue({
+    ...rubricSource.bundledSeverityRubric,
+  });
+});
+afterEach(() => mock.restore());
+
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
+
+test("canonical classification freezes the shared default and respects explicit rubric bindings", async () => {
+  const policy = { ...rubricSource.bundledSeverityRubric, revision: 7 };
+  const resolve = spyOn(
+    rubricSource,
+    "getDefaultSeverityRubric",
+  ).mockResolvedValue(policy);
+  const data: ClassifySeverityRecordsInput = input();
+  delete data.rubric;
+  const result = await classifySeverityRecords(data, {
+    reviewRunner: {
+      async run(request) {
+        expect(JSON.parse(request.prompt).rubric).toEqual([policy.markdown]);
+        resolve.mockResolvedValue({ ...policy, revision: 8 });
+        return answer(request);
+      },
+    },
+  });
+  expect(resolve).toHaveBeenCalledTimes(1);
+  expect(result.rubric).toEqual({ revision: 7, sha256: policy.sha256 });
+  resolve.mockClear();
+  await classifySeverityRecords(input(), {
+    reviewRunner: {
+      async run(request) {
+        return answer(request);
+      },
+    },
+  });
+  expect(resolve).not.toHaveBeenCalled();
+});
+
 function input(): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
 } {

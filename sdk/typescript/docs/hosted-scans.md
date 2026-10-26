@@ -74,6 +74,15 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+Pass optional `severityRubric: { markdown, revision, sha256 }` to bind execution
+to a host-resolved policy. The revision must be a positive safe integer and the
+hash must match the exact UTF-8 Markdown. Without it, the SDK resolves the shared
+Statsig default once, with a three-second timeout and the bundled rubric as its
+offline fallback. The same snapshot appears in `execution.run`, the terminal
+receipt, and the saved scan recipe. All scan workers use that policy instead of
+the bundled plugin severity guidance. Hosts should verify this binding alongside
+the frozen checkout and retain it when reconciling or retrying a run.
+
 Set `ownerSuggestions: true` to record ownership evidence during the existing
 scan execution. The scan agent may include an optional hint on each finding:
 

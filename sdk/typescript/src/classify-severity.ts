@@ -1,4 +1,4 @@
-import { defaultSeverityRubric } from "./default-severity-rubric.js";
+import { getDefaultSeverityRubric } from "./severity-rubric.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -35,7 +35,7 @@ export interface ClassifySeverityOptions extends Pick<
   | "signal"
   | "workingDirectory"
 > {
-  /** Classification policy override. Omit to use the built-in severity rubric. */
+  /** Classification policy override. Omit to resolve the shared default rubric. */
   rubricPath?: string;
   /** Independent reviews per finding: integer 1–10, default 3. */
   classificationRuns?: number;
@@ -122,7 +122,7 @@ export async function classifySeverityInternal(
   }
   const rubric =
     options.rubricPath === undefined
-      ? [defaultSeverityRubric]
+      ? [(await getDefaultSeverityRubric(options.signal)).markdown]
       : await readDocuments([options.rubricPath], options.signal);
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)

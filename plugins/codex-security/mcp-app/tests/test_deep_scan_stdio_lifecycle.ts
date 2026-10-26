@@ -7,7 +7,7 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -1276,8 +1276,17 @@ async function testCliDeepScanEngine({
       "# scoped fixture\n",
     );
   }
-  const userContext =
-    "  Review café authentication.\r\nPreserve exact context.\t";
+  const severityRubric = {
+    markdown: "# Severity\nUse the supplied evidence.\n",
+    revision: 7,
+    sha256: createHash("sha256")
+      .update("# Severity\nUse the supplied evidence.\n")
+      .digest("hex"),
+  };
+  const userContext = [
+    "  Review café authentication.\r\nPreserve exact context.\t",
+    JSON.stringify({ severityRubric }),
+  ].join("\n\n");
   const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
   await mkdir(knowledgeBase);
   await writeFile(
@@ -1303,6 +1312,7 @@ async function testCliDeepScanEngine({
           repository,
           mode: "deep",
           maxCostUsd: 0.004,
+          severityRubric,
           target: scoped
             ? { kind: "paths", paths }
             : { kind: "repository", paths: [] },

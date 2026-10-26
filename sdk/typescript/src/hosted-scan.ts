@@ -18,6 +18,10 @@ import { CodexSecurity } from "./api.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
 import { normalizeRepository, repositoryRevision } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
+import {
+  getDefaultSeverityRubric,
+  severityRubricSchema,
+} from "./severity-rubric.js";
 
 /** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
 export const HostedScanInputSchema = z.strictObject({
@@ -31,6 +35,7 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  severityRubric: severityRubricSchema.optional(),
   ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
@@ -191,7 +196,11 @@ export async function runHostedScan(
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
-  const context = await prepareHostedScan(input, options.signal);
+  const context = {
+    ...(await prepareHostedScan(input, options.signal)),
+    severityRubric:
+      input.severityRubric ?? (await getDefaultSeverityRubric(options.signal)),
+  };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
   let scanId: string | undefined;
@@ -255,6 +264,7 @@ export async function runHostedScan(
       mode: "standard",
       outputDir: outputDirectory,
       signal: options.signal,
+      severityRubric: context.severityRubric,
       ownerSuggestions: input.ownerSuggestions,
       onOutputDirReady(path) {
         outputDirectory = path;

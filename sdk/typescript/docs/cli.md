@@ -1875,7 +1875,14 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` runs classification with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+Omitting `--rubric` resolves the shared default severity rubric from Statsig.
+New scans use the same default. Each operation makes one optional request to
+`https://ab.chatgpt.com/v1/initialize` without account credentials or finding data,
+with a three-second timeout. Missing, invalid, or unavailable configuration uses
+the [bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+The selected policy stays fixed throughout that scan or classification; saved
+scan resumes and reruns retain their original snapshot. SDK `ScanOptions.severityRubric`
+accepts an explicit `{ markdown, revision, sha256 }` snapshot instead.
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
 from severity; missing proof alone does not justify a downgrade. An explicit
@@ -1905,7 +1912,7 @@ Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed
 work. Default-rubric assessments use `source: "rubric"` and a content hash; former
 no-rubric inherited assessments have no rubric hash and are automatically
-reclassified on the next classification run. Changes to the bundled policy or
+reclassified on the next classification run. Changes to the resolved default policy or
 switching between default and custom policies also invalidate matching checkpoints.
 The result and checkpoint record `classificationRuns`; changing the count, or
 reusing an older checkpoint with no recorded count, triggers fresh classification.
@@ -1984,7 +1991,7 @@ await publishScan(scanDirectory, {
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
 evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the built-in policy even when a scanner severity is present.
+`rubricPath` uses the resolved default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and

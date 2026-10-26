@@ -106,6 +106,12 @@ import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
 import {
+  getDefaultSeverityRubric,
+  severityRubricInstructions,
+  severityRubricSchema,
+  type SeverityRubricSnapshot,
+} from "./severity-rubric.js";
+import {
   deepScanOptions,
   resolveDeepScanConfig,
   writeDeepScanConfig,
@@ -330,6 +336,8 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** Frozen severity policy. Omit to resolve the shared default for a new scan. */
+  severityRubric?: SeverityRubricSnapshot;
   /** @internal Reuse captured knowledge inputs for related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
@@ -656,7 +664,7 @@ interface ClientDependencies {
     executor: ScanExecutor;
     context: Pick<
       ScanExecutionRequest,
-      "repository" | "revision" | "scope" | "identity"
+      "repository" | "revision" | "scope" | "identity" | "severityRubric"
     >;
     onEvent(event: ScanExecutionEvent): void;
   };
@@ -743,6 +751,16 @@ export class CodexSecurity {
       throw new CodexSecurityError(
         "Use runHostedScan with an executor for hosted execution.",
       );
+    options = {
+      ...options,
+      ...(options.severityRubric === undefined
+        ? {}
+        : {
+            severityRubric: severityRubricSchema.parse(
+              structuredClone(options.severityRubric),
+            ),
+          }),
+    };
     return await this.#trackOperation(() =>
       options.workflowId === undefined
         ? this.#run(repository, { ...options })
@@ -2058,6 +2076,12 @@ export class CodexSecurity {
         prompts,
       } = inputs;
       options = { ...options, ...prompts };
+      let severityRubric =
+        options.severityRubric === undefined
+          ? options.resumeScanId === undefined
+            ? await getDefaultSeverityRubric(signal)
+            : undefined
+          : options.severityRubric;
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -2496,6 +2520,8 @@ export class CodexSecurity {
         ownerSuggestions: options.ownerSuggestions,
       });
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
+      if (severityRubric !== undefined)
+        recipe["severityRubric"] = { ...severityRubric };
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,
         scanKnowledge,
@@ -2517,6 +2543,12 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      const scanContext =
+        severityRubric === undefined
+          ? options.scanPrompt
+          : [options.scanPrompt, severityRubricInstructions(severityRubric)]
+              .filter((value) => value !== undefined)
+              .join("\n\n");
       checkOpen();
       const registration =
         options.resumeScanId !== undefined
@@ -2536,7 +2568,7 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
-                userContext: options.scanPrompt,
+                userContext: scanContext,
                 workflowId: options.workflowId,
               }),
             );
@@ -2576,6 +2608,17 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
+        const savedRubric = severityRubricSchema
+          .optional()
+          .parse(savedRecipe["severityRubric"]);
+        if (
+          severityRubric !== undefined &&
+          !isDeepStrictEqual(severityRubric, savedRubric)
+        )
+          throw new CodexSecurityError(
+            "The supplied severity rubric differs from this scan's saved policy. Resume with the original rubric or start a new scan.",
+          );
+        severityRubric = savedRubric;
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -2741,7 +2784,7 @@ export class CodexSecurity {
         options.resumeScanId !== undefined &&
           typeof registration["userContext"] === "string"
           ? registration["userContext"]
-          : options.scanPrompt,
+          : scanContext,
         options.maxCostUsd !== undefined,
         discoveryPrompt,
         modelProvider,

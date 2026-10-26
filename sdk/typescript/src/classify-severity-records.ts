@@ -1,5 +1,5 @@
 import { SCAN_SEVERITIES } from "./scan-settings.js";
-import { defaultSeverityRubric } from "./default-severity-rubric.js";
+import { getDefaultSeverityRubric } from "./severity-rubric.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./targets.js";
@@ -141,11 +141,8 @@ export async function classifySeverityRecords(
     .default(3)
     .parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
-  const rubric = data.rubric ?? {
-    revision: 1,
-    markdown: defaultSeverityRubric,
-    sha256: sha256(defaultSeverityRubric),
-  };
+  const rubric =
+    data.rubric ?? (await getDefaultSeverityRubric(options.signal));
   if (sha256(rubric.markdown) !== rubric.sha256)
     throw new Error("Rubric SHA-256 does not match its exact UTF-8 Markdown.");
   const ids = new Set<string>();

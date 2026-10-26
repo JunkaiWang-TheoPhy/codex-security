@@ -5,7 +5,8 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import * as rubricSource from "../src/severity-rubric.js";
 import {
   classifySeverity,
   validateSeverityClassification,
@@ -19,6 +20,12 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   false,
 );
 afterEach(cleanup);
+beforeEach(() => {
+  spyOn(rubricSource, "getDefaultSeverityRubric").mockResolvedValue({
+    ...rubricSource.bundledSeverityRubric,
+  });
+});
+afterEach(() => mock.restore());
 
 async function document(contents: string): Promise<string> {
   const directory = await temporaryDirectory();
@@ -69,7 +76,33 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
-test("without a rubric runs three independent reviews with the built-in policy", async () => {
+test("reclassification freezes one shared default across independent reviews", async () => {
+  const policy = { ...rubricSource.bundledSeverityRubric, revision: 7 };
+  const resolve = spyOn(
+    rubricSource,
+    "getDefaultSeverityRubric",
+  ).mockResolvedValue(policy);
+  const { codex, calls } = fakeCodex(() => {
+    resolve.mockResolvedValue({
+      ...policy,
+      markdown: "A later policy",
+      revision: 8,
+    });
+    return assessed;
+  });
+  await classifySeverity([finding], { codex, environment: {} });
+  expect(resolve).toHaveBeenCalledTimes(1);
+  for (const call of calls)
+    expect(JSON.parse(call.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+      policy.markdown,
+    ]);
+  resolve.mockClear();
+  const rubricPath = await document("Explicit classification policy");
+  await classifySeverity([finding], { codex, environment: {}, rubricPath });
+  expect(resolve).not.toHaveBeenCalled();
+});
+
+test("without a rubric runs three independent reviews with the bundled fallback policy", async () => {
   const { codex, calls } = fakeCodex(assessed);
   const original = structuredClone(finding);
   const result = await classifySeverity([finding], { codex, environment: {} });
