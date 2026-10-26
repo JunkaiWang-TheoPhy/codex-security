@@ -815,6 +815,7 @@ def stage_write(
     *,
     expected_root_identity: tuple[int, int] | None = None,
     replace_existing: bool = False,
+    cleanup_root: Callable[[], Path | None] | None = None,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
     """Flush a patch, then release every handle so the registered scan can move."""
     with _locked_parent(
@@ -873,8 +874,10 @@ def stage_write(
         yield publish
     finally:
         if not published:
-            # Abandon only the original temp. A moved root or replaced name
-            # must not redirect cleanup or mask the admission/publication error.
+            # A concurrent archive may move the scan before admission reaches publish().
+            if cleanup_root is not None:
+                location = cleanup_root() or location
+            # Delete only the same staged file below the original scan root identity.
             with contextlib.suppress(OSError), open_stage() as (handle, _):
                 assert handle.value is not None
                 _mark_handle_for_deletion(handle.value)

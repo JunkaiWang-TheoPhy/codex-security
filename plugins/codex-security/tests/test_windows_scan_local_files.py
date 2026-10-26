@@ -3,12 +3,16 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import sqlite3
 import subprocess
-from contextlib import ExitStack
+import sys
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import pytest
 from test_deep_scan_publication_authority import emulate_windows_atomic_write
+from test_workbench_archive import register
+from test_workbench_remediation_retry import pending_generation as pending_generation
 from workbench_test_support import load_script
 
 pytestmark = pytest.mark.native_windows
@@ -160,6 +164,49 @@ def test_staged_patch_is_visible_only_after_publication(tmp_path, monkeypatch, o
             assert destination.read_bytes() == b"competing patch\n"
         elif outcome == "archive":
             assert not list(scan_dir.iterdir())
+
+
+def test_canceled_generation_removes_its_staged_patch_after_archive(
+    pending_generation, workbench_api, tmp_path, monkeypatch
+):
+    database, scan_dir, _, args, _ = pending_generation
+    remediation = workbench_api["remediation_state"]
+    stage = remediation.stage_scan_local_bytes
+    archived = None
+    replacement = None
+
+    @contextmanager
+    def archive_and_cancel(*stage_args, **options):
+        nonlocal archived, replacement
+        with ExitStack() as files:
+            if os.name != "nt":
+                emulation = files.enter_context(monkeypatch.context())
+                backend = emulate_windows_atomic_write(
+                    emulation, sys.modules[stage.__module__], files
+                )
+                emulation.setattr(backend, "_create_directory", Path.mkdir)
+            with stage(*stage_args, **options) as publish:
+                registered = register(
+                    database.parent, tmp_path / "target", scan_dir, "--archive-existing"
+                )
+                archived = Path(registered["archivedScanDir"])
+                (temp,) = archived.rglob("*.tmp")
+                replacement = scan_dir / temp.relative_to(archived)
+                replacement.parent.mkdir(parents=True)
+                replacement.write_bytes(b"new scan's file")
+                with sqlite3.connect(database) as other:
+                    other.row_factory = sqlite3.Row
+                    remediation.cancel_finding_remediation_request(other, args)
+                yield publish
+
+    monkeypatch.setattr(remediation, "stage_scan_local_bytes", archive_and_cancel)
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(SystemExit, match="remediation request changed"):
+            workbench_api["set_finding_remediation"](connection, args)
+    assert not list(archived.rglob("*.tmp"))
+    assert not list(archived.rglob("*.patch"))
+    assert replacement.read_bytes() == b"new scan's file"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 reparse-point behavior")

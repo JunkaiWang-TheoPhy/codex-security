@@ -30,6 +30,7 @@ def stage_file(
             if os.path.samestat(os.fstat(descriptor), entry):
                 os.unlink(filename, dir_fd=parent_fd)
         except FileNotFoundError:
+            # Successful publication has already removed the temporary name.
             pass
         finally:
             os.close(descriptor)

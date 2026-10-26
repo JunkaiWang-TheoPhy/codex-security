@@ -102,6 +102,52 @@ def test_generated_patch_requires_binary_contents(
     assert asset.read_bytes() == b"\0before"
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_generated_patch_preserves_deletions_and_uses_target_binary_ids(
+    tmp_path: Path, workbench_api, object_format: str
+) -> None:
+    repo = tmp_path / object_format
+    other_format = "sha256" if object_format == "sha1" else "sha1"
+    other = tmp_path / other_format
+    for directory in (repo, other):
+        subprocess.run(
+            ["git", "init", "-q", f"--object-format={directory.name}", directory], check=True
+        )
+
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", *args], cwd=repo)
+
+    (repo / "text").write_bytes(b"old\n")
+    (repo / "empty").touch()
+    (repo / "asset").write_bytes(b"\0old")
+    git("add", ".")
+    (repo / "text").unlink()
+    (repo / "empty").unlink()
+    (repo / "asset").write_bytes(b"\0new")
+    validate = workbench_api["remediation_state"].require_valid_patch
+    with pytest.raises(SystemExit, match="omits file content"):
+        validate(repo, git("diff", "--irreversible-delete", "--", "text"))
+    text = git("diff", "--full-index", "--", "text")
+    empty = git("diff", "--abbrev=4", "--", "empty")
+    for target in (repo, other, tmp_path):
+        validate(target, text)
+        validate(target, empty)
+
+    binary = git("diff", "--binary", "--", "asset")
+    validate(repo, binary)
+    index = next(line for line in binary.splitlines() if line.startswith(b"index "))
+    with pytest.raises(SystemExit, match="full object IDs"):
+        validate(repo, binary.replace(index, b"index 1234567..89abcde 100644"))
+    with pytest.raises(SystemExit, match="Git object format"):
+        validate(other, binary)
+    if object_format == "sha1":
+        validate(tmp_path, binary)
+    else:
+        with pytest.raises(SystemExit, match="Git object format"):
+            validate(tmp_path, binary)
+
+
 @pytest.fixture
 def pending_generation(tmp_path, monkeypatch):
     state, target = tmp_path / "state", tmp_path / "target"

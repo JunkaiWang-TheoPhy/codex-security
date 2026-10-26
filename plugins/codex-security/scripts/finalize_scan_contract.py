@@ -19,7 +19,7 @@ import stat
 import struct
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
@@ -853,6 +853,7 @@ def stage_scan_local_bytes(
     expected_root_identity: tuple[int, int] | None = None,
     owner_read_write: bool = False,
     replace_existing: bool = False,
+    cleanup_root: Callable[[], Path | None] | None = None,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
     scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
     path = scan_dir / relative_path
@@ -867,6 +868,7 @@ def stage_scan_local_bytes(
                 payload,
                 expected_root_identity=expected_root_identity,
                 replace_existing=replace_existing,
+                cleanup_root=cleanup_root,
             ) as publish:
                 yield publish
         return
@@ -883,9 +885,7 @@ def stage_scan_local_bytes(
             raise _scan_local_directory_error(
                 f"{relative_path}: expected a path inside the scan directory", exc
             ) from exc
-        # The held descriptor is the authority for the validated parent. A
-        # concurrent rename cannot redirect later operations through a
-        # replacement path or link.
+        # Stage through the held parent so a replacement path cannot redirect the write.
         try:
             metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -935,7 +935,21 @@ def stage_scan_local_bytes(
         with stage_file(parent_fd, candidate, payload, owner_read_write) as staged_fd:
             staged = os.fstat(staged_fd)
 
-            def publish(_directory: Path | None = None) -> tuple[os.stat_result, int]:
+            def publish(directory: Path | None = None) -> tuple[os.stat_result, int]:
+                if directory is not None:
+                    # Admission can follow an archive while the staged parent stays open.
+                    root = os.fstat(root_fd)
+                    with ExitStack() as admitted:
+                        current = _open_verified_scan_directory(
+                            directory, (root.st_dev, root.st_ino)
+                        )
+                        admitted.callback(os.close, current)
+                        parent = _open_scan_local_directory(current, parts[:-1], create=False)
+                        admitted.callback(os.close, parent)
+                        if not os.path.samestat(os.fstat(parent_fd), os.fstat(parent)):
+                            raise ContractError(
+                                f"{relative_path}: parent changed before publication"
+                            )
                 if replace_existing:
                     os.replace(candidate, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                     return staged, staged.st_ctime_ns

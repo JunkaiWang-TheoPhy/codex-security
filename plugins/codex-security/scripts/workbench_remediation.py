@@ -18,6 +18,7 @@ from typing import Any, BinaryIO
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _read_scan_local_json_bytes,
     _read_sealed_scan,
     scan_local_file_version,
@@ -80,15 +81,11 @@ def require_valid_patch(target: Path, patch: bytes) -> None:
     )
     directory = ("-C", root) if root else ()
 
-    def parse(data: bytes, *options: str):
+    def git(data: bytes, *arguments: str):
         result = git_command(
             target,
             *directory,
-            "apply",
-            "--no-index",
-            "--whitespace=nowarn",
-            *options,
-            "-",
+            *arguments,
             text=False,
             input_data=data,
             pathspec_environment={"LC_ALL": "C"},
@@ -104,19 +101,51 @@ def require_valid_patch(target: Path, patch: bytes) -> None:
         return result.stdout
 
     # Parse every header and hunk, then skip checkout reads and repository clean filters.
-    parse(patch, "--check", "--exclude=*")
-    if without_summaries != patch and parse(patch + b"\n", "--numstat") != parse(
-        without_summaries + b"\n", "--numstat"
+    apply = ("apply", "--no-index", "--whitespace=nowarn")
+    git(patch, *apply, "--check", "--exclude=*", "-")
+    stats = (*apply, "--numstat", "-")
+    if without_summaries != patch and git(patch + b"\n", *stats) != git(
+        without_summaries + b"\n", *stats
     ):
         raise SystemExit(incomplete)
 
-    # Reversing a binary modification or deletion needs its preimage. Reversing a new
-    # file (zero preimage ID) only deletes it. Git's syntax check accepts either form.
+    binary_oid_width = None
     for header in re.finditer(
-        rb"(?m)^diff --git [^\n]+\n(?:(?!diff )[a-z][^\n]*\n)*?"
-        rb"index (?!0+\.\.)[0-9a-fA-F]+\.\.[0-9a-fA-F]+(?: [0-7]+)?\r?\nGIT binary patch\r?\n",
+        rb"(?m)^diff --git [^\n]+\n((?:(?!diff )[a-z][^\n]*\n)*?)"
+        rb"index ([^\s.]+)\.\.([^\s.]+)(?: [0-7]+)?\r?(?:\n|\Z)",
         patch,
     ):
+        metadata, old, new = header.groups()
+        binary = patch.startswith((b"GIT binary patch\n", b"GIT binary patch\r\n"), header.end())
+        if not binary and (
+            not metadata.startswith(b"deleted file mode ")
+            or new.strip(b"0")
+            or patch.startswith((b"--- ", b"@@ "), header.end())
+        ):
+            continue
+        if not binary:
+            # --irreversible-delete omits the preimage. Only an empty file needs no hunk,
+            # and its deletion works across Git object formats.
+            empty_blobs = (
+                hashlib.sha1(b"blob 0\0", usedforsecurity=False).hexdigest().encode(),
+                hashlib.sha256(b"blob 0\0").hexdigest().encode(),
+            )
+            if not any(digest.startswith(old.lower()) for digest in empty_blobs):
+                raise SystemExit(incomplete)
+            continue
+        if binary_oid_width is None:
+            binary_oid_width = len(git(b"", "hash-object", "--no-filters", "--stdin").strip())
+        if (
+            len(old) != binary_oid_width
+            or len(new) != binary_oid_width
+            or not re.fullmatch(rb"[0-9a-fA-F]+", old + new)
+        ):
+            raise SystemExit(
+                "A binary patch requires full object IDs in the selected target's Git object format."
+            )
+        # Reversing an addition only deletes it. Other binary changes need the preimage.
+        if not old.strip(b"0"):
+            continue
         separator = re.compile(rb"\r?\n\r?\n").search(patch, header.end())
         if not separator or not patch.startswith((b"literal ", b"delta "), separator.end()):
             raise SystemExit(incomplete)
@@ -152,21 +181,7 @@ def patch_metadata(
     return path or current["patch_path"], digest or current["patch_digest"]
 
 
-def patch_manifest_digest(db: Any, scan: sqlite3.Row, scan_dir: Path) -> str:
-    if scan["seal_manifest_digest"] is not None:
-        db.require_recorded_manifest_digest(scan, scan_dir)
-        return scan["seal_manifest_digest"]
-    manifest_path = db.ARTIFACTS["manifest"]
-    # Historical manifests can have different JSON formatting. Bind their original bytes.
-    saved, raw = _read_scan_local_json_bytes(scan_dir, manifest_path, manifest_path)
-    manifest, _, _, _ = _read_sealed_scan(scan_dir, None, "remediation")
-    if saved != manifest:
-        raise SystemExit("The sealed scan manifest changed during validation.")
-    db.verify_manifest_binding(scan, manifest)
-    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
-
-
-def same_patch_file(
+def same_file_version(
     original: tuple[os.stat_result, int], current: tuple[os.stat_result, int]
 ) -> bool:
     before, before_change = original
@@ -179,17 +194,42 @@ def same_patch_file(
     )
 
 
-def matching_patch_metadata(source: BinaryIO, expected_digest: str) -> tuple[os.stat_result, int]:
+def file_digest_and_version(source: BinaryIO, label: str) -> tuple[str, tuple[os.stat_result, int]]:
     before = scan_local_file_version(source.fileno())
     digest = hashlib.sha256()
     for chunk in iter(lambda: source.read(1024 * 1024), b""):
         digest.update(chunk)
     after = scan_local_file_version(source.fileno())
-    if not same_patch_file(before, after):
-        raise SystemExit("The scan-local patch changed while it was being verified.")
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
+    if not same_file_version(before, after):
+        raise SystemExit(f"The {label} changed while it was being verified.")
+    return f"sha256:{digest.hexdigest()}", after
+
+
+def matching_patch_metadata(source: BinaryIO, expected_digest: str) -> tuple[os.stat_result, int]:
+    digest, version = file_digest_and_version(source, "scan-local patch")
+    if digest != expected_digest:
         raise SystemExit("Patch digest does not match the scan-local patch file.")
-    return after
+    return version
+
+
+def patch_manifest_version(
+    db: Any, scan: sqlite3.Row, scan_dir: Path
+) -> tuple[str, tuple[os.stat_result, int]]:
+    manifest_path = db.ARTIFACTS["manifest"]
+    expected = scan["seal_manifest_digest"]
+    if expected is None:
+        # Historical manifests can have different JSON formatting. Bind their original bytes.
+        saved, raw = _read_scan_local_json_bytes(scan_dir, manifest_path, manifest_path)
+        manifest, _, _, _ = _read_sealed_scan(scan_dir, None, "remediation")
+        if saved != manifest:
+            raise SystemExit("The sealed scan manifest changed during validation.")
+        db.verify_manifest_binding(scan, manifest)
+        expected = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    with db.open_scan_local_file(scan_dir, manifest_path) as source:
+        digest, version = file_digest_and_version(source, "sealed scan manifest")
+    if digest != expected:
+        raise SystemExit("The sealed scan manifest changed after completion.")
+    return digest, version
 
 
 def save_patch(
@@ -202,34 +242,42 @@ def save_patch(
     patch: bytes,
     record_update: Callable[[], None],
 ) -> None:
+    def cleanup_root() -> Path | None:
+        # A failed cleanup lookup must preserve the original admission error.
+        with suppress(sqlite3.Error, SystemExit):
+            return Path(db.require_scan(connection, scan_id)["scan_dir"])
+        return None
+
     def admit() -> Path:
         record_update()
         latest = db.require_scan(connection, scan_id)
         directory = db.require_canonical_scan_directory(Path(latest["scan_dir"]))
         if scan_root_identity(directory)[1] != identity:
             raise SystemExit("The scan directory changed after seal validation.")
-        if (
-            latest["seal_manifest_digest"] not in (None, manifest_digest)
-            or db.scan_local_file_digest(directory, db.ARTIFACTS["manifest"]) != manifest_digest
+        with db.open_scan_local_file(directory, db.ARTIFACTS["manifest"]) as named:
+            current_version = scan_local_file_version(named.fileno())
+        if latest["seal_manifest_digest"] not in (None, manifest_digest) or not same_file_version(
+            manifest_version, current_version
         ):
             raise SystemExit("The sealed scan manifest changed after completion.")
         return directory
 
     def verify_name(directory: Path, expected: tuple[os.stat_result, int]) -> None:
         with db.open_scan_local_file(directory, path) as named:
-            if not same_patch_file(expected, scan_local_file_version(named.fileno())):
+            if not same_file_version(expected, scan_local_file_version(named.fileno())):
                 raise SystemExit("The scan-local patch changed during generation.")
         if scan_root_identity(directory)[1] != identity:
             raise SystemExit("The scan directory changed while saving the patch.")
 
     published = None
+    retried_directory = None
     with ExitStack() as staging:
         while True:
             scan = db.require_scan(connection, scan_id)
             try:
                 scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
                 scan_dir, identity = scan_root_identity(scan_dir)
-                manifest_digest = patch_manifest_digest(db, scan, scan_dir)
+                manifest_digest, manifest_version = patch_manifest_version(db, scan, scan_dir)
                 publish = None
                 if current["patch_path"] is None:
                     with suppress(FileExistsError):
@@ -240,13 +288,25 @@ def save_patch(
                                 patch,
                                 expected_root_identity=identity,
                                 owner_read_write=True,
+                                cleanup_root=cleanup_root,
                             )
                         )
                 break
-            except (ContractError, OSError, SystemExit):
-                # A concurrent archive in this database moves the original scan.
-                if db.require_scan(connection, scan_id)["scan_dir"] == scan["scan_dir"]:
-                    raise
+            except (ContractError, OSError, SystemExit) as exc:
+                # Archiving moves the directory before committing its new location.
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    directory = db.require_scan(connection, scan_id)["scan_dir"]
+                if directory == scan["scan_dir"]:
+                    # A rolled-back archive restores a temporarily missing path.
+                    cause: BaseException | None = exc
+                    while cause and not isinstance(
+                        cause, (FileNotFoundError, MissingScanLocalFileError)
+                    ):
+                        cause = cause.__cause__
+                    if cause is None or directory == retried_directory:
+                        raise
+                    retried_directory = directory
         if publish is not None:
             directory = admit()
             try:

@@ -134,7 +134,8 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
         def unavailable(source, _destination, *, src_dir_fd, **_kwargs):
             nonlocal staged
             # Hold the flushed inode so a direct copy cannot reuse its inode number.
-            staged = files.enter_context(os.fdopen(os.open(source, os.O_RDONLY, dir_fd=src_dir_fd)))
+            staged = os.open(source, os.O_RDONLY, dir_fd=src_dir_fd)
+            files.callback(os.close, staged)
             if outcome == "link-out-of-space":
                 raise OSError(errno.ENOSPC, "hardlink failed for a storage error")
             if outcome == "collision":
@@ -148,7 +149,7 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
             FINALIZER.write_scan_local_bytes(
                 tmp_path, destination.name, patch, replace_existing=False
             )
-            assert os.path.samestat(os.fstat(staged.fileno()), destination.stat())
+            assert os.path.samestat(os.fstat(staged), destination.stat())
             assert destination.read_bytes() == patch
         else:
             with pytest.raises(OSError) as failed:
@@ -165,6 +166,24 @@ def test_new_patch_on_a_filesystem_without_hardlinks(tmp_path, monkeypatch, outc
                 else:
                     assert failed.value.errno == errno.ENOSPC
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("moved", ["parent", "scan"])
+def test_new_patch_rejects_directory_moved_outside_the_admitted_scan(tmp_path, moved):
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    path = "artifacts/remediation/request/generated.patch"
+    destination = scan / path
+    outside = tmp_path / "outside"
+    with FINALIZER.stage_scan_local_bytes(scan, path, b"patch") as publish:
+        directory = destination.parent if moved == "parent" else scan
+        directory.rename(outside)
+        directory.mkdir()
+        with pytest.raises(FINALIZER.ContractError, match="changed"):
+            publish(scan)
+    assert not destination.exists()
+    assert not list(outside.rglob("*.patch"))
+    assert not list(outside.rglob("*.tmp"))
 
 
 def test_new_patch_rejects_same_size_edit_during_publication(tmp_path, monkeypatch):
