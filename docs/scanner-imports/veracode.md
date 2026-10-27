@@ -61,12 +61,12 @@ Use the same source key for later exports from the same application and
 context; an application GUID is not evidence of a Git URL. For Cloud use an
 authorized GitHub repository and a deployment that accepts provider `veracode`.
 
-| Veracode evidence | What Codex Security tracks |
-| --- | --- |
-| API origin, application/context and `issue_id` | A stable policy flaw occurrence. Build number, line, CWE and the separate Pipeline flaw ID are not its identity. |
-| Native severity, CWE and flaw description | SAST evidence, preserving the original numeric severity, description and status in the raw record. |
-| Static analysis path, line and module | Reported evidence, not proof that a similarly named file exists in the checkout. No fabricated column or Git commit. |
-| Finding status, mitigation and resolution | Upstream workflow history, not a Codex assessment. Replaying an update does not mark a fix verified; omissions do not delete records. |
+| Veracode evidence                              | What Codex Security tracks                                                                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| API origin, application/context and `issue_id` | A stable policy flaw occurrence. Build number, line, CWE and the separate Pipeline flaw ID are not its identity.                      |
+| Native severity, CWE and flaw description      | SAST evidence, preserving the original numeric severity, description and status in the raw record.                                    |
+| Static analysis path, line and module          | Reported evidence, not proof that a similarly named file exists in the checkout. No fabricated column or Git commit.                  |
+| Finding status, mitigation and resolution      | Upstream workflow history, not a Codex assessment. Replaying an update does not mark a fix verified; omissions do not delete records. |
 
 References: [Veracode Findings API](https://docs.veracode.com/r/c_findings_v2_intro),
 [vendor-supported policy and Pipeline conversion examples](https://github.com/veracode/veracode-pipeline-scan-results-to-sarif).
