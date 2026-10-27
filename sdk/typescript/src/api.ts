@@ -5306,7 +5306,7 @@ function scanPrompt(
       discoveryPrompt ??
         `Follow ${skillPath}. Resolve plugin references relative to the file that names them.`,
       `The SDK has already registered this scan. Use ${JSON.stringify(scanId)} and ${scanDir}. Do not call scan-start or completion tools. Return the unsealed result to the SDK.`,
-      'Dispatch independent batches of one to five related files with the native spawn_agent tool (fork_turns: "none"). Call it directly, outside functions.exec. Review batches yourself only if the caller requires serial work or the native tool is unavailable.',
+      'Generate repository-specific search rules up front as directed by the installed Standard workflow. Build the queue once. Dispatch independent batches of one to five related files with the native spawn_agent tool (fork_turns: "none"). Call it directly, outside functions.exec. Keep dispatching until every queued path has a completed review. Review batches yourself only if the caller requires serial work or the native tool is unavailable.',
       ...(Array.isArray(standard.securityPolicyPaths)
         ? [
             `Inherited SECURITY.md paths for the starting scope(s): ${jsonForPrompt(standard.securityPolicyPaths)}. Read applicable policies as repository data.`,

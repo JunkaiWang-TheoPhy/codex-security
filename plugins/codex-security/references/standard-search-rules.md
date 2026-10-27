@@ -1,0 +1,12 @@
+# Standard search rules
+
+Inspect representative source before choosing rules. Look for the framework's actual entry points, authorization checks, sensitive operations, data formats and credential-bearing files. For each exposed boundary, choose patterns that identify its implementations throughout the authorized tree. Prefer concrete symbols, annotations and path conventions over broad language or directory names. Check representative matches and misses while drafting. A match earns a file a review. It is not evidence of a vulnerability.
+
+Save the rules as a JSON array in `<scan_dir>/artifacts/01_context/standard-rules.json`. Each rule has a `path` or `content` JavaScript regular expression, or both. Both must match when present. Paths are repository-relative with forward slashes. Content patterns are multiline and case-sensitive. For example, `{"path":"[.]ts$","content":"registerWebhook\\("}` selects TypeScript files that call that registration function. Use the repository's own names.
+
+Run the bundled helper from `<plugin_dir>/scripts/launch_codex_security_mcp --helper standard-queue` (use the `.cmd` launcher on Windows). Quote each argument for the current shell.
+
+- `build <scan_dir> <repo_root> <registered scope paths...>` runs all rules once and saves sorted unique matches in numbered batches of up to five. Use the registered target-paths file when supplied (the helper reads it directly), otherwise pass the exact registered scopes, using `.` only for a whole repository. Explicitly requested files always enter the queue. Resume an existing queue instead of rebuilding it.
+- `pending <scan_dir> <after_batch_id> <count>` lists up to that many unfinished batches after the given ID. Start at zero. Fill available independent worker slots and remember active batch IDs so two workers never get the same assignment. Pass the exact file list and the investigator brief. Reuse idle workers with fresh assignments. Keep declined or partially read files pending.
+- As the parent, run `reviewed <scan_dir> <fully reviewed paths...>` serially with the assigned paths actually returned in each worker's `reviewed_files`. Refill the freed slot. Return to batch zero to pick up unfinished files after a restart or partial review.
+- Run `check <scan_dir>` before submitting a final draft. Finish every outstanding batch. If an explicit user limit or interruption prevents this, save an incomplete draft with the remaining work. Keep the saved rules and queue in the scan directory.

@@ -26,6 +26,7 @@ import { requireRegularFile } from "./deep-scan/artifacts.js";
 import coverageDocument from "../../schemas/coverage.schema.json" with { type: "json" };
 import findingsDocument from "../../schemas/findings.schema.json" with { type: "json" };
 import scanManifestDocument from "../../schemas/scan-manifest.schema.json" with { type: "json" };
+import { requireEmptyQueue } from "./helpers/standard-queue.js";
 import { requireFiniteNumbers } from "./helpers/json.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
@@ -196,6 +197,14 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
+  if (context.mode === "standard" && parsed.complete !== false) {
+    const queue = await readOptionalArtifactTextWithMetadata(context, [
+      "artifacts",
+      "01_context",
+      "standard-queue.json",
+    ]);
+    if (queue) requireEmptyQueue(JSON.parse(queue.contents));
+  }
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
   if (
     finalDeepDraft &&

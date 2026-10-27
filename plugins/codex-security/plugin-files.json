@@ -47,6 +47,7 @@
     "references/scan-runtime.md",
     "references/security-guidance.md",
     "references/standalone-validation.md",
+    "references/standard-search-rules.md",
     "references/static-finding-assessment.md",
     "references/threat-model.md",
     "references/validate-scan-findings.md",
