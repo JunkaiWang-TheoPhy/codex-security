@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { ExternalImportTarget } from "../src/external-import-contract.js";
 import {
-  inspectorEvidencePlatform,
+  inspectorReportRepositories,
   inspectorEvidenceRepositoryUrls,
   normalizeInspectorFindings,
   readInspectorFindings,
@@ -615,6 +615,18 @@ test("compares exact native resource IDs and never treats opaque slash strings a
 });
 
 test("exposes GitHub remote semantics only from the validated native repository provider", () => {
+  const inspectorEvidencePlatform = (
+    source_data: Record<string, unknown> | undefined,
+  ) =>
+    inspectorReportRepositories(
+      [
+        {
+          source_finding_id: "test",
+          evidence: { title: "test", severity: "unknown", source_data },
+        },
+      ],
+      "local",
+    )[0]?.platform;
   const host = "https://git.example.test/example/project";
   const known = projectFinding({ projectName: host });
   const raw = normalize([known], host, "local").findings[0]!.evidence

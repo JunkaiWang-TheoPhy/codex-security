@@ -8,6 +8,7 @@ import {
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import {
   inspectorPackageFinding,
   inspectorRepositoryUrl,
@@ -48,6 +49,73 @@ test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", a
         ).import()
       ).counts.created,
     ).toBe(1);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("an omitted Inspector provider cannot erase a known platform or disguise conflicting providers", async () => {
+  const url = "https://git.example.test/example/project";
+  const fixture = await localFindingsFixture({
+    remote: "git@git.example.test:EXAMPLE/Project.git",
+  });
+  try {
+    const known = inspectorPackageFinding();
+    const source = known.resources[0]!;
+    source.details.codeRepository.projectName = url;
+    const variant = (providerType?: string) => ({
+      ...known,
+      findingArn: known.findingArn.replace(/a$/u, "b"),
+      resources: [
+        {
+          ...source,
+          details: {
+            codeRepository: {
+              projectName: url,
+              integrationArn: source.details.codeRepository.integrationArn,
+              ...(providerType ? { providerType } : {}),
+            },
+          },
+        },
+      ],
+    });
+    const path = join(fixture.root, "native.json");
+    const options = {
+      provider: "inspector" as const,
+      repository: fixture.repository,
+      sourceRepositoryUrl: url,
+      sourceKey: "inspector/project",
+    };
+    const deps = { environment: fixture.environment };
+    for (const other of [variant(), variant("GITLAB_SELF_MANAGED")]) {
+      for (const rows of [
+        [known, other],
+        [other, known],
+      ]) {
+        await writeFile(path, JSON.stringify({ findings: rows }));
+        const file = () => prepareLocalExternalImport(path, options, deps);
+        const records = rows.flatMap(
+          (row) =>
+            normalizeInspectorFindings({ findings: [row] }, url, "local")
+              .findings,
+        );
+        const normalized = () =>
+          prepareNormalizedLocalImport(
+            { findings: records, read: 2, excluded: [] },
+            options,
+            deps,
+          );
+        if ("providerType" in other.resources[0]!.details.codeRepository) {
+          await expect(file()).rejects.toThrow(/project|provider|integration/i);
+          await expect(normalized()).rejects.toThrow(
+            /project|provider|integration/i,
+          );
+        } else {
+          expect((await file()).preview.findings).toHaveLength(2);
+          expect((await normalized()).preview.findings).toHaveLength(2);
+        }
+      }
+    }
   } finally {
     await fixture.dispose();
   }

@@ -1,5 +1,9 @@
 import { posix } from "node:path";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
@@ -290,12 +294,34 @@ export function inspectorEvidenceRepositoryUrls(
   return repository ? [repository.source] : [];
 }
 
-export function inspectorEvidencePlatform(
-  sourceData: unknown,
-): "github" | undefined {
-  return retainedRepository(sourceData)?.provider === "GITHUB"
-    ? "github"
-    : undefined;
+export function inspectorReportRepositories(
+  findings: readonly ExternalFinding[],
+  target: ExternalImportTarget,
+): ExternalSourceRepository[] {
+  const groups = new Map<
+    string,
+    { source: string; urls: Set<string>; rows: unknown[] }
+  >();
+  for (const { evidence } of findings) {
+    const data = evidence.source_data;
+    if (!isRecord(data) || data["format"] !== format) continue;
+    const source = repositoryUrl(data["sourceRepositoryUrl"]);
+    const key = cloudRepositoryUrlKey(source);
+    const group = groups.get(key) ?? {
+      source,
+      urls: new Set<string>(),
+      rows: [],
+    };
+    group.urls.add(source);
+    group.rows.push(selectedFinding(data["finding"]));
+    groups.set(key, group);
+  }
+  return [...groups.values()].flatMap(({ source, urls, rows }) => {
+    const github = checkReportScope(rows, source, target) === "GITHUB";
+    return [...urls].map((url) =>
+      github ? { url, platform: "github" as const } : { url },
+    );
+  });
 }
 
 function repoFile(value: unknown): string | null {
