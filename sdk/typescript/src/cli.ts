@@ -3552,7 +3552,7 @@ export async function main(
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV; Amazon Inspector ListFindings JSON for code repositories.",
+            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV; Amazon Inspector ListFindings JSON for code repositories; Black Duck SCA vulnerable BOM components.",
           ),
       }),
       options: z.object({
@@ -3570,7 +3570,7 @@ export async function main(
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep, OpenGrep, and Amazon Inspector: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+            "Required for Semgrep, OpenGrep, Amazon Inspector, and Black Duck SCA: source repository URL, checked against the Cloud destination or configured local Git remotes.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",

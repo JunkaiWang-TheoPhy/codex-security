@@ -1,0 +1,83 @@
+import { expect, test } from "bun:test";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import {
+  blackDuckBomReport,
+  blackDuckBomRow,
+} from "./support/blackduck-import-fixtures.js";
+
+test("Black Duck keeps package occurrences unassessed across replay, mitigation, and missing rows", async () => {
+  const sourceRepositoryUrl = "https://github.com/example/project";
+  const fixture = await localFindingsFixture({ remote: sourceRepositoryUrl });
+  try {
+    const path = join(fixture.root, "vulnerable-components.json.gz");
+    const options = {
+      provider: "blackduck" as const,
+      sourceRepositoryUrl,
+      repository: fixture.repository,
+      sourceKey: "scanner/project-a/release-a",
+    };
+    const dependencies = { environment: fixture.environment };
+    const prepare = async (input: unknown) => {
+      await writeFile(path, gzipSync(JSON.stringify(input)));
+      return prepareLocalExternalImport(path, options, dependencies);
+    };
+    const row = blackDuckBomRow();
+    const first = await prepare(blackDuckBomReport([row]));
+    expect((await first.import()).counts.created).toBe(1);
+    expect((await (await prepare([row])).import()).counts.unchanged).toBe(1);
+    const mitigated = {
+      ...row,
+      vulnerabilityWithRemediation: {
+        ...row.vulnerabilityWithRemediation,
+        remediationStatus: "MITIGATED",
+      },
+    };
+    expect(
+      (await (await prepare(blackDuckBomReport([mitigated]))).import()).counts
+        .updated,
+    ).toBe(1);
+    await expect(
+      prepare({ ...blackDuckBomReport([row]), totalCount: 20 }),
+    ).rejects.toThrow();
+    expect(
+      (await (await prepare(blackDuckBomReport([]))).import()).counts,
+    ).toEqual({
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+    });
+    const records = await listLocalExternalFindings(options, dependencies);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      provider: "blackduck",
+      sourceFindingId: first.preview.findings[0]!.source_finding_id,
+      version: 2,
+      assessment: { state: "not_assessed" },
+    });
+    await expect(
+      prepareLocalExternalImport(
+        path,
+        { ...options, sourceRepositoryUrl: "https://github.com/example/other" },
+        dependencies,
+      ),
+    ).rejects.toThrow(/remote|repository/i);
+    const altered = structuredClone(first.preview);
+    altered.findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: "https://github.com/example/other" },
+    };
+    await expect(
+      prepareNormalizedLocalImport(altered, options, dependencies),
+    ).rejects.toThrow(/retained scanner repository/i);
+  } finally {
+    await fixture.dispose();
+  }
+});

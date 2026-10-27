@@ -49,6 +49,10 @@ import {
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import {
+  blackDuckBomReport,
+  blackDuckBomRow,
+} from "./support/blackduck-import-fixtures.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -977,6 +981,29 @@ test("Inspector publication keeps repository provenance and reuses the source oc
       fixtureResult.deps,
     ),
   ).rejects.toThrow(/ARN|identity|source finding/i);
+});
+
+test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
+  const report = blackDuckBomReport([blackDuckBomRow()]);
+  const correct = await fixture(report);
+  const selected = {
+    ...options,
+    provider: "blackduck" as const,
+    sourceKey: "scanner/project-a/release-a",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const prepare = () =>
+    prepareExternalPublication(correct.file, selected, correct.deps);
+  const first = await prepare();
+  expect(correct.posts).toHaveLength(0);
+  expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
+  expect((await first.publish()).counts.created).toBe(1);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  const foreign = await fixture(report, "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(foreign.file, selected, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(foreign.posts).toHaveLength(0);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

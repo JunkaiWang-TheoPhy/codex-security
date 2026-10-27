@@ -11,7 +11,7 @@ import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
-import { readInspectorFindings } from "./inspector-findings.js";
+import { repositoryBoundScanners } from "./scanner-repository-provenance.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -26,6 +26,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   endor: "endor",
   github: "github",
   inspector: "inspector",
+  blackduck: "blackduck",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -114,10 +115,11 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  if (options.provider === "inspector") {
+  const boundReader = repositoryBoundScanners[options.provider];
+  if (boundReader) {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: await readInspectorFindings(path, url, target),
+      findings: await boundReader.read(path, url, target),
       sourceRepositories: [{ url }],
     };
   }

@@ -305,7 +305,14 @@ export async function externalPublication(
 ): Promise<ExternalPublicationResult> {
   const fromFile = await prepareExternalPublication(file, options);
   fromFile.preview.requests[0]?.source.provider satisfies
-    "wiz" | "endor" | "snyk" | "github" | "semgrep" | "inspector" | undefined;
+    | "wiz"
+    | "endor"
+    | "snyk"
+    | "github"
+    | "semgrep"
+    | "inspector"
+    | "blackduck"
+    | undefined;
   const prepared = await prepareNormalizedExternalPublication(input, {
     ...options,
     provider: fromFile.preview.source.provider,
