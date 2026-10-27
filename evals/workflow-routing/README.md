@@ -13,6 +13,7 @@ review, scan startup, triage, patching, or verification.
 | Assess a supplied vulnerability claim      | `triage-finding`     |
 | Implement and test a security fix          | `fix-finding`        |
 | Explicitly verify an existing security fix | `verify-fix`         |
+| Review a skill before installation         | `check-skills`       |
 | Fix an ordinary sorting bug                | None                 |
 | Check a refactor's build and unit tests    | None                 |
 
