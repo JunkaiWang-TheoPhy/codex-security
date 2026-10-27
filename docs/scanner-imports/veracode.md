@@ -22,13 +22,17 @@ umask 077
 out=$(mktemp -d)
 : "${VERACODE_APPLICATION_GUID:?Set the intended application GUID}"
 api=https://api.veracode.com
+guid=$(jq -ner --arg guid "$VERACODE_APPLICATION_GUID" '$guid | ascii_downcase |
+  select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))')
+application="$api/appsec/v1/applications/$guid"
 page=0
 while :; do
-  http --ignore-stdin --check-status --body --auth-type veracode_hmac GET \
-    "$api/appsec/v2/applications/$VERACODE_APPLICATION_GUID/findings" \
+  http --ignore-stdin --check-status --body --timeout 20 --auth-type veracode_hmac GET \
+    "$api/appsec/v2/applications/$guid/findings" \
     scan_type==STATIC page=="$page" size==100 > "$out/page.tmp"
-  jq -e --argjson n "$page" \
-    '.page.number == $n and (.page.total_pages | type == "number") and
+  jq -e --arg app "$application" --argjson n "$page" \
+    '._links.application.href == $app and
+     .page.number == $n and (.page.total_pages | type == "number") and
      (._embedded.findings | type == "array")' "$out/page.tmp" >/dev/null
   jq -c '.' "$out/page.tmp" >> "$out/pages.stream"
   pages=$(jq -r '.page.total_pages' "$out/page.tmp")
