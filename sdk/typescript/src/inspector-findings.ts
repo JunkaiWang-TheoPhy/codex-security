@@ -187,30 +187,45 @@ function repositoryClaim(
   return { project: JSON.stringify([issuer, nativeId]), integration, provider };
 }
 
-function checkReportScope(
-  rows: unknown[],
-  source: string,
-  target?: ExternalImportTarget,
-): string | undefined {
-  const projects = new Set<string>();
-  const integrations = new Set<string>();
-  const providers = new Set<string>();
-  for (const row of rows) {
-    if (!isRecord(row) || !Array.isArray(row["resources"])) continue;
+class InspectorReportScope {
+  private readonly projects = new Set<string>();
+  private readonly integrations = new Set<string>();
+  private readonly providers = new Set<string>();
+  readonly urls = new Set<string>();
+
+  include(row: unknown, source: string, target?: ExternalImportTarget): void {
+    if (!isRecord(row) || !Array.isArray(row["resources"])) return;
+    this.urls.add(source);
     for (const resource of row["resources"]) {
       if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY")
         continue;
       const claim = repositoryClaim(row, resource, source, target);
-      projects.add(claim.project);
-      if (claim.integration) integrations.add(claim.integration);
-      if (claim.provider) providers.add(claim.provider);
-      if (projects.size > 1 || integrations.size > 1 || providers.size > 1)
+      this.projects.add(claim.project);
+      if (claim.integration) this.integrations.add(claim.integration);
+      if (claim.provider) this.providers.add(claim.provider);
+      if (
+        this.projects.size > 1 ||
+        this.integrations.size > 1 ||
+        this.providers.size > 1
+      )
         throw new Error(
           "Inspector export identifies more than one repository project or integration.",
         );
     }
   }
-  return providers.values().next().value;
+  get provider(): string | undefined {
+    return this.providers.values().next().value;
+  }
+}
+
+function checkReportScope(
+  rows: unknown[],
+  source: string,
+  target?: ExternalImportTarget,
+): string | undefined {
+  const scope = new InspectorReportScope();
+  for (const row of rows) scope.include(row, source, target);
+  return scope.provider;
 }
 
 function selectedFinding(value: unknown): Native {
@@ -298,26 +313,18 @@ export function inspectorReportRepositories(
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
 ): ExternalSourceRepository[] {
-  const groups = new Map<
-    string,
-    { source: string; urls: Set<string>; rows: unknown[] }
-  >();
+  const groups = new Map<string, InspectorReportScope>();
   for (const { evidence } of findings) {
     const data = evidence.source_data;
     if (!isRecord(data) || data["format"] !== format) continue;
     const source = repositoryUrl(data["sourceRepositoryUrl"]);
     const key = cloudRepositoryUrlKey(source);
-    const group = groups.get(key) ?? {
-      source,
-      urls: new Set<string>(),
-      rows: [],
-    };
-    group.urls.add(source);
-    group.rows.push(selectedFinding(data["finding"]));
+    const group = groups.get(key) ?? new InspectorReportScope();
+    group.include(selectedFinding(data["finding"]), source, target);
     groups.set(key, group);
   }
-  return [...groups.values()].flatMap(({ source, urls, rows }) => {
-    const github = checkReportScope(rows, source, target) === "GITHUB";
+  return [...groups.values()].flatMap(({ urls, provider }) => {
+    const github = provider === "GITHUB";
     return [...urls].map((url) =>
       github ? { url, platform: "github" as const } : { url },
     );

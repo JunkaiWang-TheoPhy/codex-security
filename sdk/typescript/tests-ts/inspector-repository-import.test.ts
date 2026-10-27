@@ -113,6 +113,10 @@ test("an omitted Inspector provider cannot erase a known platform or disguise co
         } else {
           expect((await file()).preview.findings).toHaveLength(2);
           expect((await normalized()).preview.findings).toHaveLength(2);
+          const knownIndex = rows.indexOf(known);
+          records[knownIndex]!.evidence.source_data!["sourceRepositoryUrl"] =
+            "https://git.example.test/EXAMPLE/Project";
+          expect((await normalized()).preview.findings).toHaveLength(2);
         }
       }
     }
