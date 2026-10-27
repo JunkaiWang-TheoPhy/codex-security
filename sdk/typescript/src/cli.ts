@@ -4681,7 +4681,7 @@ export async function main(
     })
     .command("review-events", {
       description: "Review a JSON batch of service audit events from stdin.",
-      hint: "Pipe a version 1 batch into review-events --json. Use --screen-with-decisions to screen related events before a full review.",
+      hint: "Pipe native CloudTrail JSON, an OCSF event, or a version 1 batch into review-events --json. Use --screen-with-decisions to screen related events before a full review.",
       mcp: false,
       alias: { config: "c" },
       options: z.object({

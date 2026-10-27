@@ -1863,44 +1863,38 @@ Options also include `projectId`, `linearApiKey`, and `assigneeId` (ID or email)
 
 ## Review audit events
 
-Review one version 1 JSON batch from stdin. The caller groups related events from a single source and supplies earlier events as context. A group can span polling windows. Each observation must cite a new event from its own group.
+Review native CloudTrail JSON (a record or a `{"Records": [...]}` export), an OCSF
+record, or a version 1 batch from stdin. No event translation is required. The optional
+batch envelope groups related events and supplies earlier events as context. Each
+observation must cite a new event from its own group.
 
 ```sh
-codex-security review-events --json < batch.json
-codex-security review-events --screen-with-decisions --cyber-access-program daybreak_blue --json < batch.json
+codex-security review-events --json < cloudtrail.json
+codex-security review-events --json < ocsf.json
+codex-security review-events --screen-with-decisions --json < batch.json
 ```
 
-```json
-{
-  "schemaVersion": 1,
-  "source": "example-trail",
-  "serviceContext": "Deploy sessions normally read build artifacts.",
-  "groups": [
-    {
-      "id": "deploy-session",
-      "contextEvents": [
-        {
-          "id": "login",
-          "timestamp": "2026-01-01T12:04:00Z",
-          "actor": "deploy",
-          "action": "AssumeRole"
-        }
-      ],
-      "events": [
-        {
-          "id": "grant",
-          "timestamp": "2026-01-01T12:06:00Z",
-          "actor": "deploy",
-          "action": "AttachRolePolicy",
-          "outcome": "success"
-        }
-      ]
-    }
-  ]
-}
-```
+CloudTrail 1.x records retain `eventID`, `eventTime`, `eventSource`, `eventName`, and
+all other native fields. OCSF 1.x.y records retain `metadata.version`, `class_uid`,
+`activity_id`, `type_uid`, `time` (Unix milliseconds), and all other native fields.
+These common fields are checked for review; this is not full upstream schema validation.
+See the [runnable synthetic examples](../../../examples/audit-events/README.md), including
+CloudTrail 1.11 and OCSF 1.1.0 API Activity (the version used by Security Lake source v2).
 
-Each event requires an `id`, ISO timestamp with a time zone, and `action`. Optional fields are `actor`, `resource`, `outcome`, and a JSON object named `details`. Each group has a unique ID and an array of new `events`. The optional `contextEvents` array holds prior evidence. IDs must identify distinct records within a group.
+The optional envelope remains `{schemaVersion: 1, source, serviceContext?, groups}`.
+Each group has a unique `id`, an `events` array of unchanged native records, and an
+optional `contextEvents` array of earlier records. A bare record or CloudTrail export
+uses group `events` and source `aws.cloudtrail` or `ocsf`.
+
+Citations use CloudTrail `eventID` or OCSF `metadata.uid`. Without an OCSF UID, they
+use `sha256:` plus the SHA-256 of JSON with recursively sorted object keys, retaining
+array order. Identical UID-less records share a citation; enrichment changes it.
+The model receives parallel `eventReferences` arrays, leaving records unchanged.
+Citation IDs must be unique across new and historical events within a group.
+
+Legacy custom records (`id`, ISO `timestamp`, `action`, optional `actor`, `resource`,
+`outcome`, `details`) remain accepted inside the envelope. JSONL describes transport,
+not the schema of an event.
 
 By default each nonempty group gets one read-only Codex review using your configured Codex authentication, including a ChatGPT sign-in. **Decisions screening requires an OpenAI API key in `OPENAI_API_KEY`.** Signing in to Codex with ChatGPT alone cannot authenticate the Decisions API call. This applies to both single-batch and live reviews.
 
@@ -1926,10 +1920,10 @@ The TypeScript package exports the same operation and Zod schemas.
 ```ts
 import {
   reviewSecurityEvents,
-  securityEventBatchSchema,
+  securityEventInputSchema,
 } from "@openai/codex-security";
 
-const batch = securityEventBatchSchema.parse(input);
+const batch = securityEventInputSchema.parse(input);
 const result = await reviewSecurityEvents(batch, {
   screenWithDecisions: true,
   decisionsCutoff: 0.98,

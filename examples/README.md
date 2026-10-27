@@ -46,3 +46,5 @@ expected contents.
 
 The bundled plugin's own example artifacts are separate and remain part of the
 package.
+
+- [Native audit events](audit-events/): CloudTrail JSON, OCSF, and optional grouping/history.
