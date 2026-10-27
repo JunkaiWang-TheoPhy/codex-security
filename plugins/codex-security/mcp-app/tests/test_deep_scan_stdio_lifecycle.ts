@@ -1745,7 +1745,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
     } else {
       writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
     }
-    console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: JSON.stringify({ status: 'completed', reason: '' }) } }));
+    console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
     console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
     process.exit(0);
   }

@@ -34,11 +34,6 @@ import {
 import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import {
-  parseWorkerOutcome,
-  workerOutcomeInstructions,
-  workerOutcomeOutputSchema,
-} from "./worker-outcome.js";
-import {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
@@ -287,16 +282,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
 
       try {
-        const discovery = request.kind === "discovery";
-        const { events } = await thread.runStreamed(
-          discovery ? `${input}\n\n${workerOutcomeInstructions}` : input,
-          {
-            signal: controller.signal,
-            cyberAccessProgram:
-              parentProgram ?? runtimeSettings.cyberAccessProgram,
-            ...(discovery ? { outputSchema: workerOutcomeOutputSchema } : {}),
-          },
-        );
+        const { events } = await thread.runStreamed(input, {
+          signal: controller.signal,
+          cyberAccessProgram:
+            parentProgram ?? runtimeSettings.cyberAccessProgram,
+        });
         const diagnostics: CodexWorkerDiagnostic[] = [];
         const turn = await readCodexSessionTurn({
           thread,
@@ -341,9 +331,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           threadId: turn.threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
-          ...(discovery
-            ? { outcome: parseWorkerOutcome(turn.finalResponse) }
-            : {}),
         };
       } finally {
         request.signal.removeEventListener("abort", forwardAbort);

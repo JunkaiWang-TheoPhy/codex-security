@@ -1,6 +1,5 @@
 import type { DeepReducerContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
-import type { CodexWorkerOutcome } from "./worker-outcome.js";
 import type { z } from "zod";
 import type {
   configSchema,
@@ -90,8 +89,6 @@ export interface CodexWorkerRequest {
 export interface CodexWorkerResult {
   threadId?: string;
   diagnostics?: CodexWorkerDiagnostic[];
-  /** Discovery audit outcome, separate from successful turn transport. */
-  outcome?: CodexWorkerOutcome;
 }
 
 /** SDK failure diagnostics retained alongside artifact-validation failures. */

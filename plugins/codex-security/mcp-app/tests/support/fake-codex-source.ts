@@ -118,9 +118,7 @@ if (stdin.includes('ARTIFACT_TOOL_')) {
   const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
-const outcome = { status: stdin.includes('DISCOVERY_OUTCOME_BLOCKED') ? 'blocked' : 'completed', reason: stdin.includes('DISCOVERY_OUTCOME_BLOCKED') ? 'Source access was rejected before review.' : '' };
-const finalResponse = stdin.includes('DISCOVERY_OUTCOME_INVALID') ? '{invalid' : process.argv.includes('--output-schema') ? JSON.stringify(outcome) : 'fixture final response';
-console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: finalResponse } }));
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }

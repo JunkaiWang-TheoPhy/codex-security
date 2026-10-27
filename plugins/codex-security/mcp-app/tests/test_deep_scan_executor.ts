@@ -60,7 +60,6 @@ import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_al
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
-import { testDiscoveryOutcome } from "./deep_scan_worker_outcome_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const { bundledCodexSdkEnvironment } =
@@ -113,19 +112,6 @@ const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 
 try {
-  await test("Deep worker outcome", async (t) => {
-    await check(
-      t,
-      () =>
-        testDiscoveryOutcome({
-          withWorkerFixture,
-          runWorker,
-          assertReadOnlyWorkerPolicy,
-        }),
-      "discovery outcome",
-    );
-  });
-
   await test("Deep worker lifecycle", async (t) => {
     await check(t, testWorkerCancellation);
     await check(t, testWorkerTerminalEvents);
@@ -1072,7 +1058,7 @@ async function testSdkInvocationAndThreadCapture() {
     const callbackThreadId = onThreadId.mock.calls.at(-1)?.arguments[0];
     assert.equal(callbackThreadId, "fixture-thread-id");
     const invocation = await readJson(fixture.markerPath);
-    assert.ok(invocation.stdin.startsWith("fixture worker prompt\n"));
+    assert.equal(invocation.stdin, "fixture worker prompt\n");
     assert.equal(
       invocation.originator,
       process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE || "codex_sdk_ts",
@@ -3072,7 +3058,7 @@ async function testSdkResumesExistingThread() {
     assertConfigOverrides(invocation.argv, { model_reasoning_effort: "ultra" });
     assertReadOnlyWorkerPolicy(invocation.argv);
     assertWorkerSubagentPolicy(invocation.argv, 3);
-    assert.ok(invocation.stdin.startsWith("continue the existing worker\n"));
+    assert.equal(invocation.stdin, "continue the existing worker\n");
   });
 }
 
@@ -3812,7 +3798,7 @@ async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
           !error.message.includes("did not run"),
       );
       const invocation = await readJson(fixture.markerPath);
-      assert.ok(invocation.stdin.startsWith(`${marker}\n`));
+      assert.equal(invocation.stdin, `${marker}\n`);
     });
   }
 }
