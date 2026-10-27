@@ -102,12 +102,12 @@ imports require no Black Duck or Codex Cloud login. To publish, select an
 authorized GitHub repository with `--to cloud` on a deployment that accepts
 the `blackduck` source provider.
 
-| Source evidence | What Codex Security tracks |
-| --- | --- |
-| Project version, component version/origin, advisory source and name | A package vulnerability occurrence. Different origins and advisories must not collapse into a CVE-only record. |
-| Component name and version | The reported component and installed version. A Black Duck project version is not a Git commit. |
-| Vendor severity and remediation status | Unassessed source evidence. A status such as `MITIGATED` is not a verified fix, a fixed package version, or a reason to delete the finding. |
-| Matched-files link and BOM metadata | Raw evidence. The importer does not follow links, fabricate file/line locations, or infer reachability from BOM membership. |
+| Source evidence                                                     | What Codex Security tracks                                                                                                                  |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Project version, component version/origin, advisory source and name | A package vulnerability occurrence. Different origins and advisories must not collapse into a CVE-only record.                              |
+| Component name and version                                          | The reported component and installed version. A Black Duck project version is not a Git commit.                                             |
+| Vendor severity and remediation status                              | Unassessed source evidence. A status such as `MITIGATED` is not a verified fix, a fixed package version, or a reason to delete the finding. |
+| Matched-files link and BOM metadata                                 | Raw evidence. The importer does not follow links, fabricate file/line locations, or infer reachability from BOM membership.                 |
 
 Replaying an occurrence retains its identity; changed evidence updates it.
 NVD and Black Duck advisories are not published by the target repository.
