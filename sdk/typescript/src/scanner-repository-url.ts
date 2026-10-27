@@ -1,3 +1,4 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import { requiredText } from "./scanner-import.js";
 
 function repositorySegment(encoded: string): boolean {
@@ -17,6 +18,7 @@ function repositorySegment(encoded: string): boolean {
 export function declaredScannerRepositoryUrl(
   value: unknown,
   provider: string,
+  target: ExternalImportTarget = "cloud",
 ): string {
   const source = requiredText(value, `${provider} --source-repository-url`);
   const url = URL.parse(source);
@@ -29,11 +31,11 @@ export function declaredScannerRepositoryUrl(
     /[\s\p{Cc}]/u.test(source) ||
     url.username ||
     url.password ||
-    segments.length < 2 ||
+    segments.length < (target === "local" ? 1 : 2) ||
     !segments.every(repositorySegment)
   )
     throw new Error(
-      `${provider} --source-repository-url requires an HTTP(S) namespace/repository path without credentials, query, fragment, or ambiguous path segments.`,
+      `${provider} --source-repository-url requires an HTTP(S) repository path without credentials, query, fragment, or ambiguous path segments.`,
     );
   return source;
 }

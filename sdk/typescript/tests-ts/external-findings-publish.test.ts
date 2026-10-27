@@ -49,6 +49,7 @@ import {
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import {
   blackDuckBomReport,
   blackDuckBomRow,
@@ -1004,6 +1005,44 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     prepareExternalPublication(foreign.file, selected, foreign.deps),
   ).rejects.toThrow(/does not match/i);
   expect(foreign.posts).toHaveLength(0);
+  const native = normalizeBlackDuckFindings(
+    report,
+    selected.sourceRepositoryUrl,
+  );
+  const mixed = structuredClone(native);
+  mixed.findings.push(
+    ...normalizeBlackDuckFindings(
+      [blackDuckBomRow(undefined, "release-b")],
+      selected.sourceRepositoryUrl,
+    ).findings,
+  );
+  mixed.read = mixed.findings.length;
+  await expect(
+    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
+  ).rejects.toThrow(/same project version/);
+  await expect(
+    prepareNormalizedExternalPublication(
+      native,
+      { ...selected, provider: "wiz" },
+      foreign.deps,
+    ),
+  ).rejects.toThrow(/requires the blackduck provider/);
+  const stripped = structuredClone(native);
+  delete stripped.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(stripped, selected, foreign.deps),
+  ).rejects.toThrow(/retained Black Duck/);
+  const normalized = structuredClone(native);
+  normalized.findings[0]!.source_finding_id = "sdk-id";
+  normalized.findings[0]!.evidence.source_data = {
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+    projectVersionUrl: "https://scanner.example.test/dashboard/version",
+  };
+  await prepareNormalizedExternalPublication(
+    normalized,
+    selected,
+    correct.deps,
+  );
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

@@ -119,7 +119,7 @@ export async function readExternalFindings(
   if (boundReader) {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: await boundReader.read(path, url, target),
+      findings: await boundReader(path, url, target),
       sourceRepositories: [{ url }],
     };
   }

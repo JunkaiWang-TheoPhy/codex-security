@@ -44,12 +44,13 @@ test("retains the complete BOM row, project version and caller's repository, not
   expect(result.excluded).toEqual([]);
   const evidence = result.findings[0]!.evidence;
   expect(evidence).toMatchObject({
+    title: "BDSA-2099-0001 in Example Library",
     severity: "high",
     description: "Vendor description",
-    advisory_ids: ["BDSA-2099-0001"],
+    advisory_ids: ["BDSA-2099-0001", "CVE-2099-1000"],
     packages: [
       {
-        name: "Example Library",
+        name: "example:library",
         ecosystem: "maven",
         installed_version: "1.0",
         fixed_versions: [],
@@ -60,6 +61,7 @@ test("retains the complete BOM row, project version and caller's repository, not
     source_updated_at: null,
   });
   expect(evidence.source_data).toEqual({
+    format: "blackduck-bom-6",
     sourceRepositoryUrl: repository,
     projectVersionUrl:
       "https://scanner.example.test/api/projects/project-a/versions/release-a",
@@ -75,6 +77,49 @@ test("retains the complete BOM row, project version and caller's repository, not
   ]);
   row.vulnerabilityWithRemediation.extension.values.push(99);
   expect(evidence.source_data?.["row"]).toEqual(original);
+});
+
+test("replay keeps native occurrence identity when package coordinates and advisory aliases change", () => {
+  const row = blackDuckBomRow();
+  const original = normalizeBlackDuckFindings([row], repository).findings[0]!;
+  expect(original.evidence.packages).toMatchObject([
+    { name: "example:library", ecosystem: "maven", installed_version: "1.0" },
+  ]);
+  const updated = {
+    ...row,
+    componentName: "Renamed library",
+    componentVersionOriginName: "npmjs",
+    componentVersionOriginId: "@example/library/2.0",
+    vulnerabilityWithRemediation: {
+      ...row.vulnerabilityWithRemediation,
+      relatedVulnerability: row.vulnerabilityWithRemediation.vulnerabilityName,
+    },
+  };
+  const replay = normalizeBlackDuckFindings([updated], repository).findings[0]!;
+  expect(replay.source_finding_id).toBe(original.source_finding_id);
+  expect(replay.evidence.advisory_ids).toEqual(["BDSA-2099-0001"]);
+  expect(replay.evidence.packages).toMatchObject([
+    { name: "@example/library", ecosystem: "npm", installed_version: "2.0" },
+  ]);
+  const purl = {
+    ...updated,
+    packageUrl: "pkg:npm/%40example/other@3.0?tag=preview#dist",
+  };
+  expect(
+    normalizeBlackDuckFindings([purl], repository).findings[0]!.evidence
+      .packages,
+  ).toMatchObject([
+    { name: "@example/other", ecosystem: "npm", installed_version: "3.0" },
+  ]);
+  const opaque = {
+    ...updated,
+    componentVersionOriginName: "custom",
+    componentVersionOriginId: "opaque",
+  };
+  const finding = normalizeBlackDuckFindings([opaque], repository).findings[0]!;
+  expect(finding.source_finding_id).toBe(original.source_finding_id);
+  expect(finding.evidence.packages).toEqual([]);
+  expect(finding.evidence.source_data?.["row"]).toEqual(opaque);
 });
 
 test("adding or omitting an unrelated row and changing collection paging metadata do not version retained evidence", () => {
@@ -345,11 +390,21 @@ test("accepts a nested repository URL and retains it independently of the mutabl
   expect(() =>
     blackDuckEvidenceRepositoryUrls({ ...data, row: otherComponent }),
   ).toThrow(/contradicts/);
-  expect(() =>
+  // SDK callers may store project metadata without supplying a native BOM record.
+  expect(
     blackDuckEvidenceRepositoryUrls({
       projectVersionUrl: data?.["projectVersionUrl"],
     }),
-  ).toThrow(/source-repository-url/);
+  ).toEqual([]);
+  expect(
+    blackDuckEvidenceRepositoryUrls(
+      {
+        sourceRepositoryUrl: url,
+        projectVersionUrl: data?.["projectVersionUrl"],
+      },
+      "sdk-key",
+    ),
+  ).toEqual([url]);
   expect(blackDuckEvidenceRepositoryUrls({ arbitrary: "value" })).toEqual([]);
   expect(blackDuckEvidenceRepositoryUrls(undefined)).toEqual([]);
   expect(() =>
@@ -388,11 +443,14 @@ test("normalized input cannot relabel one native occurrence with another finding
       second!.source_finding_id,
     ),
   ).toThrow();
-  expect(
+  expect(() =>
     blackDuckEvidenceRepositoryUrls(
       { arbitrary: true },
       second!.source_finding_id,
     ),
+  ).toThrow();
+  expect(
+    blackDuckEvidenceRepositoryUrls({ arbitrary: true }, "sdk-id"),
   ).toEqual([]);
 });
 
@@ -423,4 +481,75 @@ test("reads JSON and gzip by content and rejects a truncated collection in eithe
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("binds row remediation URLs to the project version, component version and origin", () => {
+  const row = blackDuckBomRow();
+  const matched = row._meta.links[0]!.href;
+  const href = matched.replace(
+    "/matched-files",
+    "/vulnerabilities/native-vulnerability-id/remediation",
+  );
+  const origin = {
+    rel: "vulnerabilities",
+    href: row.componentVersion + "/origin/origin-a/vulnerabilities",
+  };
+  const baseline = normalizeBlackDuckFindings([row], repository).findings[0]!
+    .source_finding_id;
+  for (const self of [href, href.replace("/origins/origin-a", "")]) {
+    const onlySelf = { ...row, _meta: { href: self, links: [origin] } };
+    expect(
+      normalizeBlackDuckFindings([onlySelf], repository).findings[0]!
+        .source_finding_id,
+    ).toBe(baseline);
+    expect(() =>
+      normalizeBlackDuckFindings(
+        {
+          ...blackDuckBomReport(),
+          items: [
+            {
+              ...row,
+              _meta: {
+                href: self.replace("release-a", "release-b"),
+                links: [origin],
+              },
+            },
+          ],
+        },
+        repository,
+      ),
+    ).toThrow(/same project version/);
+  }
+  for (const [from, to] of [
+    ["component-a", "component-b"],
+    ["origin-a", "origin-b"],
+  ] as const) {
+    const conflicting = {
+      ...row,
+      _meta: { href: href.replace(from, to), links: row._meta.links },
+    };
+    expect(
+      normalizeBlackDuckFindings([conflicting], repository).excluded,
+    ).toHaveLength(1);
+  }
+  const componentLink = {
+    rel: "matched-files",
+    href: matched.replace("/origins/origin-a", ""),
+  };
+  const partial = { ...row, _meta: { links: [componentLink] } };
+  expect(
+    normalizeBlackDuckFindings(
+      { ...blackDuckBomReport(), items: [row, partial], totalCount: 2 },
+      repository,
+    ),
+  ).toMatchObject({
+    findings: [{ source_finding_id: baseline }],
+    excluded: [{ position: 2 }],
+  });
+  expect(
+    normalizeBlackDuckFindings(
+      [{ ...partial, _meta: { links: [componentLink, origin] } }],
+      repository,
+    ).findings[0]!.source_finding_id,
+  ).toBe(baseline);
 });

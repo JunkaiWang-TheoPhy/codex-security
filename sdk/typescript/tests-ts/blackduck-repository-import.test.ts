@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
@@ -14,7 +15,7 @@ import {
 } from "./support/blackduck-import-fixtures.js";
 
 test("Black Duck keeps package occurrences unassessed across replay, mitigation, and missing rows", async () => {
-  const sourceRepositoryUrl = "https://github.com/example/project";
+  const sourceRepositoryUrl = "https://git.example.test/project.git";
   const fixture = await localFindingsFixture({ remote: sourceRepositoryUrl });
   try {
     const path = join(fixture.root, "vulnerable-components.json.gz");
@@ -69,6 +70,17 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
         dependencies,
       ),
     ).rejects.toThrow(/remote|repository/i);
+    const mixed = structuredClone(first.preview);
+    mixed.findings.push(
+      ...normalizeBlackDuckFindings(
+        [blackDuckBomRow(undefined, "release-b")],
+        sourceRepositoryUrl,
+        "local",
+      ).findings,
+    );
+    await expect(
+      prepareNormalizedLocalImport(mixed, options, dependencies),
+    ).rejects.toThrow(/same project version/);
     const altered = structuredClone(first.preview);
     altered.findings[0]!.evidence.details = {
       kind: "sast",

@@ -1,8 +1,14 @@
 import {
   type ExternalImportTarget,
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -16,43 +22,97 @@ import {
 
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
-export function blackDuckEvidenceRepositoryUrls(
-  sourceData: unknown,
-  expectedSourceFindingId?: string,
-): string[] {
-  if (!isRecord(sourceData)) return [];
-  const row = sourceData["row"];
-  const recognized =
-    "projectVersionUrl" in sourceData ||
-    (isRecord(row) && "vulnerabilityWithRemediation" in row) ||
-    ("componentVersion" in sourceData &&
-      "vulnerabilityWithRemediation" in sourceData);
-  if (!("sourceRepositoryUrl" in sourceData) && !recognized) return [];
-  const repository = declaredScannerRepositoryUrl(
-    sourceData["sourceRepositoryUrl"],
-    "Black Duck",
+const format = "blackduck-bom-6";
+const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
+
+export function hasBlackDuckEvidence(data: unknown): boolean {
+  if (!isRecord(data)) return false;
+  const row = data["row"];
+  return (
+    data["format"] === format ||
+    ("vulnerabilityWithRemediation" in data && "componentVersion" in data) ||
+    (isRecord(row) &&
+      "vulnerabilityWithRemediation" in row &&
+      "componentVersion" in row)
   );
-  if (recognized) {
-    const resource = apiResource(
-      sourceData["projectVersionUrl"],
-      "retained project-version URL",
+}
+
+function retainedRepository(
+  data: unknown,
+  id: string | undefined,
+  target: ExternalImportTarget,
+): { url: string; projectVersion?: string } | undefined {
+  const native =
+    hasBlackDuckEvidence(data) || (id !== undefined && nativeId.test(id));
+  if (native && (!isRecord(data) || !isRecord(data["row"])))
+    throw new Error("Expected retained Black Duck BOM occurrence evidence.");
+  if (!isRecord(data) || (!native && !("sourceRepositoryUrl" in data))) return;
+  const url = declaredScannerRepositoryUrl(
+    data["sourceRepositoryUrl"],
+    "Black Duck",
+    target,
+  );
+  if (!native) return { url };
+  const resource = apiResource(
+    data["projectVersionUrl"],
+    "retained project-version URL",
+  );
+  if (
+    !/^projects\/[^/]+\/versions\/[^/]+$/u.test(resource.path) ||
+    resource.query.size
+  )
+    throw new Error("Invalid retained Black Duck project-version URL.");
+  const projectVersion = `${resource.base}/${resource.path}`;
+  const actual = occurrenceId(
+    scopedRow(data["row"], projectVersion, false),
+    projectVersion,
+  );
+  if (id !== undefined && id !== actual)
+    throw new Error(
+      "Black Duck source finding ID contradicts the retained native occurrence.",
     );
-    if (
-      !/^projects\/[^/]+\/versions\/[^/]+$/u.test(resource.path) ||
-      resource.query.size
-    )
-      throw new Error("Invalid retained Black Duck project-version URL.");
-    const scope = `${resource.base}/${resource.path}`;
-    const actual = occurrenceId(scopedRow(row, scope, false), scope);
-    if (
-      expectedSourceFindingId !== undefined &&
-      expectedSourceFindingId !== actual
-    )
+  return { url, projectVersion };
+}
+
+export function blackDuckEvidenceRepositoryUrls(
+  data: unknown,
+  id?: string,
+  target: ExternalImportTarget = "cloud",
+): string[] {
+  const retained = retainedRepository(data, id, target);
+  return retained ? [retained.url] : [];
+}
+
+export function blackDuckReportRepositories(
+  findings: readonly ExternalFinding[],
+  target: ExternalImportTarget,
+): Map<string, ExternalSourceRepository> {
+  const repositories = new Map<string, ExternalSourceRepository>();
+  const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  let scope: string | undefined;
+  let repository: string | undefined;
+  for (const { source_finding_id: id, evidence } of findings) {
+    const retained = retainedRepository(evidence.source_data, id, target);
+    if (!retained) continue;
+    if (retained.projectVersion) {
+      if (
+        scope &&
+        (scope !== retained.projectVersion || repository !== key(retained.url))
+      )
+        throw new Error(
+          "Black Duck occurrences must belong to the same project version and source repository.",
+        );
+      scope = retained.projectVersion;
+      repository = key(retained.url);
+    }
+    const declared = evidence.details?.repository?.url;
+    if (declared && key(declared) !== key(retained.url))
       throw new Error(
-        "Black Duck source finding ID contradicts the retained native occurrence.",
+        "Retained scanner repository does not match the normalized evidence repository.",
       );
+    repositories.set(id, { url: retained.url });
   }
-  return [repository];
+  return repositories;
 }
 
 function apiResource(href: unknown, label: string) {
@@ -109,18 +169,18 @@ function collectionScope(collection: Record<string, unknown>) {
   return `${resource.base}/projects/${project[1]}/versions/${project[2]}`;
 }
 
-function matchedFile(href: unknown) {
-  const resource = apiResource(href, "matched-files link");
-  const match =
-    /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)\/origins\/([^/]+)\/matched-files$/u.exec(
-      resource.path,
-    );
-  if (!match)
-    throw new Error("Invalid Black Duck project-version matched-files link.");
+function projectReference(href: unknown, remediation: boolean) {
+  const label = remediation ? "remediation URL" : "matched-files link";
+  const resource = apiResource(href, label);
+  const path = remediation
+    ? /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)(?:\/origins\/([^/]+))?\/vulnerabilities\/[^/]+\/remediation$/u
+    : /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)(?:\/origins\/([^/]+))?\/matched-files$/u;
+  const match = path.exec(resource.path);
+  if (!match) throw new Error(`Invalid Black Duck project-version ${label}.`);
   return {
     scope: `${resource.base}/${match[1]}`,
     component: `${resource.base}/${match[2]}`,
-    origin: match[3]!,
+    origin: match[3],
   };
 }
 
@@ -129,13 +189,16 @@ function scopedRow(
   scope: string | undefined,
   selected: boolean,
 ) {
-  const metadata = isRecord(value) ? links(value["_meta"]) : [];
+  const meta = isRecord(value) ? value["_meta"] : undefined;
+  const metadata = links(meta);
   const matched = metadata
     .filter((link) => link["rel"] === "matched-files")
-    .map((link) => matchedFile(link["href"]));
+    .map((link) => projectReference(link["href"], false));
+  if (isRecord(meta) && meta["href"] !== undefined)
+    matched.push(projectReference(meta["href"], true));
   if (selected && !matched.length)
     throw new Error(
-      "Each selected Black Duck row must identify its project version with a matched-files link.",
+      "Each selected Black Duck row must identify its project version with a remediation or matched-files link.",
     );
   for (const reference of matched) {
     if (scope !== undefined && scope !== reference.scope)
@@ -170,9 +233,9 @@ function occurrenceId(
   for (const reference of matched) {
     if (reference.component !== component)
       throw new Error(
-        "Black Duck matched-files link contradicts componentVersion.",
+        "Black Duck project-version link contradicts componentVersion.",
       );
-    origins.add(reference.origin);
+    if (reference.origin) origins.add(reference.origin);
   }
   for (const link of metadata.filter(
     (entry) => entry["rel"] === "vulnerabilities",
@@ -204,14 +267,81 @@ function occurrenceId(
     projectVersion,
     component,
     origin,
-    requiredText(row["componentVersionOriginName"], "Black Duck origin name"),
-    requiredText(row["componentVersionOriginId"], "Black Duck origin ID"),
     source,
     requiredText(
       vulnerability["vulnerabilityName"],
       "Black Duck vulnerability name",
     ),
   ]);
+}
+
+const nameVersionForges = new Map([
+  ["npmjs", "npm"],
+  ["pypi", "pypi"],
+  ["nuget", "nuget"],
+  ["rubygems", "gem"],
+  ["crates", "cargo"],
+]);
+
+function blackDuckPackages(row: Record<string, unknown>) {
+  const version = text(row["componentVersionName"]);
+  const purl =
+    /^pkg:([a-z][a-z0-9.+-]*)\/([^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
+      text(row["packageUrl"]) ?? "",
+    );
+  if (purl) {
+    try {
+      const ecosystem = purl[1]!.toLowerCase();
+      const parts = purl[2]!.split("/").map(decodeURIComponent);
+      const name = parts.pop()!;
+      const installed_version = purl[3] ? decodeURIComponent(purl[3]) : version;
+      if (name && !parts.includes("")) {
+        if (ecosystem === "maven" && parts.length === 1)
+          return [
+            { name: `${parts[0]}:${name}`, ecosystem, installed_version },
+          ];
+        if (
+          ecosystem === "npm" &&
+          parts.length === 1 &&
+          parts[0]!.startsWith("@")
+        )
+          return [
+            { name: `${parts[0]}/${name}`, ecosystem, installed_version },
+          ];
+        if (parts.length === 0 && ecosystem !== "maven")
+          return [{ name, ecosystem, installed_version }];
+      }
+    } catch {
+      // A malformed escape does not invalidate the native origin coordinate.
+    }
+  }
+
+  const origin = text(row["componentVersionOriginName"])?.toLowerCase();
+  const id = text(row["componentVersionOriginId"]) ?? "";
+  if (origin === "maven") {
+    const coordinate = /^([^:\s/]+:[^:\s/]+):([^:\s/]+)$/u.exec(id);
+    if (coordinate)
+      return [
+        {
+          name: coordinate[1]!,
+          ecosystem: origin,
+          installed_version: coordinate[2]!,
+        },
+      ];
+  }
+  const ecosystem = nameVersionForges.get(origin ?? "");
+  if (ecosystem) {
+    const coordinate = /^(?:(@[^/\s]+)\/)?([^/\s]+)\/([^/\s]+)$/u.exec(id);
+    if (coordinate && (!coordinate[1] || ecosystem === "npm"))
+      return [
+        {
+          name: id.slice(0, id.lastIndexOf("/")),
+          ecosystem,
+          installed_version: coordinate[3]!,
+        },
+      ];
+  }
+  return [];
 }
 
 export function normalizeBlackDuckFindings(
@@ -222,6 +352,7 @@ export function normalizeBlackDuckFindings(
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Black Duck",
+    target,
   );
   const selected = Array.isArray(input);
   let scope: string | undefined;
@@ -265,6 +396,7 @@ export function normalizeBlackDuckFindings(
         "Black Duck component name",
       );
       const severity = text(vulnerability["severity"])?.toLowerCase();
+      const related = text(vulnerability["relatedVulnerability"]);
       return {
         source_finding_id: id,
         evidence: validateExternalEvidence(
@@ -276,15 +408,13 @@ export function normalizeBlackDuckFindings(
               ["critical", "high", "medium", "low"].includes(severity)
                 ? severity
                 : "unknown",
-            advisory_ids: [advisory],
-            packages: [
-              {
-                name,
-                ecosystem: text(row["componentVersionOriginName"]),
-                installed_version: text(row["componentVersionName"]),
-              },
-            ],
+            advisory_ids:
+              related && related !== advisory
+                ? [advisory, related]
+                : [advisory],
+            packages: blackDuckPackages(row),
             source_data: structuredClone({
+              format,
               sourceRepositoryUrl: repository,
               projectVersionUrl: projectVersion,
               row,
