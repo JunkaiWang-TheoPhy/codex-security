@@ -56,6 +56,11 @@ export type {
   SecurityEventBatch,
   SecurityEventReview,
 } from "./review-events.js";
+export {
+  monitorSecurityEvents,
+  type MonitorSecurityEventsOptions,
+  type LiveSecurityEventReview,
+} from "./monitor-events.js";
 export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {

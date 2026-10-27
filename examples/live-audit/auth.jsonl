@@ -1,0 +1,4 @@
+{"source":"example-auth","session":"deploy-1","id":"login","timestamp":"2026-01-01T12:00:00Z","actor":"deploy","action":"AssumeRole","outcome":"success"}
+{"source":"example-auth","session":"deploy-1","id":"read","timestamp":"2026-01-01T12:01:00Z","actor":"deploy","action":"ReadArtifact","outcome":"success"}
+{"source":"example-auth","session":"deploy-1","id":"grant","timestamp":"2026-01-01T12:02:00Z","actor":"deploy","action":"AttachRolePolicy","outcome":"success"}
+{"source":"example-auth","session":"deploy-1","id":"end","timestamp":"2026-01-01T12:03:00Z","actor":"deploy","action":"EndSession","outcome":"success"}

@@ -89,6 +89,7 @@ const distModules = [
   "record",
   "remediation",
   "review-events",
+  "monitor-events",
   "request-metadata",
   "runtime",
   "scan-activity",

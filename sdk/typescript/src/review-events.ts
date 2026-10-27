@@ -166,6 +166,26 @@ async function screenEvents(
   return { choice: answer.choice, confidence: answer.confidence };
 }
 
+/** @internal */
+export function parseSecurityEventBatch(input: unknown): SecurityEventBatch {
+  const batch = securityEventBatchSchema.parse(input);
+  const { groups } = batch;
+  if (new Set(groups.map(({ id }) => id)).size !== groups.length) {
+    throw new CodexSecurityError(
+      "Event group IDs must be unique within the source batch.",
+    );
+  }
+  for (const group of groups) {
+    const events = [...group.events, ...(group.contextEvents ?? [])];
+    if (new Set(events.map(({ id }) => id)).size !== events.length) {
+      throw new CodexSecurityError(
+        `Event IDs must be unique within group ${group.id}.`,
+      );
+    }
+  }
+  return batch;
+}
+
 /** Review a batch once. The caller owns grouping, history, retry, and paging. */
 export function reviewSecurityEvents(
   batch: SecurityEventBatch,
@@ -186,20 +206,7 @@ export async function reviewSecurityEventsInternal(
     ReviewEventSettingsSchema.shape.decisions_cutoff.parse(
       options.decisionsCutoff,
     ) ?? DEFAULT_DECISIONS_CUTOFF;
-  const { groups, ...batch } = securityEventBatchSchema.parse(input);
-  if (new Set(groups.map(({ id }) => id)).size !== groups.length) {
-    throw new CodexSecurityError(
-      "Event group IDs must be unique within the source batch.",
-    );
-  }
-  for (const group of groups) {
-    const events = [...group.events, ...(group.contextEvents ?? [])];
-    if (new Set(events.map(({ id }) => id)).size !== events.length) {
-      throw new CodexSecurityError(
-        `Event IDs must be unique within group ${group.id}.`,
-      );
-    }
-  }
+  const { groups, ...batch } = parseSecurityEventBatch(input);
   const result: SecurityEventReview = {
     schemaVersion: 1,
     source: batch.source,

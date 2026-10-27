@@ -619,7 +619,9 @@ and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/example
 
 Use `review-events` or `reviewSecurityEvents()` to assess grouped service audit
 events. Add `--screen-with-decisions` to screen the evidence with the OpenAI
-Decisions API before spending a Codex review on a group. See the
+Decisions API before spending a Codex review on a group. To monitor JSONL stdin,
+use `review-events --live`. SDK consumers can iterate `monitorSecurityEvents()`
+with the same count and time thresholds. See the
 [batch format and SDK example](docs/cli.md#review-audit-events).
 
 ### Classify finding severity
