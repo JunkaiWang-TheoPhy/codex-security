@@ -52,7 +52,9 @@ requirement](https://docs.snyk.io/developer-tools/snyk-api/rest-api/about-the-re
 applies to requests that send data.
 
 **What is collected.** The SDK's `collectSnykIssues(options, dependencies?)`
-uses version `2024-10-15`. It reads the [selected project](https://docs.snyk.io/developer-tools/snyk-api/reference/projects)
+uses version `2026-03-25`, which supports coordinate state and
+[Code flows](https://docs.snyk.io/developer-tools/snyk-api/changelog).
+It reads the [selected project](https://docs.snyk.io/developer-tools/snyk-api/reference/projects)
 at `GET /rest/orgs/{org_id}/projects/{project_id}?expand=target` and checks its
 organization, [project type](https://docs.snyk.io/developer-tools/snyk-api/api-endpoints-index-and-tips/project-type-responses-from-the-api)
 and target. The repository claim is `relationships.target.data.attributes.url`.

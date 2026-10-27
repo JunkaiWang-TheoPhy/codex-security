@@ -138,7 +138,7 @@ export function snykRestFixture(
   );
   return {
     format: "snyk-rest-issues/v1",
-    apiVersion: "2024-10-15",
+    apiVersion: "2026-03-25",
     apiOrigin,
     product,
     organizationId,

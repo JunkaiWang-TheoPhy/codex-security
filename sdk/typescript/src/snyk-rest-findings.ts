@@ -25,7 +25,7 @@ import {
 import type { SnykFindingsReport } from "./snyk-findings.js";
 
 export const SNYK_REST_ISSUES_FORMAT = "snyk-rest-issues/v1";
-const apiVersion = "2024-10-15";
+const apiVersion = "2026-03-25";
 const defaultOrigin = "https://api.snyk.io";
 const origins = new Set([
   defaultOrigin,

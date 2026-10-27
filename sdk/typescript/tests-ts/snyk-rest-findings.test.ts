@@ -48,7 +48,7 @@ const env = {
   CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
   SNYK_TOKEN: "synthetic-token",
 };
-const version = "2024-10-15";
+const version = "2026-03-25";
 const path = `/rest/orgs/${organizationId}/issues`;
 
 function transport(...responses: unknown[]) {
@@ -126,6 +126,7 @@ test("collects only one region, org, project and Open Source issue type across J
   );
   const signal = new AbortController().signal;
   const report = await collectSnykIssues({ ...options, signal }, dependencies);
+  expect(report.apiVersion).toBe(version);
   expect(requests.map(({ url }) => url.pathname)).toEqual([
     `/rest/orgs/${organizationId}/projects/${projectId}`,
     path,
@@ -182,7 +183,11 @@ test("collects only one region, org, project and Open Source issue type across J
         fixed_versions: ["1.0.1"],
       },
     ],
-    source_data: { issue: primary, project: report.project },
+    source_data: {
+      apiVersion: version,
+      issue: primary,
+      project: report.project,
+    },
   });
   expect(normalized.findings[0]!.evidence.details).toBeUndefined();
   for (const origin of ["cli", "api"]) {
