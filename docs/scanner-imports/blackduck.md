@@ -12,8 +12,10 @@ or a global advisory catalog as repository findings.
 Use a read-only Black Duck SCA token and your deployment's API documentation.
 The project version's `vulnerable-components` relation resolves to
 `/api/projects/{projectId}/versions/{versionId}/vulnerable-bom-components`.
-Use the advertised BOM media type; the example uses
-`application/vnd.blackducksoftware.bill-of-materials-6+json`. The official
+Request **BOM-6**: `application/vnd.blackducksoftware.bill-of-materials-6+json`.
+Do not substitute BOM-8 or a generic inventory: those row shapes are not
+supported. If the deployment cannot serve BOM-6, stop rather than treating
+excluded rows as an empty vulnerability backlog. The official
 Python package is `blackduck`, not the Detect scan launcher. Fetching this
 collection does not start a scan. Treat the export as sensitive.
 
@@ -40,6 +42,7 @@ project = UUID(os.environ["BLACKDUCK_PROJECT_ID"])
 version = UUID(os.environ["BLACKDUCK_VERSION_ID"])
 url = f"{base}/api/projects/{project}/versions/{version}/vulnerable-bom-components"
 client = Client(base_url=base + "/", token=os.environ["BLACKDUCK_TOKEN"])
+client.session.max_redirects = 0
 headers = {"Accept": "application/vnd.blackducksoftware.bill-of-materials-6+json"}
 items = []
 seen = set()
@@ -75,6 +78,11 @@ snapshot: if a BOM is changing during collection, export again after the scan
 settles. A deliberately selected array of native rows is also supported when
 each row identifies the same project version. An array says nothing about the
 rest of the backlog.
+
+Use the canonical HTTPS deployment URL, not a redirector. The vendor client
+exchanges its API token for a bearer token before reading the collection.
+Disabling redirects on the entire session also protects that authentication
+exchange; disabling them on only the collection GET is not sufficient.
 
 ## Preview and repeat
 
