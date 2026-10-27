@@ -104,20 +104,22 @@ export function veracodeEvidenceRepositoryUrls(
   sourceData: unknown,
   expectedSourceFindingId?: string,
 ): string[] {
-  if (!isRecord(sourceData)) return [];
-  const row = sourceData["row"];
+  const data = isRecord(sourceData) ? sourceData : {};
+  const row = data["row"];
   const recognized =
-    "applicationUrl" in sourceData ||
+    /^veracode-static-policy:[a-f0-9]{64}$/u.test(
+      expectedSourceFindingId ?? "",
+    ) ||
     (isRecord(row) && "context_guid" in row) ||
-    ("context_guid" in sourceData && "issue_id" in sourceData);
-  if (!("sourceRepositoryUrl" in sourceData) && !recognized) return [];
+    ("context_guid" in data && "issue_id" in data);
+  if (!("sourceRepositoryUrl" in data) && !recognized) return [];
   const repository = declaredScannerRepositoryUrl(
-    sourceData["sourceRepositoryUrl"],
+    data["sourceRepositoryUrl"],
     "Veracode",
   );
   if (recognized) {
     const scope = applicationScope(
-      halUrl({ href: sourceData["applicationUrl"] }, "retained application"),
+      halUrl({ href: data["applicationUrl"] }, "retained application"),
     );
     const finding = record(row, "Veracode retained finding");
     const actual = occurrenceId(finding, scope);
@@ -132,7 +134,13 @@ export function veracodeEvidenceRepositoryUrls(
   return [repository];
 }
 
-function selection(url: URL, scope: Scope, number: number, size: number) {
+function selection(
+  url: URL,
+  scope: Scope,
+  number: number,
+  size: number,
+  rel: string,
+) {
   const match = /^\/appsec\/v2\/applications\/([^/]+)\/findings$/u.exec(
     url.pathname,
   );
@@ -169,7 +177,7 @@ function selection(url: URL, scope: Scope, number: number, size: number) {
     if (
       values.length
         ? values.length !== 1 || values[0] !== String(expected)
-        : key === "page" && number !== 0
+        : key === "page" && number !== 0 && rel !== "self"
     )
       throw new Error(`Veracode HAL ${key} does not match the declared page.`);
     query.delete(key);
@@ -180,7 +188,12 @@ function selection(url: URL, scope: Scope, number: number, size: number) {
 
 function readPage(input: unknown) {
   const document = record(input, "Veracode HAL findings page");
-  const embedded = record(document["_embedded"], "Veracode HAL _embedded");
+  const page = record(document["page"], "Veracode page metadata");
+  const total = integer(page["total_elements"], "page.total_elements");
+  const embedded =
+    document["_embedded"] === undefined && total === 0
+      ? { findings: [] }
+      : record(document["_embedded"], "Veracode HAL _embedded");
   if (
     document["error"] != null ||
     (document["status"] != null && document["status"] !== 200) ||
@@ -193,10 +206,8 @@ function readPage(input: unknown) {
       "Veracode returned an error, not a complete findings page.",
     );
   const rows = array(embedded["findings"], "Veracode _embedded.findings");
-  const page = record(document["page"], "Veracode page metadata");
   const number = integer(page["number"], "page.number");
   const size = integer(page["size"], "page.size", 1);
-  const total = integer(page["total_elements"], "page.total_elements");
   const pages = integer(page["total_pages"], "page.total_pages");
   if (
     !(pages === Math.ceil(total / size) || (total === 0 && pages === 1)) ||
@@ -206,7 +217,13 @@ function readPage(input: unknown) {
     throw new Error("Incomplete or inconsistent Veracode HAL page counts.");
   const links = record(document["_links"], "Veracode HAL _links");
   const scope = applicationScope(halUrl(links["application"], "application"));
-  const query = selection(halUrl(links["self"], "self"), scope, number, size);
+  const query = selection(
+    halUrl(links["self"], "self"),
+    scope,
+    number,
+    size,
+    "self",
+  );
   const filter = query.toString();
   const positions: Record<string, number> = {
     first: 0,
@@ -222,7 +239,7 @@ function readPage(input: unknown) {
       if (
         position < 0 ||
         position >= Math.max(1, pages) ||
-        selection(halUrl(link, rel), scope, position, size).toString() !==
+        selection(halUrl(link, rel), scope, position, size, rel).toString() !==
           filter
       )
         throw new Error(
@@ -244,9 +261,23 @@ function readPage(input: unknown) {
       }
     }
   }
+  const exactSeverity = severitySelection(query, "severity");
+  const minimumSeverity = severitySelection(query, "severity_gte");
   for (const value of rows) {
     const row = record(value, "Veracode finding");
     requireApplication(row, scope);
+    if (exactSeverity !== null || minimumSeverity !== null) {
+      const details = record(
+        row["finding_details"],
+        "Veracode finding_details",
+      );
+      const severity = integer(details["severity"], "severity");
+      if (
+        (exactSeverity !== null && severity !== exactSeverity) ||
+        (minimumSeverity !== null && severity < minimumSeverity)
+      )
+        throw new Error("Veracode finding contradicts the severity selection.");
+    }
     if (query.has("scan_type") && row["scan_type"] !== "STATIC")
       throw new Error(
         "Veracode finding contradicts the requested STATIC scan type.",
@@ -261,6 +292,14 @@ function readPage(input: unknown) {
       );
   }
   return { rows, scope, filter, number, size, total, pages };
+}
+
+function severitySelection(query: URLSearchParams, key: string): number | null {
+  const values = query.getAll(key);
+  if (!values.length) return null;
+  if (values.length !== 1 || !/^[0-5]$/u.test(values[0]!))
+    throw new Error(`Invalid Veracode ${key} selection.`);
+  return Number(values[0]);
 }
 
 export function normalizeVeracodeFindings(
@@ -293,30 +332,27 @@ export function normalizeVeracodeFindings(
       "Supply every Veracode page exactly once with stable totals, selection, origin and application context.",
     );
   const { scope } = first;
-  if (pages.length > 1) {
-    const seen = new Map<number, number>();
-    for (const page of pages) {
-      for (const value of page.rows) {
-        const row = record(value, "Veracode finding");
-        const issue = row["issue_id"];
-        if (
-          row["scan_type"] !== "STATIC" ||
-          typeof issue !== "number" ||
-          !Number.isSafeInteger(issue) ||
-          issue <= 0
-        )
-          continue;
-        const previous = seen.get(issue);
-        if (previous !== undefined && previous !== page.number)
-          throw new Error(
-            "Overlapping Veracode pages repeat a native issue; recollect the complete selection.",
-          );
-        seen.set(issue, page.number);
-      }
-    }
+  const rows = pages.flatMap((page) => page.rows);
+  const seen = new Set<string>();
+  for (const value of rows) {
+    const row = record(value, "Veracode finding");
+    const issue = row["issue_id"];
+    if (
+      typeof row["scan_type"] !== "string" ||
+      typeof issue !== "number" ||
+      !Number.isSafeInteger(issue) ||
+      issue <= 0
+    )
+      continue;
+    const key = `${row["scan_type"]}:${issue}`;
+    if (seen.has(key))
+      throw new Error(
+        "Overlapping Veracode findings repeat a native issue; recollect the complete selection.",
+      );
+    seen.add(key);
   }
   return normalizeRecords(
-    pages.flatMap((page) => page.rows),
+    rows,
     (value, id) => {
       const row = record(value, "Veracode finding");
       const details = record(

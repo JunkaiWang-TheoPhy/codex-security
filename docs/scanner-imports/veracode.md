@@ -33,7 +33,9 @@ while :; do
   jq -e --arg app "$application" --argjson n "$page" \
     '._links.application.href == $app and
      .page.number == $n and (.page.total_pages | type == "number") and
-     (._embedded.findings | type == "array")' "$out/page.tmp" >/dev/null
+     ((._embedded.findings | type == "array") or
+      ((has("_embedded") | not) and $n == 0 and .page.total_elements == 0 and
+       (.page.total_pages == 0 or .page.total_pages == 1)))' "$out/page.tmp" >/dev/null
   jq -c '.' "$out/page.tmp" >> "$out/pages.stream"
   pages=$(jq -r '.page.total_pages' "$out/page.tmp")
   page=$((page + 1))

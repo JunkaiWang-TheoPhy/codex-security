@@ -151,11 +151,29 @@ test("rejects holes, duplicate pages, changing totals or selection, and contradi
   expect(() => normalize([first, filtered, last])).toThrow(/selection/);
 });
 
+test("accepts collection self links while requiring navigation to identify the destination page", () => {
+  const pages = capture();
+  const expected = normalize(pages);
+  for (const page of pages)
+    page._links.self = {
+      ...page._links.self,
+      href: page._links.self.href.replace(/&page=\d+&size=\d+/u, ""),
+    };
+  expect(normalize(pages)).toEqual(expected);
+  pages[0]!._links.next!.href = pages[0]!._links.self.href;
+  expect(() => normalize(pages)).toThrow(/page/);
+});
+
 test("accepts a scoped native empty page but rejects errors, summaries, Pipeline and raw row arrays", () => {
   const overlapping = capture();
   overlapping[1]!._embedded.findings = overlapping[0]!._embedded.findings;
   expect(() => normalize(overlapping)).toThrow(/Overlapping/);
   const empty = veracodePolicyPage([]);
+  const { _embedded, ...omitted } = empty;
+  expect(normalize(omitted)).toEqual(normalize(empty));
+  expect(() =>
+    normalize({ ...omitted, page: veracodePolicyPage().page }),
+  ).toThrow();
   expect(normalize(empty)).toEqual({ read: 0, findings: [], excluded: [] });
   expect(
     normalize({ ...empty, page: { ...empty.page, total_pages: 1 } }),
@@ -174,6 +192,31 @@ test("accepts a scoped native empty page but rejects errors, summaries, Pipeline
     { ...empty, _links: { self: empty._links.self } },
   ])
     expect(() => normalize(input)).toThrow();
+});
+
+test("enforces exact and minimum native severity selections", () => {
+  const page = veracodePolicyPage();
+  const self = page._links.self.href;
+  for (const filter of ["severity=4", "severity_gte=4", "severity_gte=0"]) {
+    page._links.self.href = self + "&" + filter;
+    expect(normalize(page).findings).toHaveLength(1);
+  }
+  for (const filter of ["severity=3", "severity_gte=5", "severity=6"]) {
+    page._links.self.href = self + "&" + filter;
+    expect(() => normalize(page)).toThrow(/severity/);
+  }
+});
+
+test("detects overlap in unfiltered pages without conflating issues from different engines", () => {
+  const pages = capture();
+  for (const page of pages)
+    for (const link of Object.values(page._links))
+      link.href = link.href.replace("scan_type=STATIC&", "");
+  const dynamic = { ...veracodePolicyRow(1), scan_type: "DYNAMIC" };
+  pages[1]!._embedded.findings = [dynamic];
+  expect(normalize(pages).findings).toHaveLength(2);
+  pages[2]!._embedded.findings = [dynamic];
+  expect(() => normalize(pages)).toThrow(/Overlapping/);
 });
 
 test("never widens the app, host, sandbox or requested engine, including through HAL links", () => {
@@ -325,10 +368,13 @@ test("prepared provenance rejects cross-issue relabeling, even if normalized rep
   ).toThrow(/context/);
   expect(
     veracodeEvidenceRepositoryUrls(
-      { unrelated: true },
-      second!.source_finding_id,
+      { applicationUrl: "https://scanner.example.test/dashboard" },
+      "custom-issue-id",
     ),
   ).toEqual([]);
+  expect(() =>
+    veracodeEvidenceRepositoryUrls(undefined, second!.source_finding_id),
+  ).toThrow(/source-repository-url/);
   for (const source of [
     "",
     "https://vcs.example.test",
