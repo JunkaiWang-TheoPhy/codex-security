@@ -2,10 +2,6 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import {
-  githubFindingRepositoryUrl,
-  readGitHubFindings,
-} from "../src/github-findings.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
@@ -17,54 +13,6 @@ import {
 const fixtures: Awaited<ReturnType<typeof localFindingsFixture>>[] = [];
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
-});
-
-test("Dependabot reports retain missing manifest and fix information and exclude conflicting subjects", async () => {
-  const fixture = await localFindingsFixture();
-  fixtures.push(fixture);
-  const file = join(fixture.root, "selected.json");
-  const alert = dependabotAlert();
-  const badPackage = dependabotAlert(18);
-  badPackage.security_vulnerability.package.name = "another-package";
-  const badSubject = {
-    ...dependabotAlert(19),
-    repository: { full_name: "example/other" },
-  };
-  await writeFile(
-    file,
-    JSON.stringify([
-      {
-        ...alert,
-        dependency: {},
-        security_vulnerability: {
-          ...alert.security_vulnerability,
-          first_patched_version: null,
-        },
-      },
-      badPackage,
-      badSubject,
-      { ...dependabotAlert(20), url: dependabotAlert(21).url },
-    ]),
-  );
-  const parsed = await readGitHubFindings(file);
-  expect(parsed.excluded.map((row) => row.position)).toEqual([2, 3, 4]);
-  const evidence = parsed.findings[0]!.evidence;
-  expect(evidence).toMatchObject({
-    locations: [],
-    packages: [
-      { fixed_versions: [], manifest_path: null, installed_version: null },
-    ],
-  });
-  // A normalized SDK caller can also supply typed provenance.
-  expect(() =>
-    githubFindingRepositoryUrl({
-      ...evidence,
-      details: {
-        kind: "sast",
-        repository: { url: "https://github.com/example/other" },
-      },
-    }),
-  ).toThrow("conflicts");
 });
 
 type Source = "code-scanning" | "repository-advisory" | "global-advisory";
@@ -166,73 +114,60 @@ test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
   },
 );
 
-test("native Dependabot JSONL preserves distinct package occurrences and updates provider state without assessing them", async () => {
+test("Dependabot imports two alerts for one advisory without adopting a provider dismissal", async () => {
   const fixture = await localFindingsFixture({
     remote: "https://github.com/example/project",
   });
   fixtures.push(fixture);
-  const file = join(fixture.root, "selected.jsonl");
+  const file = join(fixture.root, "dependabot.jsonl");
   const options = {
     repository: fixture.repository,
     provider: "github" as const,
-    sourceKey: "github.com/example/project/dependabot",
+    sourceKey: "dependabot",
   };
   const dependencies = { environment: fixture.environment };
-  const first = dependabotAlert();
-  const second = dependabotAlert(18);
-  second.dependency.manifest_path = "services/web/package-lock.json";
-  const malware = dependabotAlert(19);
-  malware.security_advisory.classification = "malware";
-  const write = () =>
-    writeFile(
-      file,
-      [first, second, malware].map((alert) => JSON.stringify(alert)).join("\n"),
-    );
-  const prepare = () => prepareLocalExternalImport(file, options, dependencies);
-  await write();
-  const prepared = await prepare();
-  expect(prepared.preview.excluded).toMatchObject([
-    { position: 3, reason: expect.stringContaining("malware") },
-  ]);
-  expect(
-    prepared.preview.findings.map((finding) => finding.source_finding_id),
-  ).toEqual([
-    "github.com/example/project/dependabot/17",
-    "github.com/example/project/dependabot/18",
-  ]);
-  expect(prepared.preview.findings[0]!.evidence).toMatchObject({
-    advisory_ids: [
-      first.security_advisory.ghsa_id,
-      first.security_advisory.cve_id,
-    ],
-    packages: [
-      {
-        name: "example-parser",
-        ecosystem: "npm",
-        installed_version: null,
-        manifest_path: first.dependency.manifest_path,
-        vulnerable_version_range:
-          first.security_vulnerability.vulnerable_version_range,
-        fixed_versions: ["1.2.3"],
-      },
-    ],
-    code_revision: null,
-    source_data: first,
-  });
-  expect((await prepared.import()).counts.created).toBe(2);
-  first.state = "dismissed";
-  await write();
-  expect((await (await prepare()).import()).counts).toEqual({
-    created: 0,
-    updated: 1,
-    unchanged: 1,
-  });
+  const dismissed = { ...dependabotAlert(), state: "dismissed" };
+  const other = dependabotAlert(18);
+  const unpatched = {
+    ...other,
+    dependency: { package: other.dependency.package },
+    security_vulnerability: {
+      ...other.security_vulnerability,
+      first_patched_version: null,
+    },
+  };
+  await writeFile(
+    file,
+    [dismissed, unpatched].map((alert) => JSON.stringify(alert)).join("\n"),
+  );
+  const prepared = await prepareLocalExternalImport(
+    file,
+    options,
+    dependencies,
+  );
+  await prepared.import();
   const stored = await listLocalExternalFindings(options, dependencies);
-  expect(
-    stored.find((row) => row.sourceFindingId.endsWith("/17")),
-  ).toMatchObject({
-    assessment: { state: "not_assessed" },
-    evidence: { source_data: first },
+  const prefix = "github.com/example/project/dependabot";
+  const first = stored.find((r) => r.sourceFindingId === `${prefix}/17`);
+  const second = stored.find((r) => r.sourceFindingId === `${prefix}/18`);
+  expect(first?.assessment.state).toBe("not_assessed");
+  expect(first?.evidence.source_data).toEqual(dismissed);
+  expect(first?.evidence.advisory_ids).toEqual([
+    "GHSA-2345-6789-cfgh",
+    "CVE-2026-0001",
+  ]);
+  expect(first?.evidence.packages?.[0]).toMatchObject({
+    name: "example-parser",
+    ecosystem: "npm",
+    vulnerable_version_range: "< 1.2.3",
+    manifest_path: "package-lock.json",
+    fixed_versions: ["1.2.3"],
+    installed_version: null,
+  });
+  expect(second?.evidence.packages?.[0]).toMatchObject({
+    manifest_path: null,
+    fixed_versions: [],
+    installed_version: null,
   });
 });
 

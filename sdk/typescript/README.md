@@ -673,14 +673,9 @@ repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
 complete code-to-cloud coverage. Both formats support gzip. The acquisition path
 still needs validation with an authorized Wiz tenant.
 
-For GitHub, save complete JSON from `import github` or `import github-advisories`;
-the configured GitHub plugin can help select alerts before collection. The
-[separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
-retain code-scanning evidence or GHSA disclosures. The same GitHub reader
-accepts complete Dependabot vulnerability alerts from the repository REST API.
-The lockfile or deployed artifact establishes the installed version. Use
-`$resolve-dependency-alert` to investigate the selected package evidence and
-prepare an upgrade or a disposition for human review.
+Use `--provider github` for saved code-scanning alerts, GHSA advisories, or
+native Dependabot vulnerability alerts. Give each source a separate key.
+See [GitHub imports](docs/cli.md#import-github-findings-locally-or-to-cloud) for acquisition and preview commands.
 
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite
@@ -695,10 +690,6 @@ target; switching formats creates separate source identities. See
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
 accepted as a lossy compatibility format. See
 [Endor imports](docs/cli.md#import-endor-labs-findings).
-
-For saved GitHub code-scanning alerts or GHSA advisories, use
-`--provider github` with a separate stable source key for each finding family.
-See [local imports](docs/cli.md#import-vendor-findings-locally).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,

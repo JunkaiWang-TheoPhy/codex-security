@@ -2774,23 +2774,76 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   expect(f.reports.size).toBe(2);
 });
 
-test.each([
-  importedAlert("refs/heads/main", "git.example.test"),
-  dependabotAlert(17, "example/other"),
-])(
-  "GitHub imports reject a different Cloud destination before uploading",
-  async (imported) => {
-    const f = await fixture([imported]);
+test("GitHub imports reject a different Cloud destination before uploading", async () => {
+  const imported = importedAlert("refs/heads/main", "git.example.test");
+  const f = await fixture([imported]);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...options, provider: "github" },
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each(["native", "projected"])(
+  "normalized %s Dependabot evidence cannot override the alert's repository",
+  async (format) => {
+    const alert = dependabotAlert(17, "example/other");
+    const f = await fixture([alert]);
+    const parsed = await readGitHubFindings(f.file);
+    const evidence = parsed.findings[0]!.evidence;
+    evidence.source_data =
+      format === "native"
+        ? { ...alert, source: "export" }
+        : {
+            security_advisory: alert.security_advisory,
+            security_vulnerability: alert.security_vulnerability,
+            html_url: "https://github.com/advisories/GHSA-2345-6789-cfgh",
+            url: "https://api.github.com/advisories/GHSA-2345-6789-cfgh",
+          };
+    evidence.details = {
+      kind: "sast",
+      repository: { url: "https://github.com/example/project" },
+    };
     await expect(
-      prepareExternalPublication(
-        f.file,
+      prepareNormalizedExternalPublication(
+        parsed,
         { ...options, provider: "github" },
         f.deps,
       ),
-    ).rejects.toThrow("does not match the selected Cloud repository");
+    ).rejects.toThrow("conflicts with the normalized source repository");
     expect(f.posts).toHaveLength(0);
   },
 );
+
+test("the GitHub reader excludes Dependabot malware and conflicting alert identities", async () => {
+  const alert = dependabotAlert();
+  const f = await fixture([
+    {
+      ...alert,
+      security_advisory: {
+        ...alert.security_advisory,
+        classification: "malware",
+      },
+    },
+    {
+      ...alert,
+      dependency: { package: { ecosystem: "npm", name: "another-package" } },
+    },
+    { ...alert, repository: { full_name: "example/other" } },
+    { ...alert, url: dependabotAlert(18).url },
+    {
+      ...alert,
+      url: alert.url.replace("api.github.com", "api.github.com:443"),
+    },
+  ]);
+  const { excluded, findings } = await readGitHubFindings(f.file);
+  expect(findings).toHaveLength(0);
+  expect(excluded.map((row) => row.position)).toEqual([1, 2, 3, 4, 5]);
+  expect(excluded[0]!.reason).toContain("malware");
+});
 
 test("global GHSA publication retains unassessed applicability through repeat import and withdrawal", async () => {
   const imported = importedAdvisory("global");
@@ -3063,11 +3116,13 @@ test("normalized SDK publication accepts Cloud providers without their file read
 });
 
 test.each([
-  { run: "scan-123" },
-  { run: { versionControlProvenance: "opaque scanner metadata" } },
-])(
-  "normalized Snyk publication preserves opaque source metadata: %j",
-  async (sourceData) => {
+  ["snyk", { run: "scan-123" }],
+  ["snyk", { run: { versionControlProvenance: "opaque scanner metadata" } }],
+  ["github", { security_vulnerability: "scanner reference" }],
+  ["github", { security_advisory: {}, security_vulnerability: {} }],
+] as const)(
+  "normalized %s publication preserves opaque source metadata: %j",
+  async (provider, sourceData) => {
     const original = normalized();
     const finding = {
       ...original,
@@ -3079,7 +3134,7 @@ test.each([
     const f = await fixture();
     const prepared = await prepareNormalizedExternalPublication(
       { read: 1, findings: [finding], excluded: [] },
-      { ...options, provider: "snyk" },
+      { ...options, provider },
       f.deps,
     );
     expect((await prepared.publish()).verified).toBe(1);

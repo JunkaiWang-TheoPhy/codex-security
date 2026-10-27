@@ -82,7 +82,7 @@ Keep supplied fingerprints. Reimporting the same fingerprint after code moves up
 
 ## GitHub alerts and advisories
 
-Acquire code-scanning findings with `codex-security import github OWNER/REPO --format json` and save its complete JSON output for local import or Cloud publication. This existing collector completes pagination, fetches alert details, and retains the selected ref's instance. In Codex, use the official [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github) for discovery and selecting alerts, then pass that selection to the collector. Its GitHub MCP server paginates each list call separately. Do not ask the user to download JSON from a website or reconstruct an import envelope from MCP summaries; raw MCP/API responses are not accepted by `--provider github`.
+Acquire code-scanning findings with `codex-security import github OWNER/REPO --format json` and save its complete JSON output for local import or Cloud publication. This existing collector completes pagination, fetches alert details, and retains the selected ref's instance. In Codex, use the official [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github) for discovery and selecting alerts, then pass that selection to the collector. Its GitHub MCP server paginates each list call separately. For code scanning, the reader needs the collector’s saved output.
 
 The importer uses the user's GitHub CLI authentication and `GH_HOST`; plugin authentication is separate. It defaults to open alerts on the default branch. Use repeated `--github-alert NUMBER` for exact alerts or `--github-ref REF` for another ref. Save complete output without field/token filters or `--full-output`. Reading code-scanning alerts requires a token with Code scanning alerts read permission (classic: `security_events`, or `public_repo` for public repositories), along with repository access.
 
@@ -107,22 +107,9 @@ codex-security publish findings /path/to/advisories.json \
 
 Choose the local or Cloud preview for the intended destination. GHSA input supports the same choice: use `--to local --repository /path/to/project` with the advisory file and source key. Follow [local imports](#import-locally) for confirmation and readback or [Cloud publication](#publish-to-cloud) for upload review.
 
-Use separate stable source keys for each family. Code-scanning identities include the ref. Repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit destination for investigation. Preserve original evidence, package ranges and patches. Missing security severity stays `unknown`. Provider state is retained as evidence.
+Use a separate source key for each GitHub finding family. Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. Secret-scanning import and GitHub writeback are unsupported.
 
-### Dependabot package alerts
-
-For one alert, save the complete response from `GET /repos/OWNER/REPO/dependabot/alerts/NUMBER`. For a selected repository's open vulnerabilities, use the authorized GitHub transport and retrieve every page. With an approved GitHub CLI account on github.com:
-
-```sh
-gh api --hostname github.com --paginate \
-  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
-  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl
-codex-security publish findings /path/outside/repository/dependabot.jsonl \
-  --to local --repository /path/to/project --provider github \
-  --source-key github.com/example/project/dependabot --dry-run --format json
-```
-
-Use the selected GitHub host for Enterprise. Continue to preview only after retrieval succeeds. Follow the existing local or Cloud preview, approval and readback steps. The reader accepts a native alert object, a flat JSON array, or one complete alert per JSONL line. It retains the manifest, vulnerable range, suggested patch and original state. The alert number identifies an occurrence within its host and repository. Read the lockfile to establish the version installed. For investigation or an upgrade, hand the selected records to [$resolve-dependency-alert](../resolve-dependency-alert/SKILL.md).
+For Dependabot, use [GitHub intake](../triage-finding/references/github-rest-intake.md#dependabot-vulnerabilities) to save the complete native vulnerability alerts. Preview that file with `--provider github` and a source key such as `github.com/example/project/dependabot`.
 
 ## Publish to Cloud
 

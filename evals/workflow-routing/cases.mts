@@ -23,7 +23,7 @@ export const cases = [
   {
     id: "dependency-alert",
     request:
-      "Assess the vulnerable dependencies in this Grype report, trace the affected package to its consumers, and prepare a compatible security upgrade if possible. Flag any dismissal for human review.",
+      "Grype flagged a vulnerable package in this repo. What pulls it in, and can we upgrade it?",
     skill: "resolve-dependency-alert",
   },
   {

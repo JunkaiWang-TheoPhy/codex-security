@@ -2392,10 +2392,7 @@ Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
-server; pass that selection to the collector. This integration reads
-code-scanning alerts, GHSA advisories, and native Dependabot vulnerability
-alerts. Preview local storage with a
-repository path:
+server; pass that selection to the collector. Preview the saved code-scanning alerts locally:
 
 ```bash
 codex-security import github example/project --format json > /path/outside/repository/alerts.json
@@ -2416,32 +2413,11 @@ The importer fetches every page, retrieves alert details, and retains the select
 ref's instance. It writes the saved input for publication; no website download or
 hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
 selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
-the default branch. MCP list calls are paginated separately, and raw MCP/API
-code-scanning responses require the collector's saved import format.
-
-For Dependabot, save a selected repository alert from
-`GET /repos/OWNER/REPO/dependabot/alerts/NUMBER`, or collect all pages of the
-selected open package vulnerability alerts with an authorized GitHub CLI account:
-
-```bash
-gh api --hostname github.com --paginate \
-  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
-  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl
-codex-security publish findings /path/outside/repository/dependabot.jsonl \
-  --to local --repository ./project --provider github \
-  --source-key github.com/example/project/dependabot --dry-run --format json
-```
-
-Use the selected Enterprise hostname when applicable. Check that acquisition
-succeeded before previewing. The reader accepts a native alert, a flat JSON
-array, or JSONL. It preserves the package, manifest, vulnerable range, patch
-hint, and native state for each occurrence. Use the existing import confirmation
-and readback workflow. In Codex, ask `$resolve-dependency-alert` to trace the
-resolved copies and prepare an upgrade or disposition proposal. Dismissal
-requires a human decision in the alert provider.
+the default branch. For code scanning, `--provider github` accepts the collector's
+complete output.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
-the plugin's connection does not sign in `gh`. Reading alerts requires
+the plugin's connection does not sign in `gh`. Reading code-scanning alerts requires
 [code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
 **Code scanning alerts: read** for a fine-grained token, or `security_events` for
 a classic token (`public_repo` is sufficient for public repositories). The source
@@ -2497,6 +2473,23 @@ For local storage, pass the same normalized evidence to
 `prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
 its preview, and call `import()`. `prepareLocalExternalImport()` accepts the saved
 import file directly. Read records with `listLocalExternalFindings({ repository })`.
+
+### Import Dependabot vulnerability alerts
+
+Export the open vulnerability alerts and preview the import. Fine-grained tokens
+need the [Dependabot alerts: read permission](https://docs.github.com/en/rest/dependabot/alerts#fine-grained-access-tokens-for-list-dependabot-alerts-for-a-repository).
+
+```bash
+gh api --hostname github.com --paginate \
+  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
+  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl &&
+  codex-security publish findings /path/outside/repository/dependabot.jsonl \
+    --to local --repository ./project --provider github \
+    --source-key github.com/example/project/dependabot --dry-run --format json
+```
+
+The reader also accepts a single native alert or a JSON array. The alert records
+the affected range. Check the lockfile to establish which version is installed.
 
 ### Import GHSA advisories separately
 

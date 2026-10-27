@@ -13,7 +13,9 @@ import { isGitHubCloudHost } from "./git-remote.js";
 import {
   parseJsonOrJsonl,
   readScannerText,
+  record,
   requiredText,
+  strings,
   text,
 } from "./scanner-import.js";
 
@@ -160,18 +162,11 @@ function codeScanningFinding(
 }
 
 function advisoryIds(id: string, advisory: Record<string, unknown>) {
-  const identifiers = Array.isArray(advisory["identifiers"])
-    ? advisory["identifiers"]
-    : [];
-  return [
-    ...new Set(
-      [
-        id,
-        text(advisory["cve_id"]),
-        ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
-      ].filter((value): value is string => value !== null),
-    ),
-  ];
+  const ids = [id, advisory["cve_id"]];
+  if (Array.isArray(advisory["identifiers"]))
+    for (const identifier of advisory["identifiers"])
+      ids.push(object(identifier)?.["value"]);
+  return [...new Set(strings(ids))];
 }
 
 function advisoryFinding(
@@ -277,55 +272,46 @@ function advisoryFinding(
   };
 }
 
-/** Repository-scoped REST responses identify the repository in the alert's HTML URL. */
-function dependabotIdentity(alert: Record<string, unknown>) {
-  const url = requiredText(alert["html_url"], "Dependabot alert html_url");
-  const { parsed, host, origin } = sourceUrl(url);
-  const match = /^\/([^/]+\/[^/]+)\/security\/dependabot\/([1-9]\d*)$/u.exec(
-    parsed.pathname,
+function dependabotIdentity(
+  url: string | null,
+  alert?: Record<string, unknown>,
+) {
+  const match = url?.match(
+    /^https?:\/\/[^/?#]+\/([^/?#]+\/[^/?#]+)\/security\/dependabot\/([1-9]\d*)(?:[?#].*)?$/iu,
   );
-  if (
-    !match ||
-    !Number.isSafeInteger(alert["number"]) ||
-    String(alert["number"]) !== match[2]
-  )
-    throw new Error(
-      "Dependabot alert URL must identify its repository and alert number.",
-    );
-  const repository = repositoryName(match[1]);
-  const apiUrl = text(alert["url"]);
-  if (apiUrl) {
-    const apiBase = isGitHubCloudHost(parsed.hostname)
-      ? `${parsed.protocol}//api.${parsed.host}`
-      : `${parsed.origin}/api/v3`;
-    const expected = new URL(
-      `${apiBase}/repos/${repository}/dependabot/alerts/${match[2]}`,
-    );
-    const actual = new URL(apiUrl);
+  if (!url || !match) return;
+  const [, name, number] = match;
+  const { parsed, host, origin } = sourceUrl(url);
+  if (alert?.["number"] != null && alert["number"] !== Number(number))
+    throw new Error("Dependabot alert number must match its HTML URL.");
+  const repository = repositoryName(name);
+  const repositoryUrl = `${origin}/${repository}`;
+  const reported = object(alert?.["repository"]);
+  const apiBase = isGitHubCloudHost(parsed.hostname)
+    ? `${parsed.protocol}//api.${host}`
+    : `${origin}/api/v3`;
+  const reportedApiUrl = text(alert?.["url"])?.split(/[?#]/u, 1)[0];
+  // Compare the retained authorities, including explicit ports.
+  for (const [actual, expected] of [
+    [reported?.["full_name"], repository],
+    [reported?.["html_url"], repositoryUrl],
+    [
+      reportedApiUrl,
+      `${apiBase}/repos/${repository}/dependabot/alerts/${number}`,
+    ],
+  ] as const) {
     if (
-      actual.origin !== expected.origin ||
-      actual.pathname.toLowerCase() !== expected.pathname.toLowerCase()
+      actual != null &&
+      text(actual)?.toLowerCase() !== expected.toLowerCase()
     )
       throw new Error(
-        "Dependabot API and HTML URLs identify different occurrences.",
+        "Dependabot source repository or API URL conflicts with its HTML URL.",
       );
   }
-  const reported = object(alert["repository"]);
-  if (
-    reported &&
-    (repositoryName(reported["full_name"]).toLowerCase() !==
-      repository.toLowerCase() ||
-      (reported["html_url"] !== undefined &&
-        text(reported["html_url"])?.toLowerCase() !==
-          `${origin}/${repository}`.toLowerCase()))
-  )
-    throw new Error(
-      "Dependabot alert URL conflicts with its source repository.",
-    );
   return {
     url,
-    repositoryUrl: `${origin}/${repository}`,
-    id: `${host}/${repository.toLowerCase()}/dependabot/${match[2]}`,
+    repositoryUrl,
+    id: `${host}/${repository.toLowerCase()}/dependabot/${number}`,
   };
 }
 
@@ -333,8 +319,20 @@ function dependabotIdentity(alert: Record<string, unknown>) {
 export function githubFindingRepositoryUrl(evidence: ExternalFindingEvidence) {
   const raw = evidence.source_data;
   const typed = evidence.details?.repository?.url;
-  if (!raw || raw["source"] || !raw["security_vulnerability"]) return typed;
-  const { repositoryUrl } = dependabotIdentity(raw);
+  if (
+    !raw ||
+    !object(raw["security_advisory"]) ||
+    !object(raw["security_vulnerability"])
+  )
+    return typed;
+  // A normalized projection can retain just the alert link and advisory data.
+  const location =
+    dependabotIdentity(
+      text(raw["html_url"]),
+      Number.isSafeInteger(raw["number"]) ? raw : undefined,
+    ) ?? dependabotIdentity(text(evidence.url));
+  if (!location) return typed;
+  const { repositoryUrl } = location;
   if (
     typed &&
     cloudRepositoryUrlKey(typed) !== cloudRepositoryUrlKey(repositoryUrl)
@@ -349,37 +347,38 @@ function dependabotFinding(
   alert: Record<string, unknown>,
   target: ExternalImportTarget,
 ): ExternalFinding {
-  const identity = dependabotIdentity(alert);
-  const advisory = object(alert["security_advisory"]);
-  if (!advisory) throw new Error("Expected a Dependabot security advisory.");
-  const vulnerability = object(alert["security_vulnerability"]);
-  const dependency = object(alert["dependency"]);
+  const identity = dependabotIdentity(text(alert["html_url"]), alert);
+  if (!identity || !Number.isSafeInteger(alert["number"]))
+    throw new Error("Expected a Dependabot alert number and HTML URL.");
+  const advisory = record(alert["security_advisory"], "Dependabot advisory");
   if (advisory["classification"] === "malware")
     throw new Error("Route Dependabot malware alerts to incident response.");
+  const vulnerability = record(
+    alert["security_vulnerability"],
+    "Dependabot vulnerability",
+  );
+  const dependency = record(alert["dependency"], "Dependabot dependency");
   const id = requiredText(advisory["ghsa_id"], "Dependabot advisory ghsa_id");
-  const affected = object(vulnerability?.["package"]);
-  const name = requiredText(affected?.["name"], "Dependabot package name");
+  const affected = record(vulnerability["package"], "Dependabot package");
+  const name = requiredText(affected["name"], "Dependabot package name");
   const ecosystem = requiredText(
-    affected?.["ecosystem"],
+    affected["ecosystem"],
     "Dependabot package ecosystem",
   );
-  if (!dependency) throw new Error("Expected a Dependabot dependency.");
   const pkg = object(dependency["package"]);
   if (pkg && (pkg["name"] !== name || pkg["ecosystem"] !== ecosystem))
     throw new Error(
       "Dependabot dependency and security vulnerability packages must match.",
     );
   const path = text(dependency["manifest_path"]);
-  const fixed = text(
-    object(vulnerability?.["first_patched_version"])?.["identifier"],
-  );
+  const patch = object(vulnerability["first_patched_version"]);
   return {
     source_finding_id: identity.id,
     evidence: validateExternalEvidence(
       {
         title: text(advisory["summary"]) ?? id,
         description: text(advisory["description"]),
-        severity: severity(vulnerability?.["severity"]),
+        severity: severity(vulnerability["severity"]),
         url: identity.url,
         advisory_ids: advisoryIds(id, advisory),
         locations: path ? [{ path }] : [],
@@ -389,10 +388,10 @@ function dependabotFinding(
             ecosystem,
             manifest_path: path,
             vulnerable_version_range: requiredText(
-              vulnerability?.["vulnerable_version_range"],
+              vulnerability["vulnerable_version_range"],
               "Dependabot vulnerable version range",
             ),
-            fixed_versions: fixed ? [fixed] : [],
+            fixed_versions: strings([patch?.["identifier"]]),
           },
         ],
         source_updated_at: sourceTimestamp(alert["updated_at"]),
@@ -422,11 +421,11 @@ function normalizeRecords(
         finding = codeScanningFinding(record, target);
       else if (record["source"] === "github-security-advisory")
         finding = advisoryFinding(record, target);
-      else if (!record["source"] && record["security_vulnerability"])
+      else if (record["security_vulnerability"])
         finding = dependabotFinding(record, target);
       else
         throw new Error(
-          "Expected a native Dependabot alert or saved output from import github or import github-advisories; other raw or incomplete API responses need an explicit mapping.",
+          "Expected a Dependabot alert or saved output from import github or import github-advisories.",
         );
       if (identities.has(finding.source_finding_id))
         throw new CodexSecurityError(
@@ -462,7 +461,7 @@ export function normalizeGitHubAdvisories(
   return normalizeRecords(advisories, target);
 }
 
-/** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */
+/** Read native Dependabot alerts and saved GitHub imports as JSON or JSONL. */
 export async function readGitHubFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
