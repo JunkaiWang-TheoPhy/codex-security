@@ -84,9 +84,12 @@ the opaque `attributes.key` that Snyk defines across tests within a project.
 Keep a separate source key per selection. A duplicate key excludes **every**
 collision; unsupported issue types and malformed finding fields are reported
 by position. A completed empty response has zero records and still identifies
-the mapped repository. A missing page, repeated cursor, scope mismatch, API
-error (including rate limiting), or interrupted request is **not** an empty
-result. Retry collection; do not publish partial output.
+the mapped repository. On HTTP 429, the collector retries the same GET once if
+`Retry-After` gives a whole number of seconds or an HTTP date at most 10 seconds
+away. Zero or an elapsed date means retry immediately; longer, missing or invalid
+hints are not retried. Cancellation also stops the wait. A missing page, repeated
+cursor, scope mismatch, persistent rate limit or other API error is **not** an
+empty result. Rerun collection; do not publish partial output.
 
 - Open Source uses the documented [Issues field mapping](https://docs.snyk.io/developer-tools/snyk-api/api-end-of-life-eol-process-and-migration-guides/guides-to-migration/v1-reporting-issues-and-v1-aggregated-issues-apis-to-rest-issues-api-migration-guide):
   problems, weakness classes, dependency representations, effective severity

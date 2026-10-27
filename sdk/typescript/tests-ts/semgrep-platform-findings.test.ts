@@ -23,7 +23,7 @@ const first = Array.from({ length: 100 }, (_, index) =>
   platformFinding(index + 1),
 );
 
-test("collects consecutive authenticated pages for exactly one project, ref and product", async () => {
+test("retries only the throttled page for exactly one Semgrep project, ref and product", async () => {
   const pages: string[] = [];
   const report = await collectSemgrepPlatformFindings(options, {
     environment,
@@ -33,6 +33,7 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         "Bearer synthetic-web-token",
       );
       expect(init.redirect).toBe("error");
+      expect(init.method).toBe("GET");
       if (url.pathname.includes("/projects/")) {
         expect(decodeURIComponent(url.pathname)).toBe(
           "/api/v1/deployments/example/projects/example/project",
@@ -48,13 +49,19 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         page_size: "100",
       });
       pages.push(query["page"]!);
+      if (pages.length === 2)
+        return new Response("try again", {
+          status: 429,
+          headers: { "Retry-After": "0" },
+        });
       return Response.json({
         findings: query["page"] === "0" ? first : [platformFinding(101)],
       });
     },
   });
-  expect(pages).toEqual(["0", "1"]);
+  expect(pages).toEqual(["0", "1", "1"]);
   expect(report.findings).toHaveLength(101);
+  expect(report.findings).toEqual([...first, platformFinding(101)]);
   expect(JSON.stringify(report)).not.toContain("synthetic-web-token");
   const parsed = normalizeSemgrepPlatformFindings(report);
   expect(parsed.findings[0]?.evidence).toMatchObject({
@@ -111,29 +118,33 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
       },
     ),
   ).rejects.toThrow("dependency canceled");
-  for (const mode of ["repeat", "rate-limit", "malformed"]) {
+  for (const [mode, message] of [
+    ["repeat", "repeated"],
+    ["malformed", "must be an array"],
+    ["0", "Retry-After: 0: try later"],
+    ["11", "Retry-After: 11: try later"],
+    ["later", "Retry-After: later: try later"],
+  ] as const) {
+    const pages: string[] = [];
     const collect = collectSemgrepPlatformFindings(options, {
       environment,
       fetch: async (url) => {
         if (url.pathname.includes("/projects/"))
           return Response.json({ project: platformProject });
-        if (url.searchParams.get("page") === "0" || mode === "repeat")
+        const page = url.searchParams.get("page")!;
+        pages.push(page);
+        if (page === "0" || mode === "repeat")
           return Response.json({ findings: first });
-        return mode === "rate-limit"
-          ? new Response("try later", {
-              status: 429,
-              headers: { "retry-after": "11" },
-            })
-          : Response.json({ error: "not a findings page" });
+        if (mode === "malformed")
+          return Response.json({ error: "not a findings page" });
+        return new Response("try later", {
+          status: 429,
+          headers: { "Retry-After": mode },
+        });
       },
     });
-    await expect(collect).rejects.toThrow(
-      mode === "repeat"
-        ? "repeated"
-        : mode === "rate-limit"
-          ? "Retry-After: 11"
-          : "must be an array",
-    );
+    await expect(collect).rejects.toThrow(message);
+    expect(pages).toEqual(mode === "0" ? ["0", "1", "1"] : ["0", "1"]);
   }
 });
 

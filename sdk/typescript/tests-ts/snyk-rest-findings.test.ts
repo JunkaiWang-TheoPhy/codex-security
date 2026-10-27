@@ -58,7 +58,7 @@ function transport(...responses: unknown[]) {
     dependencies: {
       environment: env,
       fetch: async (url: URL, init: RequestInit) => {
-        requests.push({ url, init });
+        requests.push({ url: new URL(url), init });
         if (!responses.length) throw new Error("Unexpected request.");
         const response = responses.shift();
         return response instanceof Response
@@ -81,7 +81,7 @@ function envelope(data: unknown[] = [issue()]) {
   };
 }
 
-test("collects only one region, org, project and Open Source issue type across JSON:API pages", async () => {
+test("retries only the throttled JSON:API page within the selected Snyk scope", async () => {
   const primary = issue({
     description: "Original description",
     ignored: true,
@@ -122,12 +122,17 @@ test("collects only one region, org, project and Open Source issue type across J
     document([primary], {
       href: `/orgs/${organizationId}/issues?version=${version}&starting_after=${encodeURIComponent(cursor)}`,
     }),
+    new Response("try again", {
+      status: 429,
+      headers: { "Retry-After": "0", Location: "https://other.invalid/issues" },
+    }),
     document([secondary], null),
   );
   const signal = new AbortController().signal;
   const report = await collectSnykIssues({ ...options, signal }, dependencies);
   expect(requests.map(({ url }) => url.pathname)).toEqual([
     `/rest/orgs/${organizationId}/projects/${projectId}`,
+    path,
     path,
     path,
   ]);
@@ -153,6 +158,7 @@ test("collects only one region, org, project and Open Source issue type across J
   }
   expect(requests[1]!.url.searchParams.has("starting_after")).toBe(false);
   expect(requests[2]!.url.searchParams.get("starting_after")).toBe(cursor);
+  expect(requests[3]!.url.href).toBe(requests[2]!.url.href);
   expect(report.pages.map((page) => page.startingAfter)).toEqual([
     null,
     cursor,
@@ -714,17 +720,38 @@ test("HTTP, JSON, and second-page failures are errors, never successful partial 
       status: 429,
       headers: { "retry-after": "60" },
     }),
+    new Response("bad hint", {
+      status: 429,
+      headers: { "Retry-After": "1.5" },
+    }),
     new Response("{"),
     { errors: [{ status: "400", detail: "issue error" }] },
     { data: null },
   ]) {
-    const { dependencies } = transport(
+    const { dependencies, requests } = transport(
       document(project()),
       document([issue()], "?starting_after=more"),
       response,
     );
     await expect(collectSnykIssues(options, dependencies)).rejects.toThrow();
+    expect(requests).toHaveLength(3);
   }
+});
+
+test("reports the last HTTP error when the retried Snyk cursor is still throttled", async () => {
+  const limited = (detail: string) =>
+    new Response(detail, { status: 429, headers: { "Retry-After": "0" } });
+  const { dependencies, requests } = transport(
+    document(project()),
+    document([issue()], "?starting_after=more"),
+    limited("first failure"),
+    limited("still throttled"),
+  );
+  await expect(collectSnykIssues(options, dependencies)).rejects.toThrow(
+    `GET ${apiOrigin}${path} failed (HTTP 429); Retry-After: 0: still throttled`,
+  );
+  expect(requests).toHaveLength(4);
+  expect(requests[3]!.url.href).toBe(requests[2]!.url.href);
 });
 
 test.each(["options", "dependencies"] as const)(
