@@ -1,7 +1,13 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
+import { normalizeGitRepositoryUrl } from "./git-remote.js";
 import { isRecord } from "./record.js";
+import {
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  snykRestFindingRepository,
+} from "./snyk-rest-findings.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
@@ -14,6 +20,10 @@ import {
   strings,
   text,
 } from "./scanner-import.js";
+
+export interface SnykFindingsReport extends ExternalFindings {
+  sourceRepositoryUrl?: string;
+}
 
 function snykIdentity(value: unknown, project: string | null): string {
   const result = record(value, "SARIF result");
@@ -145,45 +155,6 @@ export function normalizeSnykFindingsExport(
   );
 }
 
-function normalizeGitRepositoryUrl(
-  repository: string,
-  cloudRepositoryUrl?: string,
-): string {
-  // Cloud's selected catalog repository supplies connected GitHub host context;
-  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
-  const destination = cloudRepositoryUrl
-    ? new URL(cloudRepositoryUrl)
-    : undefined;
-  const connectedHost =
-    destination?.protocol === "https:"
-      ? destination.hostname.toLowerCase()
-      : undefined;
-  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
-  const isGitHubSshUser = (username: string, hostname: string) =>
-    (username === "git" &&
-      (hostname === "github.com" || hostname === connectedHost)) ||
-    (username === connectedTenant && hostname === connectedHost);
-  const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
-  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
-    return `https://${scp[2]}/${scp[3]}`;
-  // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
-  if (ssh) {
-    // Git retains these bytes, but URL parsing would erase them from the alias.
-    if (/[\t\r\n]/u.test(repository)) return repository;
-    const url = new URL(repository);
-    const hostname = url.hostname.toLowerCase();
-    const githubSsh =
-      isGitHubSshUser(ssh[1]!, hostname) &&
-      (url.port === "" || url.port === "22");
-    const githubSshOverHttps =
-      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
-    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
-    if (githubSsh) return `https://${hostname}${url.pathname}`;
-  }
-  return repository;
-}
-
 /** @internal Repository claims retained in original Snyk evidence. */
 export function snykRepositoryUrls(
   sourceData: unknown,
@@ -203,6 +174,8 @@ export function snykRepositoryUrls(
   )
     return [];
   const source = sourceData as Record<string, unknown>;
+  if (source["format"] === SNYK_REST_ISSUES_FORMAT)
+    return [snykRestFindingRepository(source)];
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
@@ -520,16 +493,39 @@ export function normalizeSnykJson(
   );
 }
 
-export async function readSnykFindings(
-  path: string,
+export function normalizeSnykInput(
+  input: unknown,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+): SnykFindingsReport {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
+  if (
+    typeof document["format"] === "string" &&
+    document["format"].startsWith("snyk-rest-issues/")
+  )
+    return normalizeSnykIssues(document, target);
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);
   if (document["version"] === "2.1.0")
     return normalizeSnykSarif(document, target);
   return normalizeSnykJson(document, target);
+}
+
+export async function readSnykFindings(
+  path: string,
+  target: ExternalImportTarget = "cloud",
+): Promise<SnykFindingsReport> {
+  return normalizeSnykInput(await readScannerJson(path), target);
+}
+
+export function snykReportRepositoryUrls(report: SnykFindingsReport): string[] {
+  if (report.sourceRepositoryUrl !== undefined)
+    return [report.sourceRepositoryUrl];
+  return [
+    ...new Set(
+      report.findings.flatMap(({ evidence }) =>
+        snykRepositoryUrls(evidence.source_data, { normalizeGitRemote: false }),
+      ),
+    ),
+  ];
 }

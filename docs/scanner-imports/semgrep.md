@@ -1,4 +1,4 @@
-# Import Semgrep Code findings
+# Import Semgrep findings
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
@@ -7,10 +7,8 @@ Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-This reader does not accept Platform API, Guardian or MCP response envelopes,
-or a general Supply Chain or Secrets feed. Those products and acquisition
-contracts require separate mappings; installing a plugin does not change the
-formats accepted here.
+For an existing backlog, use the [Platform collector](#existing-platform-findings).
+Do not pass an individual API page or Guardian/MCP response as CLI JSON.
 
 To produce JSON locally, run the following from the source repository root with
 your selected SAST rules. This runs a new scan; it does not retrieve earlier
@@ -56,22 +54,42 @@ accepted findings. Unknown Git hosts keep case-sensitive repository paths.
 
 ## Existing Platform findings
 
-Semgrep's official
-[Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex)
-can select and inspect existing findings. Its output is not accepted by this
-reader. A Platform importer needs a mapping qualified against the hosted tools'
-actual responses, repository/ref filters and pagination using an authorized test
-tenant. The separate local `semgrep mcp` server also exposes `semgrep_findings`,
-but its current tool
-returns a limited list without continuation metadata. It cannot establish a
-complete export. [Official MCP implementation](https://github.com/semgrep/semgrep/blob/fe209763a4a2ccfcdf6434e6c332edc24a2f586e/cli/src/semgrep/mcp/server.py).
+Set `SEMGREP_APP_TOKEN` to a token with **Web API** access in your credential
+environment, not in the command or report. Select one deployment, project,
+exact ref and product. The collector looks up the
+[project](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
+and reads the [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
+by project ID, without running a scan or changing triage:
 
-For an automated acquisition path, Semgrep's
-[findings API](https://docs.semgrep.dev/semgrep-appsec-platform/semgrep-api) supports
-pagination with a Web API token. Its Platform finding objects
-need their own mapping into the shared publisher; they are not CLI `results`
-objects. Do not rename an API/MCP response to `semgrep.json` or reconstruct a scan
-report from a summary. No manual website export is required for either path.
+```sh
+codex-security import semgrep example/project --semgrep-deployment example \
+  --semgrep-ref refs/heads/main --semgrep-product sast --format json > platform.json &&
+codex-security publish findings platform.json --to local --provider semgrep \
+  --repository ./project --source-key example/project/main/platform-sast --dry-run
+```
+
+Use `sast` (default) for Code, `sca` for Supply Chain, or `ai_sast` for
+AI-powered detections. Secrets has a different API and is not collected. The
+project SCM URL must match each available finding URL; if the project omits its
+URL, explicitly map it with `--source-repository-url`. No source declaration is
+required when publishing the self-contained report. For Cloud use `--to cloud`
+and a connected repository URL or ID. SDK callers can use
+`collectSemgrepPlatformFindings` and `normalizeSemgrepPlatformFindings`.
+
+Pages start at zero and are read sequentially through the last page. Collection
+errors do not yield partial reports. No time or status filters are applied;
+Semgrep never returns removed findings from this endpoint. It is a paged view,
+not a transactional snapshot. Native numeric finding IDs are scoped to the
+deployment, project, ref and product. Integers outside JavaScript's safe range,
+including finding and scan IDs, retain their exact decimal text in the saved
+collection. Changed status or source lines update the
+same record, and absence never closes an import. Keep separate source keys for
+CLI and Platform exports.
+
+The selected API record is retained in evidence, including triage and, for SCA,
+reported reachability, dependency versions and fix recommendations. None are
+Codex assessments or verified fixes. Guardian and MCP summaries are not
+complete exports and are not accepted by the collector.
 
 ## Evidence and identity
 
@@ -82,10 +100,10 @@ trace and fix evidence. Its Critical and High ratings both become diagnostic
 Original evidence stays in `source_data`, and source state stays separate from a
 Codex assessment.
 
-Both local and Cloud file imports currently apply the shared Cloud evidence
-bounds, including a maximum JSON depth of 20. Deeply nested native taint traces
-can exceed that bound and are excluded with a reason in the preview. The reader
-preserves accepted source evidence without flattening or truncating traces.
+Cloud imports apply the service's evidence limits, including a maximum JSON
+depth of 20. A deeply nested taint trace can exceed that bound and be excluded
+with a reason in the Cloud preview. Local storage does not impose the Cloud
+size or depth limits. Neither path flattens or truncates accepted traces.
 
 Keep the supplied JSON `extra.fingerprint` or SARIF `matchBasedId/v1`
 fingerprint. If a later report supplies the same fingerprint after the code

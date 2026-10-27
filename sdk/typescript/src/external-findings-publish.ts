@@ -13,6 +13,11 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
+import { abortable } from "./targets.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
+} from "./semgrep-platform-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -352,22 +357,20 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
-  const parsed = await readExternalFindings(path, options);
+  const parsed = await abortable(
+    () => readExternalFindings(path, options),
+    dependencies.signal,
+  );
   const normalizedOptions = {
     ...options,
     provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
   };
-  return parsed.publication
-    ? preparePublicationInput(
-        parsed.publication,
-        normalizedOptions,
-        dependencies,
-      )
-    : prepareNormalizedExternalPublication(
-        parsed.findings,
-        normalizedOptions,
-        dependencies,
-      );
+  return preparePublicationInput(
+    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    normalizedOptions,
+    dependencies,
+    parsed.reportRepositoryUrl,
+  );
 }
 
 /** Prepare normalized provider evidence without reading a vendor export. */
@@ -377,6 +380,17 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
+  dependencies.signal?.throwIfAborted();
+  return preparePublicationInput(
+    normalizedPublicationInput(input),
+    options,
+    dependencies,
+  );
+}
+
+function normalizedPublicationInput(
+  input: ExternalFindings,
+): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
   const current = structuredClone(input);
   // structuredClone preserves aliases. Detach every raw record before adding
@@ -400,22 +414,19 @@ export async function prepareNormalizedExternalPublication(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  return preparePublicationInput(
-    {
-      current,
-      legacy: current,
-      currentIdentity: current.findings,
-      legacyIdentity: current.findings,
-    },
-    options,
-    dependencies,
-  );
+  return {
+    current,
+    legacy: current,
+    currentIdentity: current.findings,
+    legacyIdentity: current.findings,
+  };
 }
 
 async function preparePublicationInput(
   input: ExternalPublicationInput,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
+  reportRepositoryUrl?: string,
 ): Promise<PreparedExternalPublication> {
   const progress = (event: ExternalPublicationProgress): void => {
     try {
@@ -723,9 +734,21 @@ async function preparePublicationInput(
   }
   let requests = saved?.requests;
   if (!requests) {
+    if (
+      reportRepositoryUrl &&
+      cloudRepositoryUrlKey(reportRepositoryUrl) !==
+        cloudRepositoryUrlKey(destination.url)
+    )
+      throw new CodexSecurityError(
+        `Source report belongs to ${JSON.stringify(reportRepositoryUrl)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
+      );
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
+        ...(options.provider === "semgrep" &&
+        isSemgrepPlatformReport(finding.evidence.source_data)
+          ? [semgrepPlatformFindingRepository(finding.evidence.source_data)]
+          : []),
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),
@@ -852,7 +875,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (

@@ -5,9 +5,15 @@ import type {
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
+import { repositoryUrlKey } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import { readSnykFindings, snykReportRepositoryUrls } from "./snyk-findings.js";
+import { normalizeSemgrepFindings } from "./semgrep-findings.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformRepository,
+} from "./semgrep-platform-findings.js";
+import { readScannerJson } from "./scanner-import.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -41,6 +47,7 @@ export interface ReadExternalFindings {
   /** Preserve previous Wiz projections when resuming immutable Cloud requests. */
   publication?: ExternalPublicationInput;
   sourceRepositories?: ExternalSourceRepository[];
+  reportRepositoryUrl?: string;
 }
 
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
@@ -51,20 +58,29 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
+    if (
+      findings.sourceRepositoryUrl &&
+      options.sourceRepositoryUrl &&
+      repositoryUrlKey(findings.sourceRepositoryUrl) !==
+        repositoryUrlKey(options.sourceRepositoryUrl)
+    )
+      throw new Error(
+        "Snyk REST source repository does not match the declared source repository URL.",
+      );
     return {
       findings,
-      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
-        snykRepositoryUrls(evidence.source_data, {
-          normalizeGitRemote: false,
-        }).map((url) => ({ url })),
-      ),
+      reportRepositoryUrl: findings.sourceRepositoryUrl,
+      sourceRepositories: snykReportRepositoryUrls(findings).map((url) => ({
+        url,
+      })),
     };
   }
   if (options.provider === "semgrep") {
-    const findings = await readSemgrepFindings(
-      path,
+    const report = await readScannerJson(path);
+    const findings = normalizeSemgrepFindings(
+      report,
       {
-        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
       },
       target,
     );
@@ -83,7 +99,10 @@ export async function readExternalFindings(
           )
         : [];
     });
-    return { findings, sourceRepositories };
+    const reportRepositoryUrl = isSemgrepPlatformReport(report)
+      ? semgrepPlatformRepository(report)
+      : options.sourceRepositoryUrl;
+    return { findings, sourceRepositories, reportRepositoryUrl };
   }
   if (options.provider === "endor") {
     const parsed = await readEndorFindings(path, target);

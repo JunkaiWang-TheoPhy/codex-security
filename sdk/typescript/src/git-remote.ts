@@ -30,3 +30,42 @@ export function parseGitRemote(remote: string): GitRemote | undefined {
 export function isGitHubCloudHost(host: string): boolean {
   return host === "github.com" || host.endsWith(".ghe.com");
 }
+
+export function normalizeGitRepositoryUrl(
+  repository: string,
+  cloudRepositoryUrl?: string,
+): string {
+  // Cloud's selected catalog repository supplies connected GitHub host context;
+  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
+  const destination = cloudRepositoryUrl
+    ? new URL(cloudRepositoryUrl)
+    : undefined;
+  const connectedHost =
+    destination?.protocol === "https:"
+      ? destination.hostname.toLowerCase()
+      : undefined;
+  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
+  const isGitHubSshUser = (username: string, hostname: string) =>
+    (username === "git" &&
+      (hostname === "github.com" || hostname === connectedHost)) ||
+    (username === connectedTenant && hostname === connectedHost);
+  const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
+  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
+    return `https://${scp[2]}/${scp[3]}`;
+  // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
+  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
+  if (ssh) {
+    // Git retains these bytes, but URL parsing would erase them from the alias.
+    if (/[\t\r\n]/u.test(repository)) return repository;
+    const url = new URL(repository);
+    const hostname = url.hostname.toLowerCase();
+    const githubSsh =
+      isGitHubSshUser(ssh[1]!, hostname) &&
+      (url.port === "" || url.port === "22");
+    const githubSshOverHttps =
+      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
+    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
+    if (githubSsh) return `https://${hostname}${url.pathname}`;
+  }
+  return repository;
+}

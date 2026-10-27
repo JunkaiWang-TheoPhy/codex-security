@@ -2,6 +2,12 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
+import { snykRepositoryUrls } from "./snyk-findings.js";
+import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
+} from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -508,6 +514,21 @@ export async function prepareNormalizedLocalImport(
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    if (
+      options.provider === "snyk" &&
+      evidence.source_data?.["format"] === SNYK_REST_ISSUES_FORMAT
+    )
+      for (const hostedUrl of snykRepositoryUrls(evidence.source_data, {
+        normalizeGitRemote: false,
+      }))
+        sources.set(hostedUrl, { url: hostedUrl });
+    if (
+      options.provider === "semgrep" &&
+      isSemgrepPlatformReport(evidence.source_data)
+    ) {
+      const hostedUrl = semgrepPlatformFindingRepository(evidence.source_data);
+      sources.set(hostedUrl, { url: hostedUrl });
+    }
   }
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.

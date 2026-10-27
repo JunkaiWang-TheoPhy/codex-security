@@ -223,6 +223,11 @@ import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import { collectSnykIssues } from "./snyk-rest-findings.js";
+import {
+  collectSemgrepPlatformFindings,
+  SEMGREP_PLATFORM_PRODUCTS,
+} from "./semgrep-platform-findings.js";
 import {
   GITHUB_ALERT_STATES,
   importGitHubCodeScanningAlerts,
@@ -1287,6 +1292,8 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importGitHubAdvisories?: typeof importGitHubAdvisories;
+  collectSnykIssues?: typeof collectSnykIssues;
+  collectSemgrepPlatformFindings?: typeof collectSemgrepPlatformFindings;
   importScan?: typeof importScan;
   readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
@@ -3545,7 +3552,7 @@ export async function main(
     publication.command("findings", {
       description:
         "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      hint: "For hosted Snyk Open Source or Code, or Semgrep Platform findings, save complete JSON from import snyk or import semgrep. For Snyk CLI Open Source, use native snyk test JSON, plugin snyk-findings-export/v1, or Open Source SARIF. For Semgrep CLI Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3568,7 +3575,7 @@ export async function main(
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+            "Required for Semgrep CLI JSON/SARIF; hosted reports carry their source repository. Checked against the destination.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3837,7 +3844,7 @@ export async function main(
   });
   const imports = Cli.create("import", {
     description: importsEnabled
-      ? "Read GitHub code scanning alerts and security advisories."
+      ? "Read hosted Snyk, Semgrep and GitHub findings without changing the provider."
       : "Read GitHub code scanning alerts.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -4018,7 +4025,133 @@ export async function main(
       },
     });
   }
-  if (importsEnabled) registerGitHubAdvisories();
+  function registerHostedScannerImports() {
+    const output = z.record(z.string(), z.unknown()).optional();
+    async function collect(
+      run: (signal: AbortSignal) => Promise<object>,
+      fail: (error: {
+        code: string;
+        message: string;
+        exitCode: number;
+      }) => never,
+    ) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        if (!importsEnabled)
+          throw new CodexSecurityError(externalImportsDisabledMessage);
+        return { ...(await run(controller.signal)) };
+      } catch (error) {
+        const reason: unknown = controller.signal.reason;
+        exitCode = reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 2;
+        const message = diagnosticValue(error);
+        errorOutput.write(`codex-security: ${message}\n`);
+        if (argv.includes("--full-output")) {
+          structuredError = true;
+          return fail({ code: "HOSTED_IMPORT_FAILED", exitCode, message });
+        }
+        return undefined;
+      } finally {
+        removeSignals();
+      }
+    }
+    imports.command("snyk", {
+      description:
+        "Read Snyk Open Source or Code issues for one monitored project.",
+      hint: "Requires SNYK_TOKEN. Save complete --format json output and publish it with --provider snyk.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        project: z.string().min(1).describe("Snyk project ID."),
+      }),
+      options: z.object({
+        snykOrg: optionValue("--snyk-org").describe("Snyk organization ID."),
+        snykProduct: z
+          .enum(["open-source", "code"])
+          .default("open-source")
+          .describe("Snyk product to retrieve."),
+        snykApiOrigin: optionValue("--snyk-api-origin")
+          .optional()
+          .describe(
+            "Official regional Snyk API origin (default: https://api.snyk.io).",
+          ),
+        sourceRepositoryUrl: optionValue("--source-repository-url").describe(
+          "Explicit source-control repository mapping for the monitored project.",
+        ),
+      }),
+      output,
+      run: ({ args, options, error }) =>
+        collect(
+          (signal) =>
+            (dependencies.collectSnykIssues ?? collectSnykIssues)(
+              {
+                projectId: args.project,
+                organizationId: options.snykOrg,
+                product: options.snykProduct,
+                apiOrigin: options.snykApiOrigin,
+                sourceRepositoryUrl: options.sourceRepositoryUrl,
+                token: dependencies.environment["SNYK_TOKEN"],
+                signal,
+              },
+              { environment: dependencies.environment },
+            ),
+          error,
+        ),
+    });
+    imports.command("semgrep", {
+      description: "Read Semgrep Platform findings for one project and ref.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save complete --format json output and publish it with --provider semgrep.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        project: z
+          .string()
+          .min(1)
+          .describe("Exact Semgrep project name, typically owner/repository."),
+      }),
+      options: z.object({
+        semgrepDeployment: optionValue("--semgrep-deployment").describe(
+          "Semgrep deployment slug.",
+        ),
+        semgrepRef: optionValue("--semgrep-ref").describe(
+          "Exact source ref, for example refs/heads/main.",
+        ),
+        semgrepProduct: z
+          .enum(SEMGREP_PLATFORM_PRODUCTS)
+          .default("sast")
+          .describe("Semgrep Findings API issue type."),
+        sourceRepositoryUrl: optionValue("--source-repository-url")
+          .optional()
+          .describe(
+            "Explicit mapping when the Semgrep project has no SCM URL.",
+          ),
+      }),
+      output,
+      run: ({ args, options, error }) =>
+        collect(
+          (signal) =>
+            (
+              dependencies.collectSemgrepPlatformFindings ??
+              collectSemgrepPlatformFindings
+            )(
+              {
+                project: args.project,
+                deployment: options.semgrepDeployment,
+                ref: options.semgrepRef,
+                product: options.semgrepProduct,
+                sourceRepositoryUrl: options.sourceRepositoryUrl,
+                signal,
+              },
+              { environment: dependencies.environment },
+            ),
+          error,
+        ),
+    });
+  }
+  if (importsEnabled) {
+    registerGitHubAdvisories();
+    registerHostedScannerImports();
+  }
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -6773,7 +6906,9 @@ export async function main(
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     if (
       command === "import" &&
-      (subcommand === "github" || subcommand === "github-advisories") &&
+      ["github", "github-advisories", "semgrep", "snyk"].includes(
+        subcommand ?? "",
+      ) &&
       frameworkFlags.rawCollector
     ) {
       // Incur's skill-sync notice turns a saved collector array into an object.
@@ -6783,7 +6918,8 @@ export async function main(
       !importsEnabled &&
       ((command === "publish" && subcommand === "findings") ||
         (command === "findings" && subcommand === "imported") ||
-        (command === "import" && subcommand === "github-advisories"))
+        (command === "import" &&
+          ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "")))
     ) {
       if (
         process.env["COMPLETE"] ||
@@ -6803,7 +6939,8 @@ export async function main(
         // This route only formats a disabled command; it is not an installed skill.
         cliOptions.sync = false;
         if (command === "publish") registerFindingPublication();
-        else registerGitHubAdvisories();
+        else if (subcommand === "github-advisories") registerGitHubAdvisories();
+        else registerHostedScannerImports();
         valueOptions = cliValueOptions(commands);
       }
     }

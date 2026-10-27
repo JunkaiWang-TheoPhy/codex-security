@@ -5,6 +5,10 @@ import {
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
+  isSemgrepPlatformReport,
+  normalizeSemgrepPlatformFindings,
+} from "./semgrep-platform-findings.js";
+import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
@@ -20,7 +24,7 @@ import {
 
 export interface SemgrepImportOptions {
   /** Source repository declared by the caller; never inferred from the destination. */
-  sourceRepositoryUrl: string;
+  sourceRepositoryUrl?: string;
 }
 
 function sourceRepository(options: SemgrepImportOptions): string {
@@ -180,10 +184,16 @@ function sarifIdentity(
 
 export function normalizeSemgrepFindings(
   input: unknown,
-  options: SemgrepImportOptions,
+  options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
+  if (isSemgrepPlatformReport(document))
+    return normalizeSemgrepPlatformFindings(
+      document,
+      options.sourceRepositoryUrl,
+      target,
+    );
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
@@ -471,7 +481,7 @@ export function normalizeSemgrepSarif(
 
 export async function readSemgrepFindings(
   path: string,
-  options: SemgrepImportOptions,
+  options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
   return normalizeSemgrepFindings(await readScannerJson(path), options, target);

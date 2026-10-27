@@ -34,7 +34,7 @@ export async function prepareLocalExternalImport(
   if (normalizedOptions.provider === "semgrep") {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
-    const source = options.sourceRepositoryUrl!;
+    const source = parsed.reportRepositoryUrl!;
     const knownGitHub = dependencies.sourceRepositories?.some(
       ({ url, platform }) =>
         platform === "github" &&
@@ -62,6 +62,9 @@ export async function prepareLocalExternalImport(
     environment,
     sourceRepositories: [
       ...(dependencies.sourceRepositories ?? []),
+      ...(parsed.reportRepositoryUrl
+        ? [{ url: parsed.reportRepositoryUrl }]
+        : []),
       ...sourceRepositories,
     ],
   });

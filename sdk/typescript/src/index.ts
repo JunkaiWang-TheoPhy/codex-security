@@ -332,11 +332,24 @@ export {
   readSnykFindings,
 } from "./snyk-findings.js";
 export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
+export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export {
+  collectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
+  type SemgrepPlatformOptions,
+  type SemgrepPlatformReport,
+} from "./semgrep-platform-findings.js";
 export {
   normalizeEndorFindings,
   normalizeEndorSarif,

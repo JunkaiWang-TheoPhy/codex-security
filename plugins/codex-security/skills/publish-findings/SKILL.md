@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import hosted Snyk Open Source and Code issues, Semgrep Platform findings, Snyk Open Source or Semgrep Code scan reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Supports native JSON, qualified SARIF and provider-specific exports, including gzip. Does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
@@ -56,7 +56,9 @@ Validate the acquisition path against actual responses from an authorized Wiz te
 
 Use a stable Wiz tenant/finding namespace as `--source-key`; a project filter does not create a new identity. Confirm the selected assets or builds belong to the destination repository. Do not infer source branches or revisions from the current checkout, invent missing evidence, or import vendor credentials, unrelated records, or local assessments as original scanner evidence. Do not retrieve or test credentials or apply suggested fixes.
 
-## Snyk Open Source
+## Snyk
+
+For an existing backlog use `codex-security import snyk PROJECT_ID --snyk-org ORG_ID --snyk-product open-source --source-repository-url REPO_URL --format json` with the user's read-authorized `SNYK_TOKEN`. For a hosted Snyk Code project select `--snyk-product code`. Save the completed JSON output, then preview with `publish findings --provider snyk`. Do not use CLI/MCP scan output as hosted project evidence or assume that a missing location can be reconstructed.
 
 Prefer the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex) when available. Ask its `snyk-findings-export` skill for **SCA only from the repository’s Git root** and save the `snyk-findings-export/v1` bundle. It scans the current workspace through local MCP; it cannot list existing platform projects or retrieve earlier findings. Do not substitute a fresh scan for a request to read a platform backlog. Authentication, relevant Snyk access and the project's package tooling are required.
 
@@ -68,13 +70,13 @@ Use one format consistently per repository, branch and scan target, with a stabl
 
 Retain package versions, reported fixed versions, provenance and original evidence without claiming a fix was applied. Known repository claims must match the selected Cloud repository or, when available, a configured local Git remote. Resolve an unknown repository with the user; never infer that an export belongs to the current checkout. Follow [local imports](#import-locally) for preview, confirmation and readback or [Cloud publication](#publish-to-cloud) for upload authorization. All three Snyk formats support either destination.
 
-## Semgrep Code
+## Semgrep
 
-Prefer native Code/SAST CLI or CI JSON for this reader; use self-contained SARIF 2.1.0 as a compatibility path. JSON retains the original severity better than SARIF. The reader does not accept Platform API, Guardian or MCP response envelopes, or a general Supply Chain or Secrets feed. Select SAST rules or Code-only CI output; identifiable non-SAST records are excluded, but SARIF may omit the product metadata needed to distinguish Secrets.
+For a CLI/CI scan, prefer native Code/SAST JSON; self-contained SARIF 2.1.0 is a compatibility path that loses some severity distinctions. Select SAST rules or Code-only CI output; identifiable non-SAST records are excluded, but SARIF may omit the metadata needed to distinguish Secrets. For hosted findings use the separate Platform collector, not individual API pages or Guardian/MCP summaries.
 
 For a user-requested new scan, use the installed Semgrep CLI from the source repository root with the selected SAST rules: `semgrep scan --config /path/to/sast-rules.yaml --json-output /path/to/semgrep.json .`. Existing CI jobs can produce the same artifact using `--json-output`; authenticated `semgrep ci --code` follows the job's policy and baseline scope. Explain that this generates fresh scan findings, and do not substitute it for a request to retrieve existing Platform findings.
 
-For existing findings, the official [Semgrep Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) can help select and inspect them. Importing its output needs a separate qualified response mapping and complete pagination for the selected repository/ref. The local `semgrep_findings` MCP tool and Platform REST API also use contracts distinct from CLI reports. Do not reshape a summary into a scan report or claim that a limited tool response is a complete export.
+For existing findings, collect the selected deployment, project and ref with `codex-security import semgrep OWNER/PROJECT --semgrep-deployment SLUG --semgrep-ref REF --semgrep-product sast --format json`. Requires `SEMGREP_APP_TOKEN` with Web API access. Use `sca` for Supply Chain or `ai_sast` for AI-powered detections. Save the completed output and preview with `publish findings --provider semgrep`. Do not reshape an individual REST page, Guardian result or MCP summary into a scan report. A hosted export carries the selected repository URL.
 
 Import the native report with `--provider semgrep`, a stable organization/project/branch `--source-key`, and `--source-repository-url` identifying the actual source repository. Use `--to local --repository /path/to/project` for local storage or `--to cloud --repository URL_OR_ID` for Cloud. The source URL is checked against configured local Git remotes or the Cloud destination. Preview with `--dry-run --format json` before confirming the import.
 

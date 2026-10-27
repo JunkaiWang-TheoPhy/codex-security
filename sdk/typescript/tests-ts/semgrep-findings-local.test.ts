@@ -13,6 +13,10 @@ import {
 } from "../src/semgrep-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
+  platformFinding,
+  platformReport,
+} from "./support/semgrep-platform-fixtures.js";
+import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
@@ -20,6 +24,55 @@ import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
 const formats = ["JSON", "SARIF"] as const;
+
+test("a saved Platform collection replays in SQLite and a foreign empty collection fails provenance", async () => {
+  const fixture = await localFindingsFixture({ remote: repositoryUrl });
+  try {
+    const file = join(fixture.root, "platform.json.gz");
+    const options = {
+      repository: fixture.repository,
+      provider: "semgrep" as const,
+      sourceKey: "example/project/main/platform",
+    };
+    const dependencies = { environment: fixture.environment };
+    const finding = platformFinding(17);
+    for (const [index, status] of ["open", "open", "fixed"].entries()) {
+      await writeFile(
+        file,
+        gzipSync(JSON.stringify(platformReport([{ ...finding, status }]))),
+      );
+      const prepared = await prepareLocalExternalImport(
+        file,
+        options,
+        dependencies,
+      );
+      const outcome = await prepared.import();
+      expect(outcome.counts).toMatchObject({
+        [["created", "unchanged", "updated"][index]!]: 1,
+      });
+    }
+    const records = await listLocalExternalFindings(options, dependencies);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      version: 2,
+      assessment: { state: "not_assessed" },
+      evidence: { details: { source_status: "fixed" } },
+    });
+    const empty = platformReport([]);
+    await writeFile(
+      file,
+      JSON.stringify({
+        ...empty,
+        project: { ...empty.project, url: "https://github.com/other/project" },
+      }),
+    );
+    await expect(
+      prepareLocalExternalImport(file, options, dependencies),
+    ).rejects.toThrow("does not match");
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 function report(
   format: (typeof formats)[number],

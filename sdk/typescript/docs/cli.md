@@ -1276,7 +1276,7 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-and `import github-advisories` are absent from command help and schemas and cannot
+`import snyk`, `import semgrep`, and `import github-advisories` are absent from command help and schemas and cannot
 run. The SDK's external publication, local import/readback, and advisory
 acquisition APIs require the same flag in their effective environment. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
@@ -1385,8 +1385,9 @@ confirmation and retry flow below.
 
 ### Import Snyk Open Source findings
 
-Import **Open Source SCA vulnerabilities only**. Licenses, Code, Container, IaC,
-SBOM results and platform backlog ingestion are outside this adapter.
+The plugin and CLI file formats below import **Open Source SCA vulnerabilities
+only**, not Code, Container, IaC, licenses or SBOMs. For existing Open Source
+or Code issues use the [hosted collector](#collect-hosted-snyk-and-semgrep-findings).
 
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 with its `snyk-findings-export` skill to collect SCA findings from the repository's
@@ -1444,6 +1445,40 @@ use `--yes` after reviewing the preview. Read local records with
 evidence is not a Codex assessment. No Snyk-side triage state is changed. See the
 [Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) for format limits and
 acquisition details.
+
+### Collect hosted Snyk and Semgrep findings
+
+Use the opt-in commands below to read existing findings rather than start a scan.
+Give Snyk a read-authorized `SNYK_TOKEN`, or Semgrep a Web API `SEMGREP_APP_TOKEN`,
+through the environment. Save the complete `--format json` output; don't filter
+fields, set an output token limit, or use `--full-output`. Check acquisition's exit
+status before importing. Neither service needs your Codex Cloud credentials.
+
+```sh
+codex-security import snyk PROJECT_UUID --snyk-org ORG_UUID --snyk-product open-source \
+  --source-repository-url https://github.com/example/project --format json > snyk-oss.json
+codex-security import snyk CODE_PROJECT_UUID --snyk-org ORG_UUID --snyk-product code \
+  --source-repository-url https://github.com/example/project --format json > snyk-code.json
+codex-security import semgrep example/project --semgrep-deployment example \
+  --semgrep-ref refs/heads/main --semgrep-product sast --format json > semgrep-hosted.json
+```
+
+Snyk defaults to Open Source at `https://api.snyk.io`; select a supported regional
+origin with `--snyk-api-origin`. Semgrep defaults to `sast`; `sca` and `ai_sast`
+use the same scoped Findings API. Do not use a Secrets API response. The saved
+reports work with existing `publish findings --provider snyk|semgrep` for
+both destinations. Use a stable source key per organization, project, ref
+and product. For example:
+
+```sh
+codex-security publish findings snyk-code.json --provider snyk --to local \
+  --repository ./project --source-key example/code-project/main/hosted-code --dry-run
+codex-security publish findings semgrep-hosted.json --provider semgrep --to cloud \
+  --repository https://github.com/example/project --source-key example/project/main/platform-sast --dry-run
+```
+
+Review the destination and exclusions before confirming. Replaying a changed
+record updates it; absence is not evidence of a fix. No hosted triage writes are made.
 
 ### Import Wiz findings
 

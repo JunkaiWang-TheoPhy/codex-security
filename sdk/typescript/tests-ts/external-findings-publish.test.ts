@@ -44,6 +44,15 @@ import {
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import {
+  platformFinding,
+  platformReport,
+} from "./support/semgrep-platform-fixtures.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -899,6 +908,156 @@ test("CLI preview and rejected confirmation never POST or persist an upload", as
   const headless = createCliTest(main);
   expect(await headless.runCli(f.command, f.cliDeps)).toBe(2);
   expect(headless.stderr.text()).toContain("needs confirmation");
+});
+
+test.each(["open-source", "code"] as const)(
+  "hosted Snyk %s publishes, replays and verifies an update without assessment",
+  async (product) => {
+    const sourceRepositoryUrl = "https://github.com/example/project";
+    const report = snykRestFixture(product, { sourceRepositoryUrl });
+    const cloud = await fixture(report);
+    const selected = {
+      ...options,
+      provider: "snyk" as const,
+      sourceKey: `example/hosted/${product}`,
+    };
+    const publish = async () =>
+      (
+        await prepareExternalPublication(cloud.file, selected, cloud.deps)
+      ).publish();
+    expect((await publish()).counts.created).toBe(1);
+    expect((await publish()).counts.unchanged).toBe(1);
+    await writeFile(
+      cloud.file,
+      JSON.stringify(
+        snykRestFixture(product, {
+          sourceRepositoryUrl,
+          title: "Changed finding",
+          updatedAt: "2025-03-03T04:05:06Z",
+        }),
+      ),
+    );
+    const updated = await publish();
+    expect(updated).toMatchObject({ verified: 1, counts: { updated: 1 } });
+    expect([...cloud.reports.values()]).toMatchObject([
+      {
+        version: 2,
+        assessment: { state: "not_assessed" },
+        evidence: { title: "Changed finding" },
+      },
+    ]);
+    await expect(
+      prepareExternalPublication(
+        cloud.file,
+        {
+          ...selected,
+          sourceRepositoryUrl: "https://github.com/other/project",
+        },
+        cloud.deps,
+      ),
+    ).rejects.toThrow("does not match");
+  },
+);
+
+test.each(["semgrep", "snyk"] as const)(
+  "normalized %s cannot mask a foreign native repository with the selected project",
+  async (provider) => {
+    const sourceRepositoryUrl = "https://github.com/example/project";
+    const foreign = "https://github.com/example/other";
+    const input =
+      provider === "semgrep"
+        ? normalizeSemgrepPlatformFindings(platformReport())
+        : normalizeSnykIssues(
+            snykRestFixture("open-source", { sourceRepositoryUrl }),
+          );
+    const raw = input.findings[0]!.evidence.source_data!;
+    if (provider === "semgrep")
+      raw["finding"] = {
+        ...platformFinding(12),
+        repository: { name: "example/other", url: foreign },
+      };
+    else
+      raw["project"] = snykRestFixture("open-source", {
+        sourceRepositoryUrl: foreign,
+      }).project;
+    const cloud = await fixture();
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider },
+        cloud.deps,
+      ),
+    ).rejects.toThrow("does not match");
+    expect(cloud.posts).toHaveLength(0);
+    const local = await localFindingsFixture({ remote: sourceRepositoryUrl });
+    try {
+      await expect(
+        prepareNormalizedLocalImport(
+          input,
+          { ...options, provider, repository: local.repository },
+          { environment: local.environment },
+        ),
+      ).rejects.toThrow("does not match");
+    } finally {
+      await local.dispose();
+    }
+  },
+);
+
+test("Semgrep Supply Chain report binds its repository even without typed SAST details", async () => {
+  const record = {
+    ...platformFinding(3),
+    found_dependency: { package: "example", version: "1" },
+    vulnerability_identifier: "CVE-2025-0001",
+  };
+  const report = { ...platformReport([record]), product: "sca" };
+  const selected = { ...options, provider: "semgrep" as const };
+  const matched = await fixture(report);
+  const prepared = await prepareExternalPublication(
+    matched.file,
+    selected,
+    matched.deps,
+  );
+  expect((await prepared.publish()).verified).toBe(1);
+  const other = await fixture(report, "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow("does not match");
+  expect(other.posts).toEqual([]);
+});
+
+test("a canceled Cloud preparation does not open the artifact or contact the destination", async () => {
+  const stopped = new Error("import stopped");
+  await expect(
+    prepareExternalPublication("absent-file", options, {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      signal: AbortSignal.abort(stopped),
+    }),
+  ).rejects.toBe(stopped);
+});
+
+test("editing a preview cannot change an upload or its interrupted replay", async () => {
+  const fixtureState = await fixture();
+  const prepared = await prepareExternalPublication(
+    fixtureState.file,
+    options,
+    fixtureState.deps,
+  );
+  const original = structuredClone(prepared.preview.requests[0]!);
+  prepared.preview.findings[0]!.evidence.title = "Edited preview title";
+  prepared.preview.requests[0]!.request_id = "edited-request";
+  prepared.preview.requests[0]!.source.source_key = "edited-source";
+  fixtureState.state.loseResponse = true;
+  await expect(prepared.publish()).rejects.toThrow();
+  expect(JSON.parse(fixtureState.posts[0]!)).toEqual(original);
+  const retry = await prepareExternalPublication(
+    fixtureState.file,
+    options,
+    fixtureState.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  await retry.publish();
+  expect(fixtureState.posts[1]).toBe(fixtureState.posts[0]);
 });
 
 test("CLI creates, reimports unchanged, and updates the same canonical finding", async () => {
@@ -3762,6 +3921,40 @@ test.each([
     expect(f.reports.size).toBe(0);
   },
 );
+
+test("a Semgrep file checkpoint resumes after the same destination is renamed, but a fresh submission cannot", async () => {
+  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
+  const cloud = await fixture(semgrepJson());
+  const selected = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceRepositoryUrl: cloud.destination().url,
+  };
+  const first = await prepareExternalPublication(
+    cloud.file,
+    selected,
+    cloud.deps,
+  );
+  cloud.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const renamed = {
+    ...cloud.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await cloud.deps.fetch(url, init);
+      if (!new URL(url).pathname.endsWith("/repositories")) return response;
+      const catalog = await response.json();
+      catalog.data[0].url = "https://github.com/example/renamed";
+      return Response.json(catalog);
+    },
+  };
+  const retry = await prepareExternalPublication(cloud.file, selected, renamed);
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(cloud.posts[1]).toBe(cloud.posts[0]);
+  await expect(
+    prepareExternalPublication(cloud.file, selected, renamed),
+  ).rejects.toThrow("does not match");
+});
 
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
   const { endorSarif } = await import("./support/endor-import-fixtures.js");
