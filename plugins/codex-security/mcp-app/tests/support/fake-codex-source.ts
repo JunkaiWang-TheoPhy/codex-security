@@ -200,7 +200,11 @@ export const expectedGitEnvironment = (
   nodePath: string,
   environment?: ReturnType<typeof workerScanEnvironment>,
 ) => ({
-  ...gitEnvironment,
+  PATH: gitEnvironment.PATH,
+  HOME: gitEnvironment.HOME,
+  NODE_OPTIONS: gitEnvironment.NODE_OPTIONS,
+  NODE_EXTRA_CA_CERTS: gitEnvironment.NODE_EXTRA_CA_CERTS,
+  CODEX_SECURITY_GIT: gitEnvironment.CODEX_SECURITY_GIT,
   CODEX_MCP_NODE_PATH: nodePath,
   ...(environment === undefined
     ? {}

@@ -82,6 +82,72 @@ interface CodexSdkWorkerRuntimeSettings {
   cyberAccessProgram?: CyberAccessProgram;
 }
 
+// The worker process needs enough host context to launch Codex and ordinary
+// repository tools. Provider credentials are selected separately below; no
+// other ambient variables cross the model-controlled worker boundary.
+const WORKER_BOOTSTRAP_ENVIRONMENT = [
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "WINDIR",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "PYTHON",
+  "PYTHONUTF8",
+  "NODE_OPTIONS",
+  "NODE_EXTRA_CA_CERTS",
+  "XDG_CACHE_HOME",
+  "LD_LIBRARY_PATH",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
+  "CODEX_CLI_PATH",
+  "CODEX_HOME",
+  "CODEX_MANAGED_PACKAGE_ROOT",
+  "CODEX_MCP_NODE_PATH",
+  "CODEX_BROWSER_USE_NODE_PATH",
+  "CODEX_ELECTRON_RESOURCES_PATH",
+  "CODEX_SAFETY_IDENTIFIER",
+  "CODEX_SECURITY_CONFIG_PATH",
+  "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  "CODEX_SECURITY_GIT",
+  "CODEX_SECURITY_KNOWLEDGE_BASE",
+  "LOCALAPPDATA",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "REQUESTS_CA_BUNDLE",
+] as const;
+
+const WORKER_BOOTSTRAP_ENVIRONMENT_KEYS = new Set(
+  WORKER_BOOTSTRAP_ENVIRONMENT.map((name) => name.toUpperCase()),
+);
+
+const BEDROCK_ENVIRONMENT = [
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+] as const;
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
@@ -116,7 +182,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv, process.env));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -160,6 +226,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Worker-owned tool and permission settings take precedence over inheritance.
       const configOverrides = profileConfigOverrides({
         ...runtimeSettings.config,
+        shell_environment_policy: workerShellEnvironmentPolicy(
+          runtimeSettings.config.shell_environment_policy,
+          Object.keys(runtimeSettings.environment ?? {}).filter(
+            (name) =>
+              !WORKER_BOOTSTRAP_ENVIRONMENT_KEYS.has(name.toUpperCase()),
+          ),
+        ),
         responses_api_metadata: {
           codex_security_surface: "plugin",
           codex_security_command: "scan",
@@ -611,13 +684,19 @@ function mergeConfigTables(
 
 export async function workerRuntimeSettings(
   environment: Record<string, string>,
+  parentEnvironment: NodeJS.ProcessEnv = environment,
 ): Promise<CodexSdkWorkerRuntimeSettings> {
   const configPath = environmentVariable(
     environment,
     "CODEX_SECURITY_CONFIG_PATH",
     process.platform,
   );
-  if (!configPath) return { config: {} };
+  if (!configPath) {
+    return {
+      config: {},
+      environment: selectedProviderEnvironment({}, parentEnvironment),
+    };
+  }
   const config = parseToml(await fs.readFile(configPath, "utf8"));
   const profiles = config.profiles;
   const profile =
@@ -653,9 +732,6 @@ export async function workerRuntimeSettings(
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
-  if (isRecord(workerEnvironment)) {
-    settings.environment = workerEnvironment as Record<string, string>;
-  }
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.
     if (nativeProfile.length === 0 || /[^A-Za-z0-9_-]/.test(nativeProfile)) {
@@ -706,6 +782,12 @@ export async function workerRuntimeSettings(
       ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
     },
   };
+  settings.environment = {
+    ...selectedProviderEnvironment(settings.config, parentEnvironment),
+    ...(isRecord(workerEnvironment)
+      ? (workerEnvironment as Record<string, string>)
+      : {}),
+  };
   // Profiles are resolved above; providers stay in their private native file.
   // Workers register their own tools and verified read-only permission profile.
   for (const key of [
@@ -728,26 +810,10 @@ export async function workerRuntimeSettings(
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  ) as Record<string, string>;
-  if (process.platform === "win32") {
-    // process.env is case-insensitive on Windows; a plain object is not.
-    // Keep its selected values while giving the child one spelling per key.
-    for (const name of [
-      "CODEX_CLI_PATH",
-      "CODEX_HOME",
-      "CODEX_MANAGED_PACKAGE_ROOT",
-      "LOCALAPPDATA",
-    ]) {
-      const value = process.env[name];
-      for (const key of Object.keys(environment)) {
-        if (key.toUpperCase() === name) delete environment[key];
-      }
-      if (value !== undefined) environment[name] = value;
-    }
+  const environment: Record<string, string> = {};
+  for (const name of WORKER_BOOTSTRAP_ENVIRONMENT) {
+    const value = environmentVariable(process.env, name, process.platform);
+    if (value !== undefined) environment[name] = value;
   }
   const codexHome = environment.CODEX_HOME;
   if (
@@ -763,6 +829,79 @@ async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
     environment.CODEX_HOME = await fs.realpath(codexHome);
   }
   return environment;
+}
+
+function selectedProviderEnvironment(
+  config: Record<string, unknown>,
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const provider =
+    typeof config.model_provider === "string"
+      ? config.model_provider
+      : undefined;
+  const providers = config.model_providers;
+  const providerConfig =
+    provider !== undefined && isRecord(providers)
+      ? providers[provider]
+      : undefined;
+  const names = new Set<string>();
+  if (provider === "amazon-bedrock") {
+    for (const name of BEDROCK_ENVIRONMENT) names.add(name);
+  } else if (provider === undefined || provider === "openai") {
+    names.add("OPENAI_API_KEY");
+    names.add("CODEX_API_KEY");
+  } else if (isRecord(providerConfig)) {
+    if (typeof providerConfig.env_key === "string") {
+      names.add(providerConfig.env_key);
+    }
+    if (isRecord(providerConfig.env_http_headers)) {
+      for (const name of Object.values(providerConfig.env_http_headers)) {
+        if (typeof name === "string") names.add(name);
+      }
+    }
+    if (providerConfig.requires_openai_auth !== false) {
+      names.add("OPENAI_API_KEY");
+      names.add("CODEX_API_KEY");
+    }
+  }
+  return selectedEnvironment(environment, names);
+}
+
+function selectedEnvironment(
+  environment: NodeJS.ProcessEnv,
+  names: Iterable<string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Array.from(names).flatMap((name) => {
+      const value = environmentVariable(environment, name, process.platform);
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+}
+
+function workerShellEnvironmentPolicy(
+  inherited: unknown,
+  selectedProviderEnvironmentNames: readonly string[],
+): Record<string, unknown> {
+  const policy = isRecord(inherited) ? inherited : {};
+  const inheritedExcludes = Array.isArray(policy.exclude) ? policy.exclude : [];
+  return {
+    ...policy,
+    ignore_default_excludes: false,
+    exclude: Array.from(
+      new Set([
+        ...inheritedExcludes,
+        "CODEX_HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "*KEY*",
+        "*SECRET*",
+        "*TOKEN*",
+        ...selectedProviderEnvironmentNames,
+      ]),
+    ),
+  };
 }
 
 export function resolveCodexPath(

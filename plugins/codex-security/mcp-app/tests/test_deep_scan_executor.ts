@@ -1187,6 +1187,12 @@ async function testOpenAiCredentialsReachWorker() {
       fixture.root,
       virtualenv,
     );
+    const expectedWorkerEnvironment: Partial<typeof runtimeEnvironment> = {
+      ...runtimeEnvironment,
+    };
+    delete expectedWorkerEnvironment.CODEX_SECURITY_STATE_DIR;
+    delete expectedWorkerEnvironment.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS;
+    delete expectedWorkerEnvironment.RUNNER_TRACKING_ID;
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
@@ -1284,10 +1290,7 @@ env_key = "CODEX_API_KEY"
               : nativePreflight!;
           const invocation = await readJson(fixture.markerPath);
           assert.equal(preflight.codexHome, fixture.root);
-          assert.equal(
-            preflight.runnerTrackingId,
-            runtimeEnvironment.RUNNER_TRACKING_ID,
-          );
+          assert.equal(preflight.runnerTrackingId, undefined);
           assert.equal(
             preflight.libraryPath,
             runtimeEnvironment.LD_LIBRARY_PATH,
@@ -1298,7 +1301,10 @@ env_key = "CODEX_API_KEY"
             "--model",
             "gpt-daybreak-blue-latest",
           );
-          assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
+          assert.deepEqual(
+            invocation.runtimeEnvironment,
+            expectedWorkerEnvironment,
+          );
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);
             assert.equal(
@@ -1443,6 +1449,7 @@ async function testWorkerRuntimeSettings() {
     "DYLD_FALLBACK_LIBRARY_PATH",
     "TEMP",
     "TMP",
+    "SYNTHETIC_PARENT_SECRET",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
@@ -1452,6 +1459,7 @@ async function testWorkerRuntimeSettings() {
     delete process.env.SYNTHETIC_GATEWAY_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
+    process.env.SYNTHETIC_PARENT_SECRET = "must-not-reach-workers";
     for (const [configuration, expected] of cases) {
       for (const [name, value] of saved) {
         if (name === "TEMP" || name === "TMP") restoreEnv(name, value);
@@ -2038,7 +2046,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-              path.join(fixture.root, "ambient-plugin"),
+              undefined,
+            );
+            assert.equal(
+              workerLaunch.environment!.SYNTHETIC_PARENT_SECRET,
+              undefined,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -2077,8 +2089,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               invocation.runtimeEnvironment
                 .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-              externalImports[index].override ??
-                externalImports[index].inherited,
+              externalImports[index].override,
             );
             assert.equal(
               process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
@@ -2143,7 +2154,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             await assert.rejects(readFile(deepConfigPath), { code: "ENOENT" });
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
-              path.join(fixture.root, `state-${index}`),
+              undefined,
             );
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(
@@ -2371,20 +2382,47 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(invocation.deepConfigPath, deepConfigPath);
-            assert.deepEqual(
-              JSON.parse(
-                JSON.stringify(
-                  parseToml(
-                    invocation.argv
-                      .filter((arg: string) =>
-                        arg.startsWith("shell_environment_policy="),
-                      )
-                      .join("\n"),
-                  ),
+            const shellEnvironmentPolicy = JSON.parse(
+              JSON.stringify(
+                parseToml(
+                  invocation.argv
+                    .filter((arg: string) =>
+                      arg.startsWith("shell_environment_policy="),
+                    )
+                    .join("\n"),
                 ),
-              ).shell_environment_policy,
-              workerConfigurations[index].shellPolicy,
+              ),
+            ).shell_environment_policy;
+            assert.equal(
+              shellEnvironmentPolicy.inherit,
+              workerConfigurations[index].shellPolicy?.inherit,
             );
+            assert.deepEqual(
+              shellEnvironmentPolicy.set,
+              workerConfigurations[index].shellPolicy?.set,
+            );
+            assert.equal(
+              shellEnvironmentPolicy.ignore_default_excludes,
+              false,
+            );
+            for (const name of [
+              "CODEX_HOME",
+              "HTTP_PROXY",
+              "HTTPS_PROXY",
+              "ALL_PROXY",
+              "*KEY*",
+              "*SECRET*",
+              "*TOKEN*",
+              ...(selectedProvider.environment === undefined
+                ? []
+                : [
+                    "SYNTHETIC_GATEWAY_KEY",
+                    "SYNTHETIC_HEADER_VALUE",
+                    "CODEX_SQLITE_HOME",
+                  ]),
+            ]) {
+              assert.ok(shellEnvironmentPolicy.exclude.includes(name));
+            }
             const workerFeatures = parseToml(
               invocation.argv
                 .filter((arg: string) => /^features[.=]/.test(arg))
@@ -2427,10 +2465,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const index = workerConfigurations.indexOf(selectedProvider);
             assert.equal(preflight.codexHome, await realpath(codexHome));
-            assert.equal(
-              preflight.stateDirectory,
-              path.join(fixture.root, `state-${index}`),
-            );
+            assert.equal(preflight.stateDirectory, undefined);
             assert.deepEqual(preflight.temporaryEnvironment, {
               ...temporaryEnvironments[index],
               ...(index === 1
@@ -2439,10 +2474,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               launch.environment!.CODEX_SECURITY_STATE_DIR,
-              path.join(
-                fixture.root,
-                `state-${workerConfigurations.indexOf(selectedProvider)}`,
-              ),
+              undefined,
+            );
+            assert.equal(
+              launch.environment!.SYNTHETIC_PARENT_SECRET,
+              undefined,
             );
             assert.equal(
               preflight.providerKey,
