@@ -44,6 +44,11 @@ import {
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import {
+  inspectorPackageFinding,
+  inspectorRepositoryUrl,
+} from "./support/inspector-import-fixtures.js";
+import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -867,6 +872,57 @@ test("request and pagination metadata retain Cloud byte limits and distinct iden
   expect(() =>
     validateRepositories({ ...page, next: `${page.next}é` }),
   ).toThrow("4096 UTF-8");
+});
+
+test("Inspector publication keeps repository provenance and reuses the source occurrence", async () => {
+  const input = inspectorPackageFinding();
+  const fixtureResult = await fixture({ findings: [input] });
+  const inspectorOptions = {
+    ...options,
+    provider: "inspector" as const,
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+    sourceKey: "inspector/example/project",
+  };
+  const prepare = () =>
+    prepareExternalPublication(
+      fixtureResult.file,
+      inspectorOptions,
+      fixtureResult.deps,
+    );
+  const prepared = await prepare();
+  expect(fixtureResult.posts).toHaveLength(0);
+  expect(prepared.preview.requests[0]!.source.provider).toBe("inspector");
+  expect((await prepared.publish()).counts.created).toBe(1);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  expect(fixtureResult.reports.has(input.findingArn)).toBe(true);
+
+  const wrongDestination = await fixture(
+    { findings: [input] },
+    "https://github.com/example/other",
+  );
+  await expect(
+    prepareExternalPublication(
+      wrongDestination.file,
+      inspectorOptions,
+      wrongDestination.deps,
+    ),
+  ).rejects.toThrow(/does not match/i);
+  expect(wrongDestination.posts).toHaveLength(0);
+  const wrongArn = normalizeInspectorFindings(
+    { findings: [input] },
+    inspectorRepositoryUrl,
+  );
+  wrongArn.findings[0]!.source_finding_id = input.findingArn.replace(
+    /a$/u,
+    "b",
+  );
+  await expect(
+    prepareNormalizedExternalPublication(
+      wrongArn,
+      inspectorOptions,
+      fixtureResult.deps,
+    ),
+  ).rejects.toThrow(/ARN|identity|source finding/i);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

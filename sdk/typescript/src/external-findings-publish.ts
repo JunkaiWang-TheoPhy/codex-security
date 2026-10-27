@@ -34,6 +34,7 @@ import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
+import { boundScannerRepositoryUrls } from "./scanner-repository-provenance.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -731,6 +732,7 @@ async function preparePublicationInput(
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
+        ...boundScannerRepositoryUrls(options.provider, finding, "cloud"),
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),

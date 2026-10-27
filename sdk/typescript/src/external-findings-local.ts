@@ -21,6 +21,7 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { parseGitRemote } from "./git-remote.js";
+import { boundScannerRepositoryUrls } from "./scanner-repository-provenance.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -508,9 +509,15 @@ export async function prepareNormalizedLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  for (const { evidence } of current.findings) {
-    const url = evidence.details?.repository?.url;
+  for (const finding of current.findings) {
+    const url = finding.evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    for (const source of boundScannerRepositoryUrls(
+      options.provider,
+      finding,
+      "local",
+    ))
+      sources.set(source, { url: source });
   }
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.
