@@ -1861,6 +1861,82 @@ console.log(publication.scanId, publication.created.length);
 Options also include `projectId`, `linearApiKey`, and `assigneeId` (ID or email).
 `checkScanPublication()` takes the same destination options for a read-only check.
 
+## Review audit events
+
+Review one version 1 JSON batch from stdin. The caller groups related events from a single source and supplies earlier events as context. A group can span polling windows. Each observation must cite a new event from its own group.
+
+```sh
+codex-security review-events --json < batch.json
+codex-security review-events --screen-with-decisions --cyber-access-program daybreak_blue --json < batch.json
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "example-trail",
+  "serviceContext": "Deploy sessions normally read build artifacts.",
+  "groups": [
+    {
+      "id": "deploy-session",
+      "contextEvents": [
+        {
+          "id": "login",
+          "timestamp": "2026-01-01T12:04:00Z",
+          "actor": "deploy",
+          "action": "AssumeRole"
+        }
+      ],
+      "events": [
+        {
+          "id": "grant",
+          "timestamp": "2026-01-01T12:06:00Z",
+          "actor": "deploy",
+          "action": "AttachRolePolicy",
+          "outcome": "success"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Each event requires an `id`, ISO timestamp with a time zone, and `action`. Optional fields are `actor`, `resource`, `outcome`, and a JSON object named `details`. Each group has a unique ID and an array of new `events`. The optional `contextEvents` array holds prior evidence. IDs must identify distinct records within a group.
+
+By default each nonempty group gets one read-only Codex review. With `--screen-with-decisions`, the command sends that group's evidence and service context to the OpenAI Decisions API using `OPENAI_API_KEY`. This is an additional API call even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
+
+For repeated reviews, select a trusted project file with `-c FILE` or `CODEX_SECURITY_PROJECT_CONFIG`. Explicit CLI options take precedence over the file.
+
+```yaml
+review_events:
+  screen_with_decisions: true
+  decisions_cutoff: 0.98
+```
+
+```sh
+codex-security review-events -c review.yaml --json < batch.json
+codex-security review-events -c review.yaml --decisions-cutoff 0.99 --json < batch.json
+```
+
+Results report the source and each group's `id`, `status` (`empty`, `screened`, or `reviewed`), `screening` (choice and confidence when screened), and `observations`. A full review can return zero observations. Each observation carries a `review` or `page` disposition, `rationale`, and supporting `eventIds`. A refusal, API failure, or invalid result fails the batch. Advance your collector's cursor only after persisting a successful review. The caller owns scheduling, deduplication, and pager delivery.
+
+The TypeScript package exports the same operation and Zod schemas.
+
+```ts
+import {
+  reviewSecurityEvents,
+  securityEventBatchSchema,
+} from "@openai/codex-security";
+
+const batch = securityEventBatchSchema.parse(input);
+const result = await reviewSecurityEvents(batch, {
+  screenWithDecisions: true,
+  decisionsCutoff: 0.98,
+  cyberAccessProgram: "daybreak_blue",
+});
+```
+
+To reuse a YAML file in the SDK, pass `(await loadProjectConfig("review.yaml")).reviewEvents` as the options argument. An explicit `decisionsCutoff` after spreading those options overrides the file.
+
 ## Classify finding severity
 
 Apply a rubric to completed findings without repeating discovery:

@@ -39,6 +39,7 @@ import {
   publishScan,
   runComponentScans,
   resolveProjectConfig,
+  reviewSecurityEvents,
   suggestOwners,
   type OwnerFinding,
   type OwnerSuggestion,
@@ -49,6 +50,8 @@ import {
   type PatchOptions,
   type PatchResult,
   type ProjectConfigInput,
+  type SecurityEventBatch,
+  type SecurityEventReview,
   type SeverityClassification,
   type ScanSeverityClassification,
   type ScanCost,
@@ -67,6 +70,18 @@ import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
 } from "@openai/codex-security/server";
+
+export async function reviewEvents(
+  batch: SecurityEventBatch,
+  file: string,
+): Promise<SecurityEventReview> {
+  const { reviewEvents: settings } = await loadProjectConfig(file);
+  return reviewSecurityEvents(batch, {
+    ...settings,
+    decisionsCutoff: 0.98,
+    cyberAccessProgram: "daybreak_blue",
+  });
+}
 
 export async function classify(
   findings: Finding[],

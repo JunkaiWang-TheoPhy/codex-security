@@ -46,6 +46,16 @@ export type {
   ProjectScope,
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
+export {
+  reviewSecurityEvents,
+  securityEventBatchSchema,
+  securityEventReviewSchema,
+} from "./review-events.js";
+export type {
+  ReviewSecurityEventsOptions,
+  SecurityEventBatch,
+  SecurityEventReview,
+} from "./review-events.js";
 export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
