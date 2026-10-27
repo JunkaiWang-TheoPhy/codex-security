@@ -439,6 +439,11 @@ export class DeepScanWorkerRunner {
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
+        if (result.outcome?.status === "blocked") {
+          throw new Error(
+            `Standard scan worker audit was blocked: ${result.outcome.reason}`,
+          );
+        }
         validationStarted = true;
         try {
           await input.validate();
