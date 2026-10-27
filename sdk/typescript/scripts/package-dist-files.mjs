@@ -42,6 +42,7 @@ const distModules = [
   "endor-findings",
   "blackduck-findings",
   "wiz-csv",
+  "veracode-findings",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
