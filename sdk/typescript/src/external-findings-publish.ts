@@ -33,9 +33,10 @@ import {
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import type {
-  ExternalFindings,
-  ExternalPublicationInput,
+import {
+  isEmptyExternalReport,
+  type ExternalFindings,
+  type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -117,6 +118,17 @@ export class ExternalPublicationError extends CodexSecurityError {
     cause: unknown,
   ) {
     super(message, { cause });
+  }
+}
+
+/** No upload can be prepared. The selection retains every reader exclusion. */
+export class NoPublishableFindingsError extends CodexSecurityError {
+  constructor(public readonly selection: ExternalFindings) {
+    super(
+      isEmptyExternalReport(selection)
+        ? "No supported findings are ready to publish: the report is empty."
+        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).`,
+    );
   }
 }
 
@@ -440,14 +452,12 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
-  if (parsed.findings.length === 0) {
-    throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
-    );
-  }
-  progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
+  dependencies.signal?.throwIfAborted();
   requireExternalImports(environment);
+  if (parsed.findings.length === 0)
+    throw new NoPublishableFindingsError(parsed);
+  progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.

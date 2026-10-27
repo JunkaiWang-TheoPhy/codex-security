@@ -1546,11 +1546,10 @@ then rerun without
 reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
 occurs. Existing source findings keep their Cloud environment; new findings use
 the repository’s current authorized default. Preview shows the environments that
-will receive the selected findings. The terminal preview summarizes severities,
-shows up to five finding IDs and titles, and identifies the evidence file and
-exclusions. `--dry-run --format json` retains all normalized findings and complete
-evidence for inspection. A prompt explicitly includes any records that will be
-skipped.
+will receive the selected findings. The terminal preview shows up to five finding
+IDs and five exclusions. Use `--dry-run --format json` for every normalized
+finding, original evidence, and exclusion reason. A prompt includes the number
+of records that will be skipped.
 
 #### Package vulnerability inputs
 
@@ -1729,10 +1728,22 @@ Results distinguish completion from partial or interrupted work:
 
 | Status        | Exit code | Meaning                                                                                            |
 | ------------- | --------- | -------------------------------------------------------------------------------------------------- |
+| `empty`       | 0         | The reader found no records and no exclusions. No Cloud destination was checked or changed.        |
 | `complete`    | 0         | All selected records were acknowledged and their source records read back.                         |
 | `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
 | `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
+
+A recognized zero-record report is a no-op, with or without `--dry-run` or
+`--yes`. It does not require a Cloud login, confirm that the repository exists,
+or close findings from a previous import. With `--to local` the checkout is
+still checked, but no workbench database is created and all counts are zero.
+An unreadable or unsuccessful scan is not an empty import. If every record is
+excluded from Cloud, the command fails; JSON and JSONL include the full
+`excluded` array with each record's position, source ID if known, and reason.
+SARIF runs that report failed execution and malformed result collections are
+rejected. An empty Snyk plugin bundle must show a successful Open Source (SCA)
+scan; a failed or unrequested SCA scan is not evidence of zero vulnerabilities.
 
 For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
 Failed and interrupted imports set the envelope's `ok` to `false`, with

@@ -6,12 +6,14 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   relativePath,
   requiredText,
   sarifRunContextForResult,
   strings,
+  successfulSarifInvocations,
   text,
 } from "./scanner-import.js";
 
@@ -54,7 +56,7 @@ export function normalizeEndorFindings(
     }
   }
   const values = list
-    ? array(list["objects"] ?? [], "Endor list.objects")
+    ? optionalArray(list["objects"], "Endor list.objects")
     : Array.isArray(input)
       ? input
       : [input];
@@ -194,6 +196,7 @@ export function normalizeEndorSarif(
     throw new Error("Expected Endor SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
+    successfulSarifInvocations(run, "Endor");
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (driver["name"] !== "endorctl")
@@ -217,7 +220,7 @@ export function normalizeEndorSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Endor results").map((result) => ({
+    return optionalArray(run["results"], "Endor results").map((result) => ({
       result,
       rulesById,
       documentContext,

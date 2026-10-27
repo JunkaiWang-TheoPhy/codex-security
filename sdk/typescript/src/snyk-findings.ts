@@ -6,12 +6,14 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   requiredText,
   sarifRunContextForResult,
   stableId,
   strings,
+  successfulSarifInvocations,
   text,
 } from "./scanner-import.js";
 
@@ -59,6 +61,13 @@ function pluginIdentity(value: unknown): string {
   ]);
 }
 
+function requireEmptyIssueCount(value: unknown, label: string): void {
+  if (value === undefined || value === 0) return;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${label} must be a nonnegative integer.`);
+  throw new Error(`${label} reported issues but the findings array is empty.`);
+}
+
 /** Import the official Snyk Codex plugin's documented local SCA bundle. */
 export function normalizeSnykFindingsExport(
   input: unknown,
@@ -72,9 +81,10 @@ export function normalizeSnykFindingsExport(
     throw new Error("Expected a snyk-findings-export/v1 bundle from Snyk.");
   const collection = record(document["collection"], "Snyk collection");
   const sourceTarget = record(collection["target"], "Snyk target");
+  const findings = array(document["findings"], "Snyk findings");
   const { findings: _findings, ...context } = document;
-  return normalizeRecords(
-    array(document["findings"], "Snyk findings"),
+  const parsed = normalizeRecords(
+    findings,
     (value, sourceFindingId) => {
       const finding = record(value, "Snyk plugin finding");
       const observation = record(finding["observation"], "Snyk observation");
@@ -143,6 +153,27 @@ export function normalizeSnykFindingsExport(
     pluginIdentity,
     target,
   );
+  if (parsed.read && !parsed.findings.length) return parsed;
+  let successfulSca = false;
+  for (const entry of optionalArray(
+    collection["scans"],
+    "Snyk collection scans",
+  )) {
+    const scan = record(entry, "Snyk collection scan");
+    if (scan["category"] !== "sca") continue;
+    if (scan["outcome"] !== "succeeded")
+      throw new Error(
+        `Snyk plugin SCA scan did not succeed (outcome: ${String(scan["outcome"])}).${scan["error"] ? " " + JSON.stringify(scan["error"]) : ""}`,
+      );
+    if (!parsed.read)
+      requireEmptyIssueCount(scan["issueCount"], "Snyk plugin SCA issueCount");
+    successfulSca = true;
+  }
+  if (!parsed.read && !successfulSca)
+    throw new Error(
+      "An empty Snyk plugin bundle must identify a successful SCA scan.",
+    );
+  return parsed;
 }
 
 function normalizeGitRepositoryUrl(
@@ -250,6 +281,7 @@ export function normalizeSnykSarif(
     throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
+    successfulSarifInvocations(run, "Snyk");
     const driver = record(
       record(run["tool"], "SARIF tool")["driver"],
       "SARIF driver",
@@ -440,7 +472,10 @@ export function normalizeSnykJson(
     const manifest =
       text(project["displayTargetFile"]) ?? text(project["targetFile"]);
     const { vulnerabilities, ...context } = project;
-    return array(vulnerabilities, "Snyk vulnerabilities").map((value) => ({
+    const records = array(vulnerabilities, "Snyk vulnerabilities");
+    if (!records.length)
+      requireEmptyIssueCount(project["uniqueCount"], "Snyk native uniqueCount");
+    return records.map((value) => ({
       value,
       context,
       manager,

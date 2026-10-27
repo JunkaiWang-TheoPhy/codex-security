@@ -8,6 +8,7 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   relativePath,
@@ -15,6 +16,7 @@ import {
   sarifRunContextForResult,
   stableId,
   strings,
+  successfulSarifInvocations,
   text,
 } from "./scanner-import.js";
 
@@ -188,7 +190,7 @@ export function normalizeSemgrepFindings(
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
-  if (array(document["errors"] ?? [], "Semgrep errors").length)
+  if (optionalArray(document["errors"], "Semgrep errors").length)
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
@@ -295,16 +297,10 @@ export function normalizeSemgrepSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const invocation of array(
-      run["invocations"] ?? [],
-      "Semgrep invocations",
-    )) {
-      const details = record(invocation, "Semgrep invocation");
-      if (details["executionSuccessful"] === false)
-        throw new Error("Semgrep SARIF contains an unsuccessful invocation.");
+    for (const details of successfulSarifInvocations(run, "Semgrep")) {
       if (
-        array(
-          details["toolExecutionNotifications"] ?? [],
+        optionalArray(
+          details["toolExecutionNotifications"],
           "Semgrep scan notifications",
         ).length
       )
@@ -325,7 +321,7 @@ export function normalizeSemgrepSarif(
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Semgrep results").map((result) => ({
+    return optionalArray(run["results"], "Semgrep results").map((result) => ({
       result,
       rulesById,
       hasRules: rules.length > 0,

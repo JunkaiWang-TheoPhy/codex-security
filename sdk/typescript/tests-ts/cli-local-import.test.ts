@@ -109,6 +109,23 @@ async function fixture() {
   return { root, repository, file, record, state, deps, command };
 }
 
+test("a zero-record local import skips confirmation and does not initialize the workbench", async () => {
+  const f = await fixture();
+  await writeFile(f.file, "[]");
+  const cli = createCliTest(main);
+  const code = await cli.runCli(f.command, f.deps);
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    repository: f.repository,
+    read: 0,
+    ready: 0,
+    findings: [],
+    excluded: [],
+    counts: { created: 0, updated: 0, unchanged: 0 },
+  });
+  await expect(readdir(f.state)).rejects.toThrow("ENOENT");
+});
+
 test("local preview and declined confirmation do not create database state or use Cloud", async () => {
   const f = await fixture();
   const preview = createCliTest(main);

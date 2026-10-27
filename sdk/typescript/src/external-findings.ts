@@ -22,6 +22,10 @@ export interface ExternalFindings {
   }[];
 }
 
+export function isEmptyExternalReport(input: ExternalFindings): boolean {
+  return input.read === 0 && !input.findings.length && !input.excluded.length;
+}
+
 /** @internal Keep earlier provider projections only for immutable request replay. */
 export interface ExternalPublicationInput {
   current: ExternalFindings;

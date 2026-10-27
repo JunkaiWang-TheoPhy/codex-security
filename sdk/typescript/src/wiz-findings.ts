@@ -435,8 +435,10 @@ function records(payload: unknown): FindingInput {
   const selected: InputRecord[] = [];
   let found = false;
   for (const [root, kind] of Object.entries(collections)) {
+    if (!(root in data)) continue;
     const collection = object(data[root]);
-    if (!collection) continue;
+    if (!collection)
+      throw new Error(`Wiz ${root} must be an object with a nodes array.`);
     found = true;
     if (!Array.isArray(collection["nodes"]))
       throw new Error(`Wiz ${root}.nodes must be an array.`);

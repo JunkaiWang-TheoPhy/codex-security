@@ -17,6 +17,31 @@ export function array(value: unknown, label: string): unknown[] {
   return value;
 }
 
+export function optionalArray(value: unknown, label: string): unknown[] {
+  return value === undefined ? [] : array(value, label);
+}
+
+export function successfulSarifInvocations(
+  run: Record<string, unknown>,
+  producer: string,
+): Record<string, unknown>[] {
+  return optionalArray(run["invocations"], `${producer} invocations`).map(
+    (value) => {
+      const invocation = record(value, `${producer} invocation`);
+      const successful = invocation["executionSuccessful"];
+      if (successful === false)
+        throw new Error(
+          `${producer} SARIF contains an unsuccessful invocation.`,
+        );
+      if (successful !== true)
+        throw new Error(
+          `${producer} SARIF executionSuccessful must be a boolean.`,
+        );
+      return invocation;
+    },
+  );
+}
+
 export function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
