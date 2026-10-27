@@ -1,28 +1,27 @@
 import { CodexSecurityError } from "./errors.js";
-import {
-  cloudRepositoryUrlKey,
-  repositoryUrlKey,
-  type ExternalImportTarget,
-} from "./external-import-contract.js";
-import type { ExternalFinding } from "./external-findings.js";
+import type { ExternalImportTarget } from "./external-import-contract.js";
+import type {
+  ExternalFinding,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
-import { inspectorEvidenceRepositoryUrls } from "./inspector-findings.js";
+import {
+  hasInspectorEvidence,
+  inspectorReportRepositories,
+} from "./inspector-findings.js";
 
-export function boundScannerRepositoryUrls(
+export function boundScannerRepositories(
   provider: Provider,
-  finding: ExternalFinding,
+  findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
-): string[] {
-  const { evidence, source_finding_id: sourceId } = finding;
-  const urls =
-    provider === "inspector"
-      ? inspectorEvidenceRepositoryUrls(evidence.source_data, sourceId, target)
-      : [];
-  const declared = evidence.details?.repository?.url;
-  const compare = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  if (declared && urls.some((url) => compare(url) !== compare(declared)))
+): Map<string, ExternalSourceRepository> {
+  if (provider === "inspector")
+    return inspectorReportRepositories(findings, target);
+  if (
+    findings.some(({ evidence }) => hasInspectorEvidence(evidence.source_data))
+  )
     throw new CodexSecurityError(
-      "Retained scanner repository does not match the normalized evidence repository.",
+      "Retained Inspector evidence requires the inspector provider.",
     );
-  return urls;
+  return new Map();
 }

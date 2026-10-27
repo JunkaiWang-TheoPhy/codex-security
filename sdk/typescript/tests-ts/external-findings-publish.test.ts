@@ -908,6 +908,40 @@ test("Inspector publication keeps repository provenance and reuses the source oc
     ),
   ).rejects.toThrow(/does not match/i);
   expect(wrongDestination.posts).toHaveLength(0);
+  const retained = normalizeInspectorFindings(
+    { findings: [input] },
+    inspectorRepositoryUrl,
+  );
+  await expect(
+    prepareNormalizedExternalPublication(
+      retained,
+      { ...inspectorOptions, provider: "wiz" },
+      wrongDestination.deps,
+    ),
+  ).rejects.toThrow("requires the inspector provider");
+  for (const format of [undefined, "aws-inspector2-list-findings/v2"]) {
+    const changed = structuredClone(retained);
+    const data = changed.findings[0]!.evidence.source_data!;
+    if (format) data["format"] = format;
+    else delete data["format"];
+    await expect(
+      prepareNormalizedExternalPublication(
+        changed,
+        inspectorOptions,
+        wrongDestination.deps,
+      ),
+    ).rejects.toThrow("Expected retained Inspector");
+  }
+  const stripped = structuredClone(retained);
+  delete stripped.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(
+      stripped,
+      inspectorOptions,
+      wrongDestination.deps,
+    ),
+  ).rejects.toThrow("Expected retained Inspector");
+  expect(wrongDestination.posts).toHaveLength(0);
   const wrongArn = normalizeInspectorFindings(
     { findings: [input] },
     inspectorRepositoryUrl,

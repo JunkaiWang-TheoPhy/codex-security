@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import validSemver from "semver/functions/valid.js";
 import type {
   ExternalFinding,
   ExternalFindings,
@@ -78,12 +79,7 @@ function identity(finding: Native) {
   return { arn, issuer: match[1]!, partition: match[2]!, region: match[3]! };
 }
 
-function repositoryClaim(
-  finding: Native,
-  resource: Native,
-  source: string,
-  target?: ExternalImportTarget,
-) {
+function repositoryClaim(finding: Native, resource: Native) {
   const { issuer, partition, region } = identity(finding);
   if (
     (resource["partition"] !== undefined &&
@@ -108,26 +104,6 @@ function repositoryClaim(
     repo["providerType"] === undefined
       ? undefined
       : requiredText(repo["providerType"], "Inspector repository provider");
-  const mapped = new URL(source);
-  const knownGitHub = isGitHubCloudHost(mapped.hostname);
-  if (
-    (provider !== undefined &&
-      !["GITHUB", "GITLAB_SELF_MANAGED"].includes(provider)) ||
-    (provider === "GITLAB_SELF_MANAGED" && knownGitHub) ||
-    mapped.hostname === "gitlab.com"
-  )
-    throw new Error(
-      "Inspector repository provider does not match the selected mapping.",
-    );
-  if (
-    target === "cloud" &&
-    (provider === "GITLAB_SELF_MANAGED" ||
-      (!knownGitHub && provider !== "GITHUB"))
-  )
-    throw new Error(
-      "Inspector Cloud requires a GitHub repository provider; self-managed GitLab is local only.",
-    );
-  const github = provider === "GITHUB" || knownGitHub;
   const nativeId = requiredText(
     resource["id"],
     "Inspector repository resource ID",
@@ -136,8 +112,6 @@ function repositoryClaim(
     repo["projectName"] === undefined
       ? null
       : requiredText(repo["projectName"], "Inspector native project name");
-  const nativeUrl =
-    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name));
   let integration =
     repo["integrationArn"] === undefined
       ? undefined
@@ -163,9 +137,46 @@ function repositoryClaim(
         "Inspector repository resource ARN does not match its project or integration.",
       );
     integration = parent;
-  } else if (absoluteUrl.test(nativeId)) {
-    matchesProject(nativeId, source, github);
   }
+  return {
+    project: JSON.stringify([issuer, nativeId]),
+    integration,
+    provider,
+    nativeId,
+    name,
+  };
+}
+
+function checkRepositoryMapping(
+  nativeId: string,
+  name: string | null,
+  source: string,
+  provider: string | undefined,
+  target?: ExternalImportTarget,
+) {
+  const mapped = new URL(source);
+  const knownGitHub = isGitHubCloudHost(mapped.hostname);
+  if (
+    (provider !== undefined &&
+      !["GITHUB", "GITLAB_SELF_MANAGED"].includes(provider)) ||
+    (provider === "GITLAB_SELF_MANAGED" && knownGitHub) ||
+    mapped.hostname === "gitlab.com"
+  )
+    throw new Error(
+      "Inspector repository provider does not match the selected mapping.",
+    );
+  if (
+    target === "cloud" &&
+    (provider === "GITLAB_SELF_MANAGED" ||
+      (!knownGitHub && provider !== "GITHUB"))
+  )
+    throw new Error(
+      "Inspector Cloud requires a GitHub repository provider; self-managed GitLab is local only.",
+    );
+  const github = provider === "GITHUB" || knownGitHub;
+  const nativeUrl =
+    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name));
+  if (absoluteUrl.test(nativeId)) matchesProject(nativeId, source, github);
   const qualified = name !== null && matchesProject(name, source, github);
   if (!qualified && !nativeUrl)
     throw new Error(
@@ -173,7 +184,6 @@ function repositoryClaim(
     );
   if (
     !nativeUrl &&
-    provider !== "GITLAB_SELF_MANAGED" &&
     !(
       provider === "GITHUB" &&
       mapped.hostname === "github.com" &&
@@ -182,24 +192,31 @@ function repositoryClaim(
     )
   )
     throw new Error(
-      "Inspector needs a matching native repository URL to bind a project name to this host; a slug alone does not identify a GitHub Enterprise tenant.",
+      "Inspector needs a matching native repository URL to bind a project name to this host; a slug alone does not identify a self-managed GitLab or GitHub Enterprise host.",
     );
-  return { project: JSON.stringify([issuer, nativeId]), integration, provider };
 }
 
 class InspectorReportScope {
   private readonly projects = new Set<string>();
   private readonly integrations = new Set<string>();
   private readonly providers = new Set<string>();
-  readonly urls = new Set<string>();
+  private readonly mappings: {
+    nativeId: string;
+    name: string | null;
+    source: string;
+  }[] = [];
 
-  include(row: unknown, source: string, target?: ExternalImportTarget): void {
+  include(row: unknown, source: string): void {
     if (!isRecord(row) || !Array.isArray(row["resources"])) return;
-    this.urls.add(source);
     for (const resource of row["resources"]) {
       if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY")
         continue;
-      const claim = repositoryClaim(row, resource, source, target);
+      const claim = repositoryClaim(row, resource);
+      this.mappings.push({
+        nativeId: claim.nativeId,
+        name: claim.name,
+        source,
+      });
       this.projects.add(claim.project);
       if (claim.integration) this.integrations.add(claim.integration);
       if (claim.provider) this.providers.add(claim.provider);
@@ -213,8 +230,12 @@ class InspectorReportScope {
         );
     }
   }
-  get provider(): string | undefined {
-    return this.providers.values().next().value;
+  validate(target?: ExternalImportTarget): string | undefined {
+    const provider = this.providers.values().next().value;
+    for (const { nativeId, name, source } of this.mappings) {
+      checkRepositoryMapping(nativeId, name, source, provider, target);
+    }
+    return provider;
   }
 }
 
@@ -224,8 +245,8 @@ function checkReportScope(
   target?: ExternalImportTarget,
 ): string | undefined {
   const scope = new InspectorReportScope();
-  for (const row of rows) scope.include(row, source, target);
-  return scope.provider;
+  for (const row of rows) scope.include(row, source);
+  return scope.validate(target);
 }
 
 function selectedFinding(value: unknown): Native {
@@ -281,15 +302,31 @@ function selectedFinding(value: unknown): Native {
   return finding;
 }
 
-function retainedRepository(
-  sourceData: unknown,
-  expectedSourceId?: string,
-  target?: ExternalImportTarget,
-) {
-  if (!isRecord(sourceData) || sourceData["format"] !== format) return;
+export function hasInspectorEvidence(sourceData: unknown): boolean {
+  if (!isRecord(sourceData)) return false;
+  const finding = sourceData["finding"];
+  return (
+    sourceData["format"] === format ||
+    (isRecord(finding) &&
+      typeof finding["findingArn"] === "string" &&
+      findingArn.test(finding["findingArn"]) &&
+      Object.hasOwn(sourceData, "sourceRepositoryUrl"))
+  );
+}
+
+function retainedRepository(sourceData: unknown, expectedSourceId?: string) {
+  if (!isRecord(sourceData) || sourceData["format"] !== format) {
+    if (
+      hasInspectorEvidence(sourceData) ||
+      (expectedSourceId !== undefined && findingArn.test(expectedSourceId))
+    )
+      throw new Error(
+        "Expected retained Inspector ListFindings evidence for the finding ARN.",
+      );
+    return;
+  }
   const source = repositoryUrl(sourceData["sourceRepositoryUrl"]);
   const finding = selectedFinding(sourceData["finding"]);
-  const provider = checkReportScope([finding], source, target);
   if (
     expectedSourceId !== undefined &&
     finding["findingArn"] !== expectedSourceId
@@ -297,7 +334,7 @@ function retainedRepository(
     throw new Error(
       "Inspector source_finding_id does not match the retained finding ARN.",
     );
-  return { source, provider };
+  return { source, finding };
 }
 
 export function inspectorEvidenceRepositoryUrls(
@@ -305,30 +342,42 @@ export function inspectorEvidenceRepositoryUrls(
   expectedSourceId?: string,
   target?: ExternalImportTarget,
 ): string[] {
-  const repository = retainedRepository(sourceData, expectedSourceId, target);
-  return repository ? [repository.source] : [];
+  const retained = retainedRepository(sourceData, expectedSourceId);
+  if (!retained) return [];
+  checkReportScope([retained.finding], retained.source, target);
+  return [retained.source];
 }
 
 export function inspectorReportRepositories(
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
-): ExternalSourceRepository[] {
-  const groups = new Map<string, InspectorReportScope>();
-  for (const { evidence } of findings) {
-    const data = evidence.source_data;
-    if (!isRecord(data) || data["format"] !== format) continue;
-    const source = repositoryUrl(data["sourceRepositoryUrl"]);
-    const key = cloudRepositoryUrlKey(source);
-    const group = groups.get(key) ?? new InspectorReportScope();
-    group.include(selectedFinding(data["finding"]), source, target);
-    groups.set(key, group);
+): Map<string, ExternalSourceRepository> {
+  const scope = new InspectorReportScope();
+  const repositories = new Map<string, ExternalSourceRepository>();
+  for (const { source_finding_id: id, evidence } of findings) {
+    const retained = retainedRepository(evidence.source_data, id);
+    if (!retained) continue;
+    scope.include(retained.finding, retained.source);
+    repositories.set(id, { url: retained.source });
   }
-  return [...groups.values()].flatMap(({ urls, provider }) => {
-    const github = provider === "GITHUB";
-    return [...urls].map((url) =>
-      github ? { url, platform: "github" as const } : { url },
+  const github = scope.validate(target) === "GITHUB";
+  const key =
+    github || target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  if (new Set([...repositories.values()].map(({ url }) => key(url))).size > 1)
+    throw new Error(
+      "Inspector export identifies more than one source repository.",
     );
-  });
+  for (const { source_finding_id: id, evidence } of findings) {
+    const repository = repositories.get(id);
+    if (!repository) continue;
+    if (github) repository.platform = "github";
+    const declared = evidence.details?.repository?.url;
+    if (declared && key(declared) !== key(repository.url))
+      throw new Error(
+        "Retained scanner repository does not match the normalized evidence repository.",
+      );
+  }
+  return repositories;
 }
 
 function repoFile(value: unknown): string | null {
@@ -414,11 +463,21 @@ function manifestPath(path: string | null): string | null {
     : null;
 }
 
-function concreteVersion(value: unknown): string | null {
+function concreteVersion(
+  value: unknown,
+  ecosystem: string | null,
+): string | null {
   const version = text(value);
-  return version &&
-    /\d/u.test(version) &&
-    /^[a-z\d][\w.+!:-]*$/iu.test(version) &&
+  if (!version) return null;
+  if (validSemver(version)) return version;
+  if (ecosystem === "npm") return null;
+  if (
+    (!ecosystem || ecosystem === "java" || ecosystem === "maven") &&
+    version.endsWith("+")
+  )
+    return null;
+  return /\d/u.test(version) &&
+    /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
     !/(?:^|\.)x(?:\.|$)/iu.test(version)
     ? version
     : null;
@@ -476,16 +535,17 @@ function evidence(
         item["version"],
         "Inspector package version",
       );
-      const fixed = concreteVersion(item["fixedInVersion"]);
       const path = repoFile(item["filePath"]);
       const manager = text(item["packageManager"]);
+      const ecosystem =
+        manager && Object.hasOwn(ecosystems, manager)
+          ? (ecosystems[manager] ?? null)
+          : null;
+      const fixed = concreteVersion(item["fixedInVersion"], ecosystem);
       packages.push({
         name: requiredText(item["name"], "Inspector package name"),
-        ecosystem:
-          manager && Object.hasOwn(ecosystems, manager)
-            ? ecosystems[manager]
-            : null,
-        installed_version: concreteVersion(version),
+        ecosystem,
+        installed_version: concreteVersion(version, ecosystem),
         manifest_path: manifestPath(path),
         fixed_versions: fixed ? [fixed] : [],
       });

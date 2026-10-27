@@ -240,6 +240,38 @@ test("distinguishes native package file locations from dependency manifests and 
   });
 });
 
+test("projects exact package versions using the reported package ecosystem", () => {
+  const finding = inspectorPackageFinding();
+  const item = finding.packageVulnerabilityDetails.vulnerablePackages[0]!;
+  finding.packageVulnerabilityDetails.vulnerablePackages = [
+    {
+      ...item,
+      packageManager: "YARN",
+      version: "workspace:1.2.3",
+      fixedInVersion: "1.2.3-rc.x.1",
+    },
+    {
+      ...item,
+      packageManager: "NPM",
+      version: "1.2.3+build.x.1",
+      fixedInVersion: "2.x",
+    },
+    { ...item, packageManager: "JAR", version: "1.+", fixedInVersion: "1.3" },
+    {
+      ...item,
+      packageManager: "OS",
+      version: "1:2.3-4",
+      fixedInVersion: "1:2.3-5",
+    },
+  ];
+  expect(normalize([finding]).findings[0]!.evidence.packages).toMatchObject([
+    { installed_version: null, fixed_versions: ["1.2.3-rc.x.1"] },
+    { installed_version: "1.2.3+build.x.1", fixed_versions: [] },
+    { installed_version: null, fixed_versions: ["1.3"] },
+    { installed_version: "1:2.3-4", fixed_versions: ["1:2.3-5"] },
+  ]);
+});
+
 test("accepts both native CLI Unix and ISO timestamps without losing their original representation", () => {
   const native = inspectorPackageFinding();
   const epoch = Date.parse(native.updatedAt) / 1000;
@@ -432,10 +464,13 @@ test("requires a complete explicit mapping; a bare name or opaque project ID can
   expect(
     normalize(
       [
-        projectFinding({
-          providerType: "GITLAB_SELF_MANAGED",
-          projectName: "group/sub/project",
-        }),
+        projectFinding(
+          {
+            providerType: "GITLAB_SELF_MANAGED",
+            projectName: "group/sub/project",
+          },
+          { id: host },
+        ),
       ],
       host,
       "local",
@@ -554,29 +589,76 @@ test("GitHub project slugs bind only on github.com; tenants and custom hosts req
   );
 });
 
-test("retained GitLab evidence is local only even when a Cloud catalog could contain the same hostname and slug", () => {
+test("self-managed GitLab mappings require native host evidence and are local only", () => {
   const host = "https://git.example.test/group/project";
-  for (const projectName of ["group/project", host]) {
-    const native = projectFinding({
-      providerType: "GITLAB_SELF_MANAGED",
-      projectName,
-    });
-    const row = normalize([native], host, "local").findings[0]!;
-    expect(
-      inspectorEvidenceRepositoryUrls(
-        row.evidence.source_data,
-        native.findingArn,
-        "local",
-      ),
-    ).toEqual([host]);
-    expect(() => normalize([native], host, "cloud")).toThrow("local only");
+  const alias = "https://other.example.test/group/project";
+  const native = projectFinding({
+    providerType: "GITLAB_SELF_MANAGED",
+    projectName: host,
+  });
+  const row = normalize([native], host, "local").findings[0]!;
+  expect(
+    inspectorEvidenceRepositoryUrls(
+      row.evidence.source_data,
+      native.findingArn,
+      "local",
+    ),
+  ).toEqual([host]);
+  expect(() => normalize([native], alias, "local")).toThrow("does not match");
+  expect(() => normalize([native], host, "cloud")).toThrow("local only");
+  expect(() =>
+    inspectorEvidenceRepositoryUrls(
+      row.evidence.source_data,
+      native.findingArn,
+      "cloud",
+    ),
+  ).toThrow("local only");
+
+  const slug = projectFinding({
+    providerType: "GITLAB_SELF_MANAGED",
+    projectName: "group/project",
+  });
+  for (const source of [host, alias]) {
+    expect(() => normalize([slug], source, "local")).toThrow(
+      "native repository URL",
+    );
     expect(() =>
       inspectorEvidenceRepositoryUrls(
-        row.evidence.source_data,
-        native.findingArn,
-        "cloud",
+        {
+          ...row.evidence.source_data,
+          sourceRepositoryUrl: source,
+          finding: slug,
+        },
+        slug.findingArn,
+        "local",
       ),
-    ).toThrow("local only");
+    ).toThrow("native repository URL");
+  }
+});
+
+test("uses the provider of the verified project regardless of finding order", () => {
+  const enterprise = "https://git.example.test/example/project";
+  for (const [source, projectName] of [
+    [inspectorRepositoryUrl, "example/project"],
+    [enterprise, enterprise],
+  ] as const) {
+    const known = projectFinding({ projectName });
+    const omitted = {
+      ...projectFinding({ projectName, providerType: undefined }),
+      findingArn: codeFinding().findingArn,
+    };
+    for (const target of ["local", "cloud"] as const) {
+      for (const rows of [
+        [known, omitted],
+        [omitted, known],
+      ]) {
+        const output = normalize(rows, source, target);
+        expect(output.findings).toHaveLength(2);
+        expect([
+          ...inspectorReportRepositories(output.findings, target).values(),
+        ]).toEqual(rows.map(() => ({ url: source, platform: "github" })));
+      }
+    }
   }
 });
 
@@ -621,12 +703,17 @@ test("exposes GitHub remote semantics only from the validated native repository 
     inspectorReportRepositories(
       [
         {
-          source_finding_id: "test",
+          source_finding_id:
+            source_data?.["format"] === "aws-inspector2-list-findings/v1"
+              ? inspectorPackageFinding().findingArn
+              : "test",
           evidence: { title: "test", severity: "unknown", source_data },
         },
       ],
       "local",
-    )[0]?.platform;
+    )
+      .values()
+      .next().value?.platform;
   const host = "https://git.example.test/example/project";
   const known = projectFinding({ projectName: host });
   const raw = normalize([known], host, "local").findings[0]!.evidence

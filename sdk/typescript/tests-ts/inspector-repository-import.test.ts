@@ -38,6 +38,10 @@ test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", a
       dependencies,
     );
     expect(prepared.preview.findings).toHaveLength(1);
+    prepared.preview.findings[0]!.evidence.details = {
+      ...prepared.preview.findings[0]!.evidence.details!,
+      repository: { url: "https://git.example.test/Example/Project" },
+    };
     expect(
       (
         await (
@@ -186,6 +190,45 @@ test("Inspector replays, suppression and an empty export preserve unassessed rep
     await expect(
       prepareNormalizedLocalImport(wrongArn, options, dependencies),
     ).rejects.toThrow(/ARN|identity|source finding/i);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("a normalized local selection cannot combine findings from different Inspector projects", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const upstream = inspectorPackageFinding();
+    const fork = inspectorPackageFinding();
+    fork.findingArn = fork.findingArn.replace(/a$/u, "b");
+    fork.resources[0]!.id = fork.resources[0]!.id.replace(
+      "22222222",
+      "33333333",
+    );
+    fork.resources[0]!.details.codeRepository.projectName = "fork/project";
+    const findings = [
+      ...normalizeInspectorFindings(
+        { findings: [upstream] },
+        inspectorRepositoryUrl,
+        "local",
+      ).findings,
+      ...normalizeInspectorFindings(
+        { findings: [fork] },
+        "https://github.com/fork/project",
+        "local",
+      ).findings,
+    ];
+    await expect(
+      prepareNormalizedLocalImport(
+        { read: 2, excluded: [], findings },
+        {
+          provider: "inspector",
+          sourceKey: "inspector/project",
+          repository: fixture.repository,
+        },
+        { environment: fixture.environment },
+      ),
+    ).rejects.toThrow("more than one repository project");
   } finally {
     await fixture.dispose();
   }

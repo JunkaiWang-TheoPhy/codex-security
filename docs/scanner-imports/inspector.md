@@ -57,9 +57,7 @@ deployment must accept the `inspector` provider. A self-managed GitLab
 repository is not a substitute for a GitHub Cloud destination.
 
 Inspector must supply a verifiable repository claim: a bare project name or
-opaque resource ID alone is not enough. A namespace path does not prove an
-GitHub Enterprise tenant or Server hostname; include a native URL binding
-that agrees with the selected host. Reject a mixed repository or integration
+opaque resource ID alone is not enough. For GitHub Enterprise and self-managed GitLab, Inspector must report a native repository URL matching the selected host. A namespace path alone can identify projects on several hosts. Reject a mixed repository or integration
 export rather than selecting a repository by its display name. For delegated
 accounts, the account and resource ID filters in the example matter.
 
