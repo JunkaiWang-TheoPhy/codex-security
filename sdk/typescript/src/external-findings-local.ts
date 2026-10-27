@@ -2,6 +2,7 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
+import { githubFindingRepositoryUrl } from "./github-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -506,7 +507,10 @@ export async function prepareNormalizedLocalImport(
   );
   const sources = new Map<string, ExternalSourceRepository>();
   for (const { evidence } of current.findings) {
-    const url = evidence.details?.repository?.url;
+    const url =
+      options.provider === "github"
+        ? githubFindingRepositoryUrl(evidence)
+        : evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
   }
   for (const source of dependencies.sourceRepositories ?? []) {

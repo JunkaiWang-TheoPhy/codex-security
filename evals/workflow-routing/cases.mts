@@ -21,6 +21,12 @@ export const cases = [
     skill: "triage-finding",
   },
   {
+    id: "dependency-alert",
+    request:
+      "Assess the vulnerable dependencies in this Grype report, trace the affected package to its consumers, and prepare a compatible security upgrade if possible. Flag any dismissal for human review.",
+    skill: "resolve-dependency-alert",
+  },
+  {
     id: "explicit-security-fix",
     request:
       "Fix and test this security finding: GET /invoices/:id exposes another user's invoice without checking ownership. Preserve legitimate owner access.",

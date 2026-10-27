@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resolve Dependency Alert"
+  short_description: "Assess vulnerable dependencies and prepare verified security upgrades"
+  default_prompt: "Use $resolve-dependency-alert to assess selected dependency alerts for this repository and recommend a compatible upgrade or an evidence-backed disposition."

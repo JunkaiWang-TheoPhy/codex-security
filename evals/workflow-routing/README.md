@@ -5,16 +5,17 @@ production security skill for a natural-language request. The request does not
 name a skill. The eval stops after workflow selection and loading, before source
 review, scan startup, triage, patching, or verification.
 
-| Request                                    | Expected skill       |
-| ------------------------------------------ | -------------------- |
-| Ordinary repository security review        | `security-scan`      |
-| Security review of uncommitted changes     | `security-diff-scan` |
-| Explicit exhaustive, multi-pass scan       | `deep-security-scan` |
-| Assess a supplied vulnerability claim      | `triage-finding`     |
-| Implement and test a security fix          | `fix-finding`        |
-| Explicitly verify an existing security fix | `verify-fix`         |
-| Fix an ordinary sorting bug                | None                 |
-| Check a refactor's build and unit tests    | None                 |
+| Request                                         | Expected skill             |
+| ----------------------------------------------- | -------------------------- |
+| Ordinary repository security review             | `security-scan`            |
+| Security review of uncommitted changes          | `security-diff-scan`       |
+| Explicit exhaustive, multi-pass scan            | `deep-security-scan`       |
+| Assess a supplied vulnerability claim           | `triage-finding`           |
+| Resolve vulnerable packages in a scanner report | `resolve-dependency-alert` |
+| Implement and test a security fix               | `fix-finding`              |
+| Explicitly verify an existing security fix      | `verify-fix`               |
+| Fix an ordinary sorting bug                     | None                       |
+| Check a refactor's build and unit tests         | None                       |
 
 The negative controls catch accidental security-workflow activation. In
 particular, testing a fix does not automatically request the standalone

@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dependency alert resolution",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "results"],
+  "properties": {
+    "schemaVersion": { "const": "dependency-resolution/v0" },
+    "results": { "type": "array", "items": { "$ref": "#/$defs/result" } }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1 },
+    "texts": { "type": "array", "items": { "$ref": "#/$defs/text" } },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "sourceVersion",
+        "scope",
+        "subjectVersion",
+        "package",
+        "dependencyPaths",
+        "applicability",
+        "disposition",
+        "evidence",
+        "gaps",
+        "checks",
+        "nextAction"
+      ],
+      "properties": {
+        "sourceId": {
+          "$ref": "#/$defs/text",
+          "description": "Provider, source namespace and original occurrence ID."
+        },
+        "sourceVersion": {
+          "type": ["string", "null"],
+          "description": "Digest of the input snapshot or immutable imported record version."
+        },
+        "scope": { "enum": ["checkout", "build", "deployment"] },
+        "subjectVersion": {
+          "type": ["string", "null"],
+          "description": "Exact checkout and lockfile digests, build digest, or workload and observed rollout digest for this result."
+        },
+        "package": {
+          "$ref": "#/$defs/text",
+          "description": "Ecosystem, package name and exact version when known."
+        },
+        "dependencyPaths": { "$ref": "#/$defs/texts" },
+        "applicability": { "enum": ["affected", "not_affected", "unknown"] },
+        "disposition": {
+          "enum": [
+            "unresolved",
+            "not_affected",
+            "mitigated",
+            "risk_accepted",
+            "fixed"
+          ]
+        },
+        "evidence": { "$ref": "#/$defs/texts" },
+        "gaps": { "$ref": "#/$defs/texts" },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check", "result", "evidence"],
+            "properties": {
+              "check": { "$ref": "#/$defs/text" },
+              "result": { "enum": ["passed", "failed", "not_run"] },
+              "evidence": {
+                "$ref": "#/$defs/text",
+                "description": "Command and observed outcome, or the reason it could not run."
+              }
+            }
+          }
+        },
+        "nextAction": { "$ref": "#/$defs/text" },
+        "upgrade": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate", "cooldown", "policyEvidence"],
+          "properties": {
+            "candidate": {
+              "$ref": "#/$defs/text",
+              "description": "Package and exact proposed version, including the owning parent for a transitive upgrade."
+            },
+            "cooldown": {
+              "enum": ["eligible", "waiting", "unknown", "not_applicable"]
+            },
+            "policyEvidence": {
+              "$ref": "#/$defs/text",
+              "description": "Applicable rule and evidence for the release time, exemption or missing information."
+            },
+            "eligibleAt": {
+              "$ref": "#/$defs/text",
+              "description": "Earliest merge time in UTC under the applicable cooldowns."
+            }
+          },
+          "if": { "properties": { "cooldown": { "const": "waiting" } } },
+          "then": { "required": ["eligibleAt"] }
+        },
+        "owner": { "$ref": "#/$defs/text" },
+        "reviewBy": {
+          "$ref": "#/$defs/text",
+          "description": "Expiry or revalidation date agreed with the owner."
+        },
+        "approvalRef": {
+          "$ref": "#/$defs/text",
+          "description": "Existing human risk-acceptance decision for this exact scope."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "enum": ["not_affected", "fixed", "mitigated", "risk_accepted"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sourceVersion": { "$ref": "#/$defs/text" },
+              "subjectVersion": { "$ref": "#/$defs/text" },
+              "evidence": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": { "enum": ["not_affected", "fixed"] }
+            }
+          },
+          "then": {
+            "properties": { "applicability": { "const": "not_affected" } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": { "enum": ["mitigated", "risk_accepted"] }
+            }
+          },
+          "then": { "required": ["owner", "reviewBy"] }
+        },
+        {
+          "if": {
+            "properties": { "disposition": { "const": "risk_accepted" } }
+          },
+          "then": { "required": ["approvalRef"] }
+        }
+      ]
+    }
+  }
+}

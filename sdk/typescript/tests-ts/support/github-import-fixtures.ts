@@ -80,3 +80,32 @@ export function importedAdvisory(
     },
   } as unknown as import("../../src/github-advisories.js").ImportedGitHubAdvisory;
 }
+/** A repository-level Dependabot response with a transitive package requirement. */
+export function dependabotAlert(number = 17, repository = "example/project") {
+  const pkg = { name: "example-parser", ecosystem: "npm" };
+  return {
+    number,
+    state: "open",
+    url: `https://api.github.com/repos/${repository}/dependabot/alerts/${number}`,
+    html_url: `https://github.com/${repository}/security/dependabot/${number}`,
+    dependency: {
+      package: pkg,
+      manifest_path: "services/api/package-lock.json",
+      relationship: "transitive",
+      scope: "runtime",
+    },
+    security_advisory: {
+      ghsa_id: "GHSA-2345-6789-cfgh",
+      cve_id: "CVE-2026-0001",
+      summary: "Synthetic package advisory",
+      classification: "general",
+    },
+    security_vulnerability: {
+      package: { ...pkg },
+      severity: "high",
+      vulnerable_version_range: ">= 1.0.0, < 1.2.3",
+      first_patched_version: { identifier: "1.2.3" },
+    },
+    updated_at: "2026-01-02T00:00:00Z",
+  };
+}

@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts, GHSA advisories or Dependabot vulnerabilities, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
@@ -107,7 +107,22 @@ codex-security publish findings /path/to/advisories.json \
 
 Choose the local or Cloud preview for the intended destination. GHSA input supports the same choice: use `--to local --repository /path/to/project` with the advisory file and source key. Follow [local imports](#import-locally) for confirmation and readback or [Cloud publication](#publish-to-cloud) for upload review.
 
-Use separate stable source keys for the two families. Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. This path does not import Dependabot or secret-scanning alerts or write back to GitHub.
+Use separate stable source keys for each family. Code-scanning identities include the ref. Repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit destination for investigation. Preserve original evidence, package ranges and patches. Missing security severity stays `unknown`. Provider state is retained as evidence.
+
+### Dependabot package alerts
+
+For one alert, save the complete response from `GET /repos/OWNER/REPO/dependabot/alerts/NUMBER`. For a selected repository's open vulnerabilities, use the authorized GitHub transport and retrieve every page. With an approved GitHub CLI account on github.com:
+
+```sh
+gh api --hostname github.com --paginate \
+  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
+  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl
+codex-security publish findings /path/outside/repository/dependabot.jsonl \
+  --to local --repository /path/to/project --provider github \
+  --source-key github.com/example/project/dependabot --dry-run --format json
+```
+
+Use the selected GitHub host for Enterprise. Continue to preview only after retrieval succeeds. Follow the existing local or Cloud preview, approval and readback steps. The reader accepts a native alert object, a flat JSON array, or one complete alert per JSONL line. It retains the manifest, vulnerable range, suggested patch and original state. The alert number identifies an occurrence within its host and repository. Read the lockfile to establish the version installed. For investigation or an upgrade, hand the selected records to [$resolve-dependency-alert](../resolve-dependency-alert/SKILL.md).
 
 ## Publish to Cloud
 

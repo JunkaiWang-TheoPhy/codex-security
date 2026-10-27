@@ -1,11 +1,21 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  cloudRepositoryUrlKey,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import type { ExternalFindingEvidence } from "./external-import-models.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
-import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
+import { isGitHubCloudHost } from "./git-remote.js";
+import {
+  parseJsonOrJsonl,
+  readScannerText,
+  requiredText,
+  text,
+} from "./scanner-import.js";
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -149,6 +159,21 @@ function codeScanningFinding(
   };
 }
 
+function advisoryIds(id: string, advisory: Record<string, unknown>) {
+  const identifiers = Array.isArray(advisory["identifiers"])
+    ? advisory["identifiers"]
+    : [];
+  return [
+    ...new Set(
+      [
+        id,
+        text(advisory["cve_id"]),
+        ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
+      ].filter((value): value is string => value !== null),
+    ),
+  ];
+}
+
 function advisoryFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
@@ -192,14 +217,6 @@ function advisoryFinding(
     advisory["vulnerabilities"] === null ? [] : advisory["vulnerabilities"];
   if (!Array.isArray(vulnerabilities))
     throw new Error("GitHub advisory vulnerabilities must be an array.");
-  const identifiers = Array.isArray(advisory["identifiers"])
-    ? advisory["identifiers"]
-    : [];
-  const advisoryIds = [
-    id,
-    text(advisory["cve_id"]),
-    ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
-  ].filter((value): value is string => value !== null);
   const packages = vulnerabilities.flatMap((value) => {
     const vulnerability = object(value);
     const pkg = object(vulnerability?.["package"]);
@@ -230,7 +247,7 @@ function advisoryFinding(
         severity: severity(advisory["severity"]),
         description: text(advisory["description"]),
         url,
-        advisory_ids: [...new Set(advisoryIds)],
+        advisory_ids: advisoryIds(id, advisory),
         packages,
         source_updated_at: sourceTimestamp(advisory["updated_at"]),
         source_data: record,
@@ -260,6 +277,132 @@ function advisoryFinding(
   };
 }
 
+/** Repository-scoped REST responses identify the repository in the alert's HTML URL. */
+function dependabotIdentity(alert: Record<string, unknown>) {
+  const url = requiredText(alert["html_url"], "Dependabot alert html_url");
+  const { parsed, host, origin } = sourceUrl(url);
+  const match = /^\/([^/]+\/[^/]+)\/security\/dependabot\/([1-9]\d*)$/u.exec(
+    parsed.pathname,
+  );
+  if (
+    !match ||
+    !Number.isSafeInteger(alert["number"]) ||
+    String(alert["number"]) !== match[2]
+  )
+    throw new Error(
+      "Dependabot alert URL must identify its repository and alert number.",
+    );
+  const repository = repositoryName(match[1]);
+  const apiUrl = text(alert["url"]);
+  if (apiUrl) {
+    const apiBase = isGitHubCloudHost(parsed.hostname)
+      ? `${parsed.protocol}//api.${parsed.host}`
+      : `${parsed.origin}/api/v3`;
+    const expected = new URL(
+      `${apiBase}/repos/${repository}/dependabot/alerts/${match[2]}`,
+    );
+    const actual = new URL(apiUrl);
+    if (
+      actual.origin !== expected.origin ||
+      actual.pathname.toLowerCase() !== expected.pathname.toLowerCase()
+    )
+      throw new Error(
+        "Dependabot API and HTML URLs identify different occurrences.",
+      );
+  }
+  const reported = object(alert["repository"]);
+  if (
+    reported &&
+    (repositoryName(reported["full_name"]).toLowerCase() !==
+      repository.toLowerCase() ||
+      (reported["html_url"] !== undefined &&
+        text(reported["html_url"])?.toLowerCase() !==
+          `${origin}/${repository}`.toLowerCase()))
+  )
+    throw new Error(
+      "Dependabot alert URL conflicts with its source repository.",
+    );
+  return {
+    url,
+    repositoryUrl: `${origin}/${repository}`,
+    id: `${host}/${repository.toLowerCase()}/dependabot/${match[2]}`,
+  };
+}
+
+/** SCA evidence has no typed repository details in the shared import contract. */
+export function githubFindingRepositoryUrl(evidence: ExternalFindingEvidence) {
+  const raw = evidence.source_data;
+  const typed = evidence.details?.repository?.url;
+  if (!raw || raw["source"] || !raw["security_vulnerability"]) return typed;
+  const { repositoryUrl } = dependabotIdentity(raw);
+  if (
+    typed &&
+    cloudRepositoryUrlKey(typed) !== cloudRepositoryUrlKey(repositoryUrl)
+  )
+    throw new Error(
+      "Dependabot alert conflicts with the normalized source repository.",
+    );
+  return repositoryUrl;
+}
+
+function dependabotFinding(
+  alert: Record<string, unknown>,
+  target: ExternalImportTarget,
+): ExternalFinding {
+  const identity = dependabotIdentity(alert);
+  const advisory = object(alert["security_advisory"]);
+  if (!advisory) throw new Error("Expected a Dependabot security advisory.");
+  const vulnerability = object(alert["security_vulnerability"]);
+  const dependency = object(alert["dependency"]);
+  if (advisory["classification"] === "malware")
+    throw new Error("Route Dependabot malware alerts to incident response.");
+  const id = requiredText(advisory["ghsa_id"], "Dependabot advisory ghsa_id");
+  const affected = object(vulnerability?.["package"]);
+  const name = requiredText(affected?.["name"], "Dependabot package name");
+  const ecosystem = requiredText(
+    affected?.["ecosystem"],
+    "Dependabot package ecosystem",
+  );
+  if (!dependency) throw new Error("Expected a Dependabot dependency.");
+  const pkg = object(dependency["package"]);
+  if (pkg && (pkg["name"] !== name || pkg["ecosystem"] !== ecosystem))
+    throw new Error(
+      "Dependabot dependency and security vulnerability packages must match.",
+    );
+  const path = text(dependency["manifest_path"]);
+  const fixed = text(
+    object(vulnerability?.["first_patched_version"])?.["identifier"],
+  );
+  return {
+    source_finding_id: identity.id,
+    evidence: validateExternalEvidence(
+      {
+        title: text(advisory["summary"]) ?? id,
+        description: text(advisory["description"]),
+        severity: severity(vulnerability?.["severity"]),
+        url: identity.url,
+        advisory_ids: advisoryIds(id, advisory),
+        locations: path ? [{ path }] : [],
+        packages: [
+          {
+            name,
+            ecosystem,
+            manifest_path: path,
+            vulnerable_version_range: requiredText(
+              vulnerability?.["vulnerable_version_range"],
+              "Dependabot vulnerable version range",
+            ),
+            fixed_versions: fixed ? [fixed] : [],
+          },
+        ],
+        source_updated_at: sourceTimestamp(alert["updated_at"]),
+        source_data: alert,
+      },
+      target,
+    ),
+  };
+}
+
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
@@ -279,9 +422,11 @@ function normalizeRecords(
         finding = codeScanningFinding(record, target);
       else if (record["source"] === "github-security-advisory")
         finding = advisoryFinding(record, target);
+      else if (!record["source"] && record["security_vulnerability"])
+        finding = dependabotFinding(record, target);
       else
         throw new Error(
-          "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
+          "Expected a native Dependabot alert or saved output from import github or import github-advisories; other raw or incomplete API responses need an explicit mapping.",
         );
       if (identities.has(finding.source_finding_id))
         throw new CodexSecurityError(
@@ -293,7 +438,7 @@ function normalizeRecords(
       if (error instanceof CodexSecurityError) throw error;
       result.excluded.push({
         position: index + 1,
-        source_finding_id: text(record?.["url"]),
+        source_finding_id: text(record?.["html_url"]) ?? text(record?.["url"]),
         reason: errorMessage(error),
       });
     }

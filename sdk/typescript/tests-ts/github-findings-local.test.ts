@@ -2,9 +2,14 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import {
+  githubFindingRepositoryUrl,
+  readGitHubFindings,
+} from "../src/github-findings.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
+  dependabotAlert,
   importedAlert,
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
@@ -12,6 +17,54 @@ import {
 const fixtures: Awaited<ReturnType<typeof localFindingsFixture>>[] = [];
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
+});
+
+test("Dependabot reports retain missing manifest and fix information and exclude conflicting subjects", async () => {
+  const fixture = await localFindingsFixture();
+  fixtures.push(fixture);
+  const file = join(fixture.root, "selected.json");
+  const alert = dependabotAlert();
+  const badPackage = dependabotAlert(18);
+  badPackage.security_vulnerability.package.name = "another-package";
+  const badSubject = {
+    ...dependabotAlert(19),
+    repository: { full_name: "example/other" },
+  };
+  await writeFile(
+    file,
+    JSON.stringify([
+      {
+        ...alert,
+        dependency: {},
+        security_vulnerability: {
+          ...alert.security_vulnerability,
+          first_patched_version: null,
+        },
+      },
+      badPackage,
+      badSubject,
+      { ...dependabotAlert(20), url: dependabotAlert(21).url },
+    ]),
+  );
+  const parsed = await readGitHubFindings(file);
+  expect(parsed.excluded.map((row) => row.position)).toEqual([2, 3, 4]);
+  const evidence = parsed.findings[0]!.evidence;
+  expect(evidence).toMatchObject({
+    locations: [],
+    packages: [
+      { fixed_versions: [], manifest_path: null, installed_version: null },
+    ],
+  });
+  // A normalized SDK caller can also supply typed provenance.
+  expect(() =>
+    githubFindingRepositoryUrl({
+      ...evidence,
+      details: {
+        kind: "sast",
+        repository: { url: "https://github.com/example/other" },
+      },
+    }),
+  ).toThrow("conflicts");
 });
 
 type Source = "code-scanning" | "repository-advisory" | "global-advisory";
@@ -113,7 +166,77 @@ test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
   },
 );
 
-test.each(["code-scanning", "repository-advisory"] as const)(
+test("native Dependabot JSONL preserves distinct package occurrences and updates provider state without assessing them", async () => {
+  const fixture = await localFindingsFixture({
+    remote: "https://github.com/example/project",
+  });
+  fixtures.push(fixture);
+  const file = join(fixture.root, "selected.jsonl");
+  const options = {
+    repository: fixture.repository,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const dependencies = { environment: fixture.environment };
+  const first = dependabotAlert();
+  const second = dependabotAlert(18);
+  second.dependency.manifest_path = "services/web/package-lock.json";
+  const malware = dependabotAlert(19);
+  malware.security_advisory.classification = "malware";
+  const write = () =>
+    writeFile(
+      file,
+      [first, second, malware].map((alert) => JSON.stringify(alert)).join("\n"),
+    );
+  const prepare = () => prepareLocalExternalImport(file, options, dependencies);
+  await write();
+  const prepared = await prepare();
+  expect(prepared.preview.excluded).toMatchObject([
+    { position: 3, reason: expect.stringContaining("malware") },
+  ]);
+  expect(
+    prepared.preview.findings.map((finding) => finding.source_finding_id),
+  ).toEqual([
+    "github.com/example/project/dependabot/17",
+    "github.com/example/project/dependabot/18",
+  ]);
+  expect(prepared.preview.findings[0]!.evidence).toMatchObject({
+    advisory_ids: [
+      first.security_advisory.ghsa_id,
+      first.security_advisory.cve_id,
+    ],
+    packages: [
+      {
+        name: "example-parser",
+        ecosystem: "npm",
+        installed_version: null,
+        manifest_path: first.dependency.manifest_path,
+        vulnerable_version_range:
+          first.security_vulnerability.vulnerable_version_range,
+        fixed_versions: ["1.2.3"],
+      },
+    ],
+    code_revision: null,
+    source_data: first,
+  });
+  expect((await prepared.import()).counts.created).toBe(2);
+  first.state = "dismissed";
+  await write();
+  expect((await (await prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 1,
+  });
+  const stored = await listLocalExternalFindings(options, dependencies);
+  expect(
+    stored.find((row) => row.sourceFindingId.endsWith("/17")),
+  ).toMatchObject({
+    assessment: { state: "not_assessed" },
+    evidence: { source_data: first },
+  });
+});
+
+test.each(["code-scanning", "repository-advisory", "dependabot"] as const)(
   "GitHub %s refuses to attach another repository's evidence locally",
   async (kind) => {
     const fixture = await localFindingsFixture({
@@ -121,7 +244,12 @@ test.each(["code-scanning", "repository-advisory"] as const)(
     });
     fixtures.push(fixture);
     const file = join(fixture.root, "github.json");
-    await writeFile(file, JSON.stringify([githubSource(kind)]));
+    await writeFile(
+      file,
+      JSON.stringify([
+        kind === "dependabot" ? dependabotAlert() : githubSource(kind),
+      ]),
+    );
     await expect(
       prepareLocalExternalImport(
         file,

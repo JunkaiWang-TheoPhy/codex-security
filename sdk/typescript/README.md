@@ -676,10 +676,11 @@ still needs validation with an authorized Wiz tenant.
 For GitHub, save complete JSON from `import github` or `import github-advisories`;
 the configured GitHub plugin can help select alerts before collection. The
 [separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
-retain code-scanning evidence or GHSA disclosures. **GHSA import does not
-establish an installed dependency or applicability to the repository.** This
-integration does not import Dependabot or secret-scanning alerts or write back
-to GitHub.
+retain code-scanning evidence or GHSA disclosures. The same GitHub reader
+accepts complete Dependabot vulnerability alerts from the repository REST API.
+The lockfile or deployed artifact establishes the installed version. Use
+`$resolve-dependency-alert` to investigate the selected package evidence and
+prepare an upgrade or a disposition for human review.
 
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite

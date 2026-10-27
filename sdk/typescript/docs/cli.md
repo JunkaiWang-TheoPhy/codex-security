@@ -2393,8 +2393,8 @@ save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
 server; pass that selection to the collector. This integration reads
-code-scanning alerts and GHSA advisories. It does not import Dependabot or
-secret-scanning alerts or write back to GitHub. Preview local storage with a
+code-scanning alerts, GHSA advisories, and native Dependabot vulnerability
+alerts. Preview local storage with a
 repository path:
 
 ```bash
@@ -2417,7 +2417,28 @@ ref's instance. It writes the saved input for publication; no website download o
 hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
 selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
 the default branch. MCP list calls are paginated separately, and raw MCP/API
-responses are not the saved import format accepted by `--provider github`.
+code-scanning responses require the collector's saved import format.
+
+For Dependabot, save a selected repository alert from
+`GET /repos/OWNER/REPO/dependabot/alerts/NUMBER`, or collect all pages of the
+selected open package vulnerability alerts with an authorized GitHub CLI account:
+
+```bash
+gh api --hostname github.com --paginate \
+  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
+  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl
+codex-security publish findings /path/outside/repository/dependabot.jsonl \
+  --to local --repository ./project --provider github \
+  --source-key github.com/example/project/dependabot --dry-run --format json
+```
+
+Use the selected Enterprise hostname when applicable. Check that acquisition
+succeeded before previewing. The reader accepts a native alert, a flat JSON
+array, or JSONL. It preserves the package, manifest, vulnerable range, patch
+hint, and native state for each occurrence. Use the existing import confirmation
+and readback workflow. In Codex, ask `$resolve-dependency-alert` to trace the
+resolved copies and prepare an upgrade or disposition proposal. Dismissal
+requires a human decision in the alert provider.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
 the plugin's connection does not sign in `gh`. Reading alerts requires

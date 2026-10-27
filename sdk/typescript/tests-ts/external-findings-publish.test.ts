@@ -40,6 +40,7 @@ import type {
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import {
+  dependabotAlert,
   importedAlert,
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
@@ -2773,18 +2774,23 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   expect(f.reports.size).toBe(2);
 });
 
-test("GitHub imports reject a different Cloud destination before uploading", async () => {
-  const imported = importedAlert("refs/heads/main", "git.example.test");
-  const f = await fixture([imported]);
-  await expect(
-    prepareExternalPublication(
-      f.file,
-      { ...options, provider: "github" },
-      f.deps,
-    ),
-  ).rejects.toThrow("does not match the selected Cloud repository");
-  expect(f.posts).toHaveLength(0);
-});
+test.each([
+  importedAlert("refs/heads/main", "git.example.test"),
+  dependabotAlert(17, "example/other"),
+])(
+  "GitHub imports reject a different Cloud destination before uploading",
+  async (imported) => {
+    const f = await fixture([imported]);
+    await expect(
+      prepareExternalPublication(
+        f.file,
+        { ...options, provider: "github" },
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+  },
+);
 
 test("global GHSA publication retains unassessed applicability through repeat import and withdrawal", async () => {
   const imported = importedAdvisory("global");

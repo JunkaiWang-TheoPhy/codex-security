@@ -31,6 +31,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { githubFindingRepositoryUrl } from "./github-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -725,7 +726,9 @@ async function preparePublicationInput(
   if (!requests) {
     for (const finding of parsed.findings) {
       const sourceRepositories = [
-        finding.evidence.details?.repository?.url,
+        options.provider === "github"
+          ? githubFindingRepositoryUrl(finding.evidence)
+          : finding.evidence.details?.repository?.url,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),
