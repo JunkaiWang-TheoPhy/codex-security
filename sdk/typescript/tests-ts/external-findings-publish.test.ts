@@ -49,6 +49,8 @@ import {
   platformReport,
 } from "./support/semgrep-platform-fixtures.js";
 import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
+import { semgrepJson } from "./support/semgrep-import-fixtures.js";
+import { trivyReport } from "./support/trivy-import-fixtures.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -3283,6 +3285,135 @@ test("Snyk CLI dry run selects its adapter without writing an import", async () 
   expect(f.posts).toHaveLength(0);
 });
 
+test("Trivy CLI publication previews, then sends and verifies a distinct provider record", async () => {
+  const { trivyReport } = await import("./support/trivy-import-fixtures.js");
+  const report = trivyReport();
+  report.ArtifactName = "https://git.example.test/example/project";
+  report.Metadata.RepoURL = "git@git.example.test:example/project.git";
+  const fixtureData = await fixture(report, report.ArtifactName);
+  const command = [...fixtureData.command, "--trivy-scan-root", "."];
+  command[command.indexOf("--provider") + 1] = "trivy";
+  const cli = createCliTest(main);
+  expect(await cli.runCli([...command, "--dry-run"], fixtureData.cliDeps)).toBe(
+    0,
+  );
+  expect(fixtureData.posts).toHaveLength(0);
+  const code = await cli.runCli([...command, "--yes"], fixtureData.cliDeps);
+  expect({ code, error: cli.stderr.text() }).toEqual({ code: 0, error: "" });
+  expect(fixtureData.posts).toHaveLength(1);
+  expect([...fixtureData.reports.values()]).toMatchObject([
+    {
+      source: { provider: "trivy" },
+      assessment: { state: "not_assessed" },
+    },
+  ]);
+});
+
+test.each([
+  ["https://github.com/example/project", "https://github.com/example/other"],
+  [
+    "git@github.com:example/project.git.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/other/../example/project.git",
+    "https://git.example.test/example/project",
+  ],
+])(
+  "Trivy source %s is rejected for Cloud destination %s by both entrypoints",
+  async (source, destination) => {
+    const { trivyReport } = await import("./support/trivy-import-fixtures.js");
+    const { normalizeTrivyFindings } = await import("../src/trivy-findings.js");
+    const report = trivyReport();
+    report.Metadata.RepoURL = source;
+    const fixtureData = await fixture(report, destination);
+    const selected = {
+      ...options,
+      provider: "trivy" as const,
+      trivyScanRoot: ".",
+    };
+    await expect(
+      prepareExternalPublication(fixtureData.file, selected, fixtureData.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeTrivyFindings(report, "cloud", "."),
+        selected,
+        fixtureData.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(fixtureData.posts).toHaveLength(0);
+  },
+);
+
+test.each([
+  ["empty", []],
+  ["excluded-only", [{ Class: "os-pkgs" }]],
+] as const)(
+  "an %s Trivy report stops before Cloud authentication or repository discovery",
+  async (_name, Results) => {
+    const cloud = await fixture({
+      ...trivyReport(),
+      ArtifactName: "https://git.example.test/example/project",
+      Metadata: { RepoURL: "git@git.example.test:example/project.git" },
+      Results,
+    });
+    const unexpected = async () => {
+      throw new Error("Unexpected Cloud access");
+    };
+    await expect(
+      prepareExternalPublication(
+        cloud.file,
+        { ...options, provider: "trivy" },
+        {
+          environment: cloud.environment,
+          credentials: unexpected,
+          fetch: unexpected,
+        },
+      ),
+    ).rejects.toThrow("No supported findings are ready to publish");
+  },
+);
+
+test("Trivy file publication does not silently ignore source-binding options", async () => {
+  const { trivyReport } = await import("./support/trivy-import-fixtures.js");
+  const fixtureData = await fixture(trivyReport());
+  await expect(
+    prepareExternalPublication(
+      fixtureData.file,
+      {
+        ...options,
+        provider: "trivy",
+        trivyScanRoot: ".",
+        sourceRepositoryUrl: "https://github.com/example/other",
+      },
+      fixtureData.deps,
+    ),
+  ).rejects.toThrow("--source-repository-url");
+  await expect(
+    prepareExternalPublication(
+      fixtureData.file,
+      {
+        ...options,
+        provider: "trivy",
+      },
+      fixtureData.deps,
+    ),
+  ).rejects.toThrow("--trivy-scan-root");
+  await expect(
+    prepareExternalPublication(
+      fixtureData.file,
+      {
+        ...options,
+        provider: "wiz",
+        trivyScanRoot: ".",
+      },
+      fixtureData.deps,
+    ),
+  ).rejects.toThrow("only to --provider trivy");
+  expect(fixtureData.posts).toHaveLength(0);
+});
+
 test.each([
   { uris: ["https://github.com/other/project"] },
   {
@@ -3922,39 +4053,58 @@ test.each([
   },
 );
 
-test("a Semgrep file checkpoint resumes after the same destination is renamed, but a fresh submission cannot", async () => {
-  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
-  const cloud = await fixture(semgrepJson());
-  const selected = {
-    ...options,
-    provider: "semgrep" as const,
-    sourceRepositoryUrl: cloud.destination().url,
-  };
-  const first = await prepareExternalPublication(
-    cloud.file,
-    selected,
-    cloud.deps,
-  );
-  cloud.state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
-  const renamed = {
-    ...cloud.deps,
-    fetch: async (url: string, init: RequestInit) => {
-      const response = await cloud.deps.fetch(url, init);
-      if (!new URL(url).pathname.endsWith("/repositories")) return response;
-      const catalog = await response.json();
-      catalog.data[0].url = "https://github.com/example/renamed";
-      return Response.json(catalog);
-    },
-  };
-  const retry = await prepareExternalPublication(cloud.file, selected, renamed);
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).status).toBe("complete");
-  expect(cloud.posts[1]).toBe(cloud.posts[0]);
-  await expect(
-    prepareExternalPublication(cloud.file, selected, renamed),
-  ).rejects.toThrow("does not match");
-});
+const checkpointRepository = "https://github.com/example/project";
+test.each([
+  [
+    "native Semgrep",
+    semgrepJson(),
+    { provider: "semgrep", sourceRepositoryUrl: checkpointRepository },
+  ],
+  ["Trivy", trivyReport(), { provider: "trivy", trivyScanRoot: "." }],
+  [
+    "hosted Snyk REST",
+    snykRestFixture("open-source", {
+      sourceRepositoryUrl: checkpointRepository,
+    }),
+    { provider: "snyk" },
+  ],
+  ["hosted Semgrep Platform", platformReport(), { provider: "semgrep" }],
+] as const)(
+  "a %s file checkpoint resumes after the same destination is renamed, but a fresh submission cannot",
+  async (_name, report, readerOptions) => {
+    const cloud = await fixture(report, checkpointRepository);
+    const selected = { ...options, ...readerOptions };
+    const first = await prepareExternalPublication(
+      cloud.file,
+      selected,
+      cloud.deps,
+    );
+    cloud.state.loseResponse = true;
+    await expect(first.publish()).rejects.toThrow("resume the saved request");
+    const renamed = {
+      ...cloud.deps,
+      fetch: async (url: string, init: RequestInit) => {
+        const response = await cloud.deps.fetch(url, init);
+        if (!new URL(url).pathname.endsWith("/repositories")) return response;
+        const catalog = await response.json();
+        catalog.data[0].url = "https://github.com/example/renamed";
+        return Response.json(catalog);
+      },
+    };
+    const retry = await prepareExternalPublication(
+      cloud.file,
+      selected,
+      renamed,
+    );
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).status).toBe("complete");
+    expect(cloud.posts[1]).toBe(cloud.posts[0]);
+    await expect(
+      prepareExternalPublication(cloud.file, selected, renamed),
+    ).rejects.toThrow("does not match");
+    expect(cloud.posts).toHaveLength(2);
+  },
+);
 
 test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
   const { endorSarif } = await import("./support/endor-import-fixtures.js");

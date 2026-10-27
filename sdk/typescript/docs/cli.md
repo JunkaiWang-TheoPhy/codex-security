@@ -1302,6 +1302,7 @@ Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL. Supported inputs include
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
+[Trivy dependency vulnerability JSON](#import-trivy-dependency-findings),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
 and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
 
@@ -1341,6 +1342,20 @@ supported vendor formats and evidence requirements apply locally and in Cloud.
 `scan import --json` and `scan import --csv` remain separate commands for importing
 Codex Security's findings schema as a saved scan; they do not accept vendor
 exports.
+
+## Import Trivy dependency findings
+
+Use a native schema-v2 JSON report from `trivy repo` or `trivy fs`, or a gzip-compressed copy from CI. From the source repository root:
+
+```sh
+trivy repo --scanners vuln --list-all-pkgs --format json --output ../trivy.json .
+codex-security publish findings ../trivy.json --to local --repository . \
+  --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
+```
+
+For a local-path or CI report, `--trivy-scan-root` is the scanned directory relative to the Git root, not the current import directory. Use `.` for a root scan or, for example, `apps/web` for a subtree. A scan of a remote repository URL needs no override.
+
+Review the preview, then repeat without `--dry-run` to confirm. Read the result with `codex-security findings imported . --format json`. For Cloud, use `--to cloud --repository URL_OR_ID` on a deployment that accepts the `trivy` source provider. A saved report needs no Trivy installation or Aqua account. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for supported evidence, repository binding, and repeat imports.
 
 ## Import Endor Labs findings
 

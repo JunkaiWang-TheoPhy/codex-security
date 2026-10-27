@@ -33,6 +33,7 @@ const distModules = [
   "semgrep-findings",
   "semgrep-platform-findings",
   "hosted-scanner-http",
+  "trivy-findings",
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",

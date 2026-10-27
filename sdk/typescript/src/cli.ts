@@ -3551,15 +3551,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For hosted Snyk Open Source or Code, or Semgrep Platform findings, save complete JSON from import snyk or import semgrep. For Snyk CLI Open Source, use native snyk test JSON, plugin snyk-findings-export/v1, or Open Source SARIF. For Semgrep CLI Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import selected Wiz, Snyk, Semgrep, Trivy, Endor, or GitHub findings locally or to Cloud.",
+      hint: "For hosted Snyk Open Source or Code, or Semgrep Platform findings, save complete JSON from import snyk or import semgrep. For Snyk CLI Open Source, use native snyk test JSON, plugin snyk-findings-export/v1, or Open Source SARIF. For Semgrep CLI Code, supply native JSON or SARIF and --source-repository-url. For Trivy, supply native repository or filesystem JSON with language-package vulnerabilities. For a local-path report, set --trivy-scan-root to the scanned directory relative to the repository root (. for the whole repository). For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Saved hosted Snyk or Semgrep findings; Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Trivy repository/filesystem dependency JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
           ),
       }),
       options: z.object({
@@ -3576,6 +3576,11 @@ export async function main(
           .optional()
           .describe(
             "Required for Semgrep CLI JSON/SARIF; hosted reports carry their source repository. Checked against the destination.",
+          ),
+        trivyScanRoot: optionValue("--trivy-scan-root")
+          .optional()
+          .describe(
+            "Repository-relative directory scanned by Trivy. Required for a local-path report; use . for the repository root.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",

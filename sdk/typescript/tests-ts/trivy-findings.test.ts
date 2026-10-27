@@ -1,0 +1,639 @@
+import { expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import {
+  normalizeTrivyFindings,
+  readTrivyFindings,
+  trivyRepositoryUrl,
+} from "../src/trivy-findings.js";
+import { trivyReport } from "./support/trivy-import-fixtures.js";
+
+function normalizeAtRoot(input: unknown) {
+  return normalizeTrivyFindings(input, "cloud", ".");
+}
+
+test("only a network repository ArtifactName establishes a whole-checkout scan", () => {
+  const report = trivyReport();
+  for (const ArtifactName of [".", "apps/web", "/checkout/apps/web", undefined])
+    expect(() => normalizeTrivyFindings({ ...report, ArtifactName })).toThrow(
+      "--trivy-scan-root",
+    );
+  const remote = { ...report, ArtifactName: report.Metadata.RepoURL };
+  const colonDirectory = { ...report, ArtifactName: "apps:web" };
+  expect(() => normalizeTrivyFindings(colonDirectory)).toThrow(
+    "--trivy-scan-root",
+  );
+  expect(
+    normalizeTrivyFindings(colonDirectory, "local", "packages/apps:web")
+      .findings[0]!.evidence.packages![0]!.manifest_path,
+  ).toBe("packages/apps:web/package-lock.json");
+  expect(
+    normalizeTrivyFindings(colonDirectory, "local", "apps:web").findings[0]!
+      .evidence.packages![0]!.manifest_path,
+  ).toBe("apps:web/package-lock.json");
+  const inferred = normalizeTrivyFindings(remote);
+  expect(inferred).toEqual(normalizeAtRoot(remote));
+  expect(inferred.findings[0]!.evidence.source_data?.["scanRoot"]).toBe(".");
+  expect(() => normalizeTrivyFindings(remote, "cloud", "apps/web")).toThrow(
+    "--trivy-scan-root",
+  );
+  expect(() =>
+    normalizeTrivyFindings({ ...remote, ArtifactType: "filesystem" }),
+  ).toThrow("--trivy-scan-root");
+});
+
+test("rejects unsafe scan directories before importing even a clean local report", () => {
+  const report = { ...trivyReport(), Results: [] };
+  for (const root of [
+    "",
+    "../web",
+    "apps\\..\\web",
+    "/apps/web",
+    "C:\\apps",
+    "C:apps",
+    "\\\\host\\share",
+    "https://example.invalid/repo",
+    "git@example.invalid:repo",
+    "a\0b",
+  ])
+    expect(() => normalizeTrivyFindings(report, "local", root)).toThrow(
+      "--trivy-scan-root",
+    );
+});
+
+test("whole-checkout and scoped scans resolve the same manifest and package occurrence", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const run = (prefix: string, root: string) => {
+    const path = prefix + "vendor/package.json";
+    return normalizeTrivyFindings(
+      {
+        ...report,
+        Results: [
+          {
+            ...result,
+            Target: prefix + result.Target,
+            Packages: [{ ...result.Packages[0]!, FilePath: path }],
+            Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath: path }],
+          },
+        ],
+      },
+      "local",
+      root,
+    ).findings[0]!;
+  };
+  const full = run("apps/web/", ".");
+  const scoped = run("", "./apps\\web/");
+  expect(scoped.source_finding_id).toBe(full.source_finding_id);
+  expect(scoped.source_finding_id).not.toBe(
+    run("", "apps/api").source_finding_id,
+  );
+  expect(scoped.evidence.locations).toEqual(full.evidence.locations);
+  expect(scoped.evidence).toMatchObject({
+    packages: [{ manifest_path: "apps/web/package-lock.json" }],
+    locations: [
+      { path: "apps/web/package-lock.json", line: 12 },
+      { path: "apps/web/vendor/package.json", line: null },
+    ],
+    source_data: {
+      scanRoot: "apps/web",
+      result: { Target: "package-lock.json" },
+      vulnerability: { PkgPath: "vendor/package.json" },
+      package: { FilePath: "vendor/package.json" },
+    },
+  });
+});
+
+test.each([
+  ["node-pkg", "Node.js"],
+  ["npm", "../manifest"],
+  ["npm", ""],
+  ["npm", undefined],
+] as const)(
+  "scopes %s target %s without inventing a manifest",
+  (Type, Target) => {
+    const report = trivyReport();
+    const result = report.Results[0]!;
+    const run = (root: string, PkgPath?: string) =>
+      normalizeTrivyFindings(
+        {
+          ...report,
+          Results: [
+            {
+              ...result,
+              Target,
+              Type,
+              Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath }],
+            },
+          ],
+        },
+        "cloud",
+        root,
+      ).findings[0]!;
+    const scoped = run("apps/web", "vendor/package.json");
+    expect(scoped.source_finding_id).toBe(
+      run(".", "apps/web/vendor/package.json").source_finding_id,
+    );
+    expect(scoped.evidence.packages![0]!.manifest_path).toBeNull();
+    expect(scoped.evidence.locations).toEqual([
+      { path: "apps/web/vendor/package.json", line: null },
+    ]);
+    for (const path of [undefined, "/outside/package.json"]) {
+      const web = run("apps/web", path);
+      expect(web.evidence.locations).toEqual([]);
+      expect(web.source_finding_id).not.toBe(
+        run("apps/api", path).source_finding_id,
+      );
+    }
+  },
+);
+
+test("retains the detected vulnerability and only its package declarations and scan context", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const pkg = result.Packages[0]!;
+  pkg.Locations.push({ StartLine: 42, EndLine: 45 });
+  result.Packages.unshift({
+    ...pkg,
+    Name: "unrelated-inventory",
+    ID: "unrelated-inventory@1.0.0",
+    Identifier: { PURL: "pkg:npm/unrelated-inventory", UID: "another-uid" },
+    Locations: [{ StartLine: 2, EndLine: 6 }],
+  });
+  Object.assign(pkg, { DependsOn: ["unrelated-inventory"] });
+  Object.assign(report.Metadata, {
+    CommitMsg: "unrelated-metadata",
+    Author: "unrelated-metadata",
+  });
+  const original = structuredClone(report);
+  const output = normalizeAtRoot(report);
+  expect(report).toEqual(original);
+  expect(output).toMatchObject({ read: 1, excluded: [] });
+  const { evidence } = output.findings[0]!;
+  expect(evidence).toMatchObject({
+    title: result.Vulnerabilities[0]!.Title,
+    severity: "high",
+    url: result.Vulnerabilities[0]!.PrimaryURL,
+    advisory_ids: ["CVE-2099-0001", "GHSA-2345-6789-cfgh"],
+    packages: [
+      {
+        name: pkg.Name,
+        ecosystem: "npm",
+        manifest_path: result.Target,
+        installed_version: "1.0.0",
+        fixed_versions: ["1.0.1", "2.0.3"],
+      },
+    ],
+    locations: [
+      { path: result.Target, line: 12 },
+      { path: result.Target, line: 42 },
+    ],
+    branch: "main",
+    code_revision: report.Metadata.Commit,
+    source_scan_id: report.ReportID,
+    source_data: {
+      result: { Type: "npm", Target: result.Target },
+      package: { ID: pkg.ID, Locations: pkg.Locations },
+    },
+  });
+  expect(evidence.details).toBeUndefined();
+  result.Vulnerabilities[0]!.Status = "affected";
+  expect(evidence.source_data?.["vulnerability"]).toEqual(
+    original.Results[0]!.Vulnerabilities[0],
+  );
+  expect(JSON.stringify(evidence.source_data)).not.toContain("unrelated-");
+});
+
+test("filesystem scans without inventory or Git metadata do not invent lines, versions or revisions", () => {
+  const report = {
+    SchemaVersion: 2,
+    ArtifactType: "filesystem",
+    ArtifactName: "scan-root",
+    Results: [
+      {
+        Class: "lang-pkgs",
+        Type: "npm",
+        Target: "app\\package-lock.json",
+        Vulnerabilities: [
+          { VulnerabilityID: "CVE-2099-0001", PkgName: "example" },
+        ],
+      },
+    ],
+  };
+  const { evidence } = normalizeAtRoot(report).findings[0]!;
+  expect(evidence).toMatchObject({
+    severity: "unknown",
+    branch: null,
+    code_revision: null,
+    source_scan_id: null,
+    packages: [
+      {
+        installed_version: null,
+        fixed_versions: [],
+        manifest_path: "app/package-lock.json",
+      },
+    ],
+    locations: [{ path: "app/package-lock.json", line: null }],
+  });
+  expect(trivyRepositoryUrl(evidence.source_data)).toBeNull();
+});
+
+test("a later PURL enriches the ecosystem without changing a Poetry occurrence's identity", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const run = (PkgIdentifier?: { PURL: string }) =>
+    normalizeAtRoot({
+      ...report,
+      Results: [
+        {
+          ...result,
+          Type: "poetry",
+          Target: "poetry.lock",
+          Vulnerabilities: [
+            {
+              VulnerabilityID: "CVE-2099-0001",
+              PkgName: "example",
+              PkgIdentifier,
+            },
+          ],
+        },
+      ],
+    }).findings[0]!;
+  const before = run();
+  const after = run({ PURL: "pkg:pypi/example@1.0.0" });
+  expect(before.evidence.packages![0]!.ecosystem).toBe("poetry");
+  expect(after.evidence.packages![0]!.ecosystem).toBe("pypi");
+  expect(after.source_finding_id).toBe(before.source_finding_id);
+  expect(after.evidence.source_data?.["result"]).toMatchObject({
+    Type: "poetry",
+  });
+});
+
+test("new scan, commit, fingerprint, versions, severity and declaration range update the same occurrence", () => {
+  const report = trivyReport();
+  const first = normalizeAtRoot(report).findings[0]!;
+  const result = report.Results[0]!;
+  const vulnerability = result.Vulnerabilities[0]!;
+  report.Metadata.Commit = "c".repeat(40);
+  report.ReportID = "next-scan";
+  Object.assign(vulnerability, {
+    Severity: "LOW",
+    InstalledVersion: "1.0.2",
+    FixedVersion: "1.0.3",
+    PkgID: "example@1.0.2",
+    PkgIdentifier: { UID: "changed", PURL: "pkg:npm/%40example/package@1.0.2" },
+    Fingerprint: "changed",
+  });
+  Object.assign(result.Packages[0]!, {
+    ID: vulnerability.PkgID,
+    Version: vulnerability.InstalledVersion,
+    Identifier: vulnerability.PkgIdentifier,
+    Locations: [{ StartLine: 81, EndLine: 90 }],
+  });
+  const next = normalizeAtRoot(report).findings[0]!;
+  expect(next.source_finding_id).toBe(first.source_finding_id);
+  expect(next.evidence).toMatchObject({
+    severity: "low",
+    locations: [{ line: 81 }],
+  });
+});
+
+test("manifests, analyzers, names, advisories and concrete package paths distinguish occurrences regardless of order", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const vuln = result.Vulnerabilities[0]!;
+  const results = [
+    { ...result, Target: "nested/package-lock.json" },
+    { ...result, Type: "yarn" },
+    {
+      ...result,
+      Vulnerabilities: [
+        vuln,
+        { ...vuln, PkgName: "other" },
+        { ...vuln, VulnerabilityID: "CVE-2099-0002" },
+        { ...vuln, PkgPath: "a/package.json" },
+        { ...vuln, PkgPath: "b/package.json" },
+      ],
+    },
+  ];
+  const run = () => normalizeAtRoot({ ...report, Results: results });
+  const first = run();
+  expect(first.excluded).toEqual([]);
+  const ids = first.findings.map((finding) => finding.source_finding_id).sort();
+  expect(new Set(ids).size).toBe(7);
+  results.reverse();
+  for (const group of results) group.Vulnerabilities.reverse();
+  expect(
+    run()
+      .findings.map((finding) => finding.source_finding_id)
+      .sort(),
+  ).toEqual(ids);
+});
+
+test("different installed versions alone cannot disambiguate two detections in a manifest", () => {
+  const result = trivyReport().Results[0]!;
+  const vuln = result.Vulnerabilities[0]!;
+  const output = normalizeAtRoot({
+    ...trivyReport(),
+    Results: [
+      {
+        ...result,
+        Vulnerabilities: [
+          vuln,
+          {
+            ...vuln,
+            PkgID: "other-version",
+            InstalledVersion: "2.0.0",
+            PkgPath: result.Target,
+          },
+          { ...vuln, VulnerabilityID: "another-advisory" },
+        ],
+      },
+    ],
+  });
+  expect(output.read).toBe(3);
+  expect(output.findings).toHaveLength(1);
+  expect(output.excluded.map(({ position }) => position)).toEqual([1, 2]);
+  expect(output.excluded[0]!.source_finding_id).toBe(
+    output.excluded[1]!.source_finding_id,
+  );
+  expect(output.excluded[0]!.reason).toMatch(/ambiguous duplicate/i);
+});
+
+test.each([
+  ["node-pkg", "Node.js"],
+  ["python-pkg", "Python"],
+  ["conda-pkg", "Conda"],
+  ["gemspec", "Ruby"],
+  ["jar", "Java"],
+  ["kubernetes", "Kubernetes"],
+])(
+  "%s aggregate target %s is not a manifest or file location",
+  (type, label) => {
+    const result = trivyReport().Results[0]!;
+    const vuln = result.Vulnerabilities[0]!;
+    const path = "app/installed/package.json";
+    const output = normalizeAtRoot({
+      ...trivyReport(),
+      Results: [
+        {
+          ...result,
+          Type: type,
+          Target: label,
+          Vulnerabilities: [vuln, { ...vuln, PkgPath: path }],
+        },
+      ],
+    });
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([]);
+    expect(output.findings[1]!.evidence.locations).toEqual([
+      { path, line: null },
+    ]);
+    expect(output.findings[1]!.evidence.packages![0]!.manifest_path).toBeNull();
+  },
+);
+
+test("declaration ranges come from an unambiguous package at the reported path", () => {
+  const result = trivyReport().Results[0]!;
+  const vuln = result.Vulnerabilities[0]!;
+  const pkg = result.Packages[0]!;
+  const selected = { ...pkg, FilePath: "a/package.json" };
+  const other = {
+    ...pkg,
+    FilePath: "b/package.json",
+    Locations: [{ StartLine: 24, EndLine: 28 }],
+  };
+  const group = {
+    ...result,
+    Packages: [other, selected],
+    Vulnerabilities: [{ ...vuln, PkgPath: selected.FilePath }],
+  };
+  const run = () =>
+    normalizeAtRoot({ ...trivyReport(), Results: [group] }).findings[0]!
+      .evidence;
+  expect(run().locations).toEqual([
+    { path: result.Target, line: 12 },
+    { path: selected.FilePath, line: null },
+  ]);
+  group.Packages.push({ ...other, FilePath: selected.FilePath });
+  expect(run().locations![0]!.line).toBeNull();
+  expect(run().source_data?.["package"]).toBeUndefined();
+});
+
+test("only ID-less detections use a unique name/version match from inventory", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const pkg = result.Packages[0]!;
+  const vuln = result.Vulnerabilities[0]!;
+  const sparse = {
+    VulnerabilityID: vuln.VulnerabilityID,
+    PkgName: pkg.Name,
+    InstalledVersion: pkg.Version,
+  };
+  const line = (value: unknown, packages = [pkg]) =>
+    normalizeAtRoot({
+      ...report,
+      Results: [{ ...result, Packages: packages, Vulnerabilities: [value] }],
+    }).findings[0]!.evidence.locations![0]!.line;
+  expect(line(sparse)).toBe(12);
+  expect(
+    line(sparse, [
+      pkg,
+      { ...pkg, ID: "other", Identifier: { ...pkg.Identifier, UID: "other" } },
+    ]),
+  ).toBeNull();
+  expect(line({ ...sparse, PkgID: "unknown-id" })).toBeNull();
+  expect(
+    line({ ...sparse, PkgIdentifier: { PURL: pkg.Identifier.PURL } }),
+  ).toBe(12);
+  expect(
+    line({ ...sparse, PkgIdentifier: { PURL: "pkg:npm/other@1.0.0" } }),
+  ).toBeNull();
+  expect(
+    line({ ...vuln, PkgIdentifier: { UID: "conflicting-uid" } }),
+  ).toBeNull();
+  expect(line({ ...vuln, PkgID: "conflicting-id" })).toBeNull();
+});
+
+test("conflicting package names or installed versions suppress enrichment even with matching IDs", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  const pkg = result.Packages[0]!;
+  for (const mismatch of [{ Name: "unrelated" }, { Version: "9.0.0" }]) {
+    const output = normalizeAtRoot({
+      ...report,
+      Results: [{ ...result, Packages: [{ ...pkg, ...mismatch }] }],
+    });
+    expect(output.excluded).toEqual([]);
+    const { evidence } = output.findings[0]!;
+    expect(evidence.locations).toEqual([{ path: result.Target, line: null }]);
+    expect(evidence.source_data?.["package"]).toBeUndefined();
+    expect(evidence.packages![0]!.installed_version).toBe(pkg.Version);
+  }
+});
+
+test.each([
+  "/work/manifest",
+  "C:\\work\\manifest",
+  "\\\\host\\share\\manifest",
+  "../manifest",
+  "https://example.invalid/file",
+])("keeps %s out of repository paths", (path) => {
+  const result = trivyReport().Results[0]!;
+  const output = normalizeAtRoot({
+    ...trivyReport(),
+    Results: [
+      {
+        ...result,
+        Target: path,
+        Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath: path }],
+      },
+    ],
+  });
+  const { evidence } = output.findings[0]!;
+  expect(evidence.locations).toEqual([]);
+  expect(evidence.packages![0]!.manifest_path).toBeNull();
+  expect(evidence.source_data?.["result"]).toMatchObject({ Target: path });
+});
+
+test("clean native reports differ from unsupported, mixed and malformed findings", () => {
+  const report = trivyReport();
+  const result = report.Results[0]!;
+  for (const Results of [
+    undefined,
+    [],
+    [{ ...result, Vulnerabilities: undefined }],
+  ])
+    expect(normalizeAtRoot({ ...report, Results })).toEqual({
+      read: 0,
+      excluded: [],
+      findings: [],
+    });
+  const secret = {
+    Class: "secret",
+    Secrets: [{ Match: "excluded-secret-evidence" }],
+  };
+  const mixed = normalizeAtRoot({
+    ...report,
+    Results: [
+      secret,
+      result,
+      { Class: "os-pkgs", Vulnerabilities: result.Vulnerabilities },
+      { Class: "config" },
+      { Class: "license" },
+      {
+        ...result,
+        Vulnerabilities: [{}],
+        ExperimentalModifiedFindings: [{ Finding: "excluded-modification" }],
+      },
+    ],
+  });
+  expect(mixed.read).toBe(7);
+  expect(mixed.findings).toHaveLength(1);
+  expect(mixed.excluded.map(({ position }) => position)).toEqual([
+    1, 3, 4, 5, 6, 7,
+  ]);
+  expect(JSON.stringify(mixed)).not.toContain("excluded-secret-evidence");
+  expect(JSON.stringify(mixed)).not.toContain("excluded-modification");
+  expect(
+    normalizeAtRoot({ ...report, Results: [secret] }).excluded,
+  ).toHaveLength(1);
+  expect(() =>
+    normalizeAtRoot({ ...report, ArtifactType: "container_image" }),
+  ).toThrow(/repository and filesystem/);
+  expect(() => normalizeAtRoot({ ...report, SchemaVersion: 1 })).toThrow(
+    /SchemaVersion 2/,
+  );
+  expect(() => normalizeAtRoot({ version: "2.1.0", runs: [] })).toThrow(
+    /SchemaVersion 2/,
+  );
+});
+
+test.each([
+  [
+    ".",
+    "git@example.invalid:group/project.git",
+    "git@example.invalid:group/project.git",
+  ],
+  [
+    "C:\\work\\project",
+    "ssh://git@example.invalid/project",
+    "ssh://git@example.invalid/project",
+  ],
+  [
+    "https://example.invalid/project",
+    undefined,
+    "https://example.invalid/project",
+  ],
+  [
+    "https://github.com/example/project",
+    "https://github.com/example/project.git",
+    "https://github.com/example/project.git",
+  ],
+  ["relative/project", "file:///work/project", null],
+] as const)(
+  "extracts raw repository provenance from %s and %s",
+  (ArtifactName, RepoURL, expected) => {
+    const report = { ...trivyReport(), ArtifactName, Metadata: { RepoURL } };
+    expect(
+      trivyRepositoryUrl(
+        normalizeTrivyFindings(report, "cloud", ".").findings[0]!.evidence
+          .source_data,
+      ),
+    ).toBe(expected);
+  },
+);
+
+test("binding rejects conflicting repository claims; clean reports still reject unsafe remote URLs", () => {
+  const report = { ...trivyReport(), Results: [] };
+  expect(() =>
+    trivyRepositoryUrl({
+      report: { ...report, ArtifactName: "https://example.invalid/other" },
+    }),
+  ).toThrow(/different repositories/);
+  for (const source of [
+    "https://synthetic-user@example.invalid/repo",
+    "ssh://git:fixture@example.invalid/repo",
+    "https://example.invalid/repo?token=fixture",
+    "ssh://git@github.com/example/project?",
+  ]) {
+    expect(() =>
+      normalizeTrivyFindings(
+        { ...report, Metadata: { RepoURL: source } },
+        "cloud",
+        ".",
+      ),
+    ).toThrow(/without credentials/);
+    expect(() =>
+      normalizeTrivyFindings({ ...report, ArtifactName: source }, "cloud", "."),
+    ).toThrow(/without credentials/);
+  }
+});
+
+test("reads native JSON and gzip by content, applying the destination's evidence limits", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "trivy-import-"));
+  try {
+    const path = join(directory, "report.json");
+    const report = trivyReport();
+    await writeFile(path, JSON.stringify(report));
+    await expect(readTrivyFindings(path)).rejects.toThrow("--trivy-scan-root");
+    expect(await readTrivyFindings(path, "cloud", "apps/web")).toEqual(
+      normalizeTrivyFindings(report, "cloud", "apps/web"),
+    );
+    const custom = "x".repeat(256 * 1024);
+    Object.assign(report.Results[0]!.Vulnerabilities[0]!, { Custom: custom });
+    await writeFile(path, gzipSync(JSON.stringify(report)));
+    const cloud = await readTrivyFindings(path, "cloud", ".");
+    expect(cloud.findings).toEqual([]);
+    expect(cloud.excluded[0]!.reason).toContain("256 KiB");
+    const local = await readTrivyFindings(path, "local", ".");
+    expect(local.excluded).toEqual([]);
+    expect(
+      local.findings[0]!.evidence.source_data?.["vulnerability"],
+    ).toMatchObject({ Custom: custom });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

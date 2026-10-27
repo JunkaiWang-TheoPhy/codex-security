@@ -7,13 +7,23 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings, snykReportRepositoryUrls } from "./snyk-findings.js";
+import {
+  readSnykFindings,
+  snykReportRepositoryUrls,
+  snykRepositoryUrls,
+} from "./snyk-findings.js";
+import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
 import { normalizeSemgrepFindings } from "./semgrep-findings.js";
 import {
   isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
   semgrepPlatformRepository,
 } from "./semgrep-platform-findings.js";
 import { readScannerJson } from "./scanner-import.js";
+import {
+  normalizeTrivyFindings,
+  trivyRepositoryUrl,
+} from "./trivy-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -25,6 +35,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
   snyk: "snyk",
   semgrep: "semgrep",
+  trivy: "trivy",
   endor: "endor",
   github: "github",
 } as const satisfies Record<string, Provider>;
@@ -39,6 +50,7 @@ export const EXTERNAL_FINDINGS_READERS = Object.keys(
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
+  trivyScanRoot?: string;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -50,12 +62,51 @@ export interface ReadExternalFindings {
   reportRepositoryUrl?: string;
 }
 
+export function scannerFindingRepositoryUrls(
+  provider: Provider,
+  sourceData: Record<string, unknown> | undefined,
+  cloudRepositoryUrl?: string,
+): string[] {
+  if (provider === "trivy") {
+    const url = trivyRepositoryUrl(sourceData, cloudRepositoryUrl);
+    return url ? [url] : [];
+  }
+  if (provider === "semgrep" && isSemgrepPlatformReport(sourceData))
+    return [semgrepPlatformFindingRepository(sourceData)];
+  if (
+    provider === "snyk" &&
+    (cloudRepositoryUrl !== undefined ||
+      sourceData?.["format"] === SNYK_REST_ISSUES_FORMAT)
+  )
+    return snykRepositoryUrls(sourceData, {
+      normalizeGitRemote: cloudRepositoryUrl !== undefined,
+      cloudRepositoryUrl,
+    });
+  return [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "trivy") {
+    if (options.sourceRepositoryUrl !== undefined)
+      throw new Error(
+        "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
+      );
+    const report = await readScannerJson(path);
+    return {
+      findings: normalizeTrivyFindings(report, target, options.trivyScanRoot),
+      reportRepositoryUrl:
+        target === "local"
+          ? (trivyRepositoryUrl({ report }) ?? undefined)
+          : undefined,
+    };
+  }
+  if (options.trivyScanRoot !== undefined)
+    throw new Error("--trivy-scan-root applies only to --provider trivy.");
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
     if (

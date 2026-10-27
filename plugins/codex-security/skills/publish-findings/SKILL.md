@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import hosted Snyk Open Source and Code issues, Semgrep Platform findings, Snyk Open Source or Semgrep Code scan reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Supports native JSON, qualified SARIF and provider-specific exports, including gzip. Does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import hosted Snyk Open Source and Code issues, Semgrep Platform findings, Snyk Open Source or Semgrep Code scan reports, Trivy repository or filesystem dependency vulnerabilities, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Supports native JSON, qualified SARIF and provider-specific exports, including gzip. Does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
@@ -30,6 +30,12 @@ Show the repository, source namespace, normalized evidence, and exclusions. Afte
 Read the stored evidence with `codex-security findings imported /path/to/project --format json`; the repository defaults to the current directory. Report created, updated, unchanged, and excluded counts, including exclusion reasons when the command exits 1.
 
 Local records remain unassessed source evidence, separate from `findings list` and completed scans. Repeated imports use the same repository/provider/source-key/source-ID identity; omitted records remain stored. When a source repository URL and local Git remotes are available, the URL must match a remote. Local import does not publish to Cloud or automatically investigate or patch findings.
+
+## Trivy dependency vulnerabilities
+
+Use native schema-v2 JSON from `trivy repo` or `trivy fs` run at the repository root, or the same report saved by CI. For a new dependency scan, use `--scanners vuln --list-all-pkgs --format json` to include package declaration locations when available. Do not substitute a container image, Kubernetes report, SARIF file, or secret scan.
+
+Use `--provider trivy` and a stable project/branch `--source-key`. For local-path reports, supply the actual repository-relative directory scanned via `--trivy-scan-root` (`.` for a root scan); do not guess it from a CI checkout path. Review the source repository, manifest paths, installed and fixed versions, and exclusions. If the report or checkout has no comparable remote, confirm its origin independently. Trivy’s `Status: fixed` means an upstream fix is available; neither that status nor package detection assesses reachability or closes a finding. Cloud requires the `trivy` source provider on the selected deployment.
 
 ## Endor Labs findings
 

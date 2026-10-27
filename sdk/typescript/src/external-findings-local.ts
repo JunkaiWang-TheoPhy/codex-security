@@ -2,12 +2,7 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
-import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
-import {
-  isSemgrepPlatformReport,
-  semgrepPlatformFindingRepository,
-} from "./semgrep-platform-findings.js";
+import { scannerFindingRepositoryUrls } from "./external-findings-read.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -26,6 +21,7 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { parseGitRemote } from "./git-remote.js";
+import { trivyRemoteKey } from "./trivy-findings.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -131,6 +127,7 @@ function remoteRepositoryKey(
     ].includes(remote.url.protocol)
   )
     return undefined;
+  if (provider === "trivy") return trivyRemoteKey(value);
   const url = remote.url;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
@@ -410,8 +407,9 @@ async function requireMatchingRepository(
   for (const source of sources) {
     const githubKey = remoteRepositoryKey(source.url, "github");
     const sourceProvider =
-      source.platform === "github" ||
-      (githubKey !== undefined && githubRepositories.has(githubKey))
+      provider !== "trivy" &&
+      (source.platform === "github" ||
+        (githubKey !== undefined && githubRepositories.has(githubKey)))
         ? "github"
         : provider;
     const remoteKeys = new Set(
@@ -514,21 +512,11 @@ export async function prepareNormalizedLocalImport(
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
-    if (
-      options.provider === "snyk" &&
-      evidence.source_data?.["format"] === SNYK_REST_ISSUES_FORMAT
-    )
-      for (const hostedUrl of snykRepositoryUrls(evidence.source_data, {
-        normalizeGitRemote: false,
-      }))
-        sources.set(hostedUrl, { url: hostedUrl });
-    if (
-      options.provider === "semgrep" &&
-      isSemgrepPlatformReport(evidence.source_data)
-    ) {
-      const hostedUrl = semgrepPlatformFindingRepository(evidence.source_data);
-      sources.set(hostedUrl, { url: hostedUrl });
-    }
+    for (const source of scannerFindingRepositoryUrls(
+      options.provider,
+      evidence.source_data,
+    ))
+      sources.set(source, { url: source });
   }
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.

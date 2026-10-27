@@ -15,10 +15,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
 import { abortable } from "./targets.js";
 import {
-  isSemgrepPlatformReport,
-  semgrepPlatformFindingRepository,
-} from "./semgrep-platform-findings.js";
-import {
   cloudBaseUrl,
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
@@ -33,10 +29,10 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
+  scannerFindingRepositoryUrls,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
@@ -68,13 +64,10 @@ export interface NormalizedExternalPublicationOptions {
 }
 
 /** File readers accept the vendor formats installed in this SDK. */
-export interface ExternalPublicationOptions extends Omit<
-  NormalizedExternalPublicationOptions,
-  "provider"
-> {
-  provider: ExternalFindingsReaderOptions["provider"];
-  sourceRepositoryUrl?: string;
-}
+export interface ExternalPublicationOptions
+  extends
+    Omit<NormalizedExternalPublicationOptions, "provider">,
+    ExternalFindingsReaderOptions {}
 
 /** Optional transport, account, cancellation, and progress hooks. */
 export interface ExternalPublicationDependencies {
@@ -745,17 +738,13 @@ async function preparePublicationInput(
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
-        ...(options.provider === "semgrep" &&
-        isSemgrepPlatformReport(finding.evidence.source_data)
-          ? [semgrepPlatformFindingRepository(finding.evidence.source_data)]
-          : []),
+        ...scannerFindingRepositoryUrls(
+          options.provider,
+          finding.evidence.source_data,
+          destination.url,
+        ),
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
-          : []),
-        ...(options.provider === "snyk"
-          ? snykRepositoryUrls(finding.evidence.source_data, {
-              cloudRepositoryUrl: destination.url,
-            })
           : []),
         ...(options.provider === "endor"
           ? endorRepositoryUrls(finding.evidence.source_data)

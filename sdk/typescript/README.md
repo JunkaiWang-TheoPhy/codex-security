@@ -694,6 +694,10 @@ a Snyk plugin SCA bundle or Open Source SARIF. Prefer JSON, and keep one format 
 target; switching formats creates separate source identities. See
 [local imports](docs/cli.md#import-vendor-findings-locally).
 
+Use `--provider trivy` for native Trivy repository or filesystem JSON containing
+language-package vulnerabilities. For a local-path report, set `--trivy-scan-root`
+to the scanned directory relative to the repository root. See [Trivy imports](docs/cli.md#import-trivy-dependency-findings).
+
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
 accepted as a lossy compatibility format. See
 [Endor imports](docs/cli.md#import-endor-labs-findings).
