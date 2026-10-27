@@ -8,9 +8,11 @@ import {
 } from "./project-config-schema.js";
 import {
   parseSecurityEventBatch,
+  securityEventId,
   reviewSecurityEventsInternal,
   type ReviewSecurityEventsOptions,
   type SecurityEventBatch,
+  type SecurityEventInput,
   type SecurityEventReview,
 } from "./review-events.js";
 import { abortable } from "./targets.js";
@@ -47,13 +49,14 @@ function combine(records: SecurityEventBatch[]): SecurityEventBatch {
         [contextEvents ?? [], group.history],
       ] as const) {
         for (const event of items) {
+          const eventId = securityEventId(event);
           const previous =
-            group.fresh.get(event.id) ?? group.history.get(event.id);
+            group.fresh.get(eventId) ?? group.history.get(eventId);
           if (previous && !isDeepStrictEqual(previous, event))
             throw new CodexSecurityError(
-              `Conflicting event ${event.id} in group ${id}.`,
+              `Conflicting event ${eventId} in group ${id}.`,
             );
-          destination.set(event.id, event);
+          destination.set(eventId, event);
         }
       }
     }
@@ -64,15 +67,15 @@ function combine(records: SecurityEventBatch[]): SecurityEventBatch {
       id,
       events: [...fresh.values()],
       contextEvents: [...history.values()].filter(
-        (event) => !fresh.has(event.id),
+        (event) => !fresh.has(securityEventId(event)),
       ),
     })),
   };
 }
 
-/** Review an ordered stream of version 1 batches, yielding one result per window. */
+/** Review an ordered stream of native inputs or version 1 batches, yielding one result per window. */
 export function monitorSecurityEvents(
-  batches: AsyncIterable<SecurityEventBatch>,
+  batches: AsyncIterable<SecurityEventInput>,
   options: MonitorSecurityEventsOptions = {},
 ): AsyncGenerator<LiveSecurityEventReview> {
   return monitorSecurityEventsInternal(batches, options, "sdk");

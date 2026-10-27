@@ -1935,7 +1935,7 @@ To reuse a YAML file in the SDK, pass `(await loadProjectConfig("review.yaml")).
 
 ### Follow a stream
 
-Use `--live` to read UTF-8 JSONL on stdin. Every line is one version 1 batch in the format above. Each output line is a review with two additional fields, `firstLine` and `lastLine`, the inclusive one-based input lines covered by that result. Live output always uses JSONL. The command starts emitting while the producer is still connected.
+Use `--live` to read UTF-8 JSONL on stdin. Every line is one native CloudTrail record, CloudTrail `Records` export, OCSF record, or version 1 batch in the formats above. JSONL is transport, not an event schema. Each output line is a review with two additional fields, `firstLine` and `lastLine`, the inclusive one-based input lines covered by that result. Live output always uses JSONL. The command starts emitting while the producer is still connected.
 
 ```sh
 tail -n 0 -F review-batches.jsonl |
@@ -1971,7 +1971,7 @@ for await (const review of monitorSecurityEvents(batches, {
 }
 ```
 
-The SDK pulls from an `AsyncIterable<SecurityEventBatch>`. Use the same abort signal in a producer that can block on I/O. See the [runnable authentication-log collector](https://github.com/openai/codex-security/tree/main/examples/live-audit) for a source that normalizes log records and carries session evidence across windows.
+The SDK pulls from an `AsyncIterable<SecurityEventInput>`. Use the same abort signal in a producer that can block on I/O. See the [runnable native CloudTrail and OCSF examples](https://github.com/openai/codex-security/tree/main/examples/live-audit) for direct native input and an optional wrapper that carries unchanged session evidence across windows.
 
 ## Classify finding severity
 

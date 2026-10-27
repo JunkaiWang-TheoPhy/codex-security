@@ -6,6 +6,7 @@ import {
 } from "../src/monitor-events.js";
 import {
   reviewSecurityEventsInternal,
+  securityEventId,
   type SecurityEventBatch,
 } from "../src/review-events.js";
 
@@ -140,7 +141,7 @@ test("flushes on source or service-context changes and at EOF", async () => {
 test("reports conflicting evidence with the range of unacknowledged lines", async () => {
   const first = record("login");
   const second = record("login");
-  second.groups[0]!.events[0]!.action = "different";
+  second.groups[0]!.events[0] = { ...event("login"), action: "different" };
   await expect(
     monitorSecurityEvents(Readable.from([first, second])).next(),
   ).rejects.toThrow("lines 1–2: Conflicting event login");
@@ -180,7 +181,7 @@ test("sample collector carries the role assumption into the second review window
     "node",
     [fileURLToPath(new URL("collect.mjs", fixture))],
     {
-      input: readFileSync(new URL("auth.jsonl", fixture)),
+      input: readFileSync(new URL("cloudtrail.jsonl", fixture)),
       encoding: "utf8",
     },
   )
@@ -203,11 +204,11 @@ test("sample collector carries the role assumption into the second review window
     [1, 2],
     [3, 4],
   ]);
-  expect(inputs[1]!.groups[0]!.contextEvents?.map((e) => e.id)).toEqual([
-    "login",
+  expect(inputs[1]!.groups[0]!.contextEvents?.map(securityEventId)).toEqual([
+    "00000000-0000-4000-8000-000000000001",
   ]);
-  expect(inputs[1]!.groups[0]!.events.map((e) => e.id)).toEqual([
-    "grant",
-    "end",
+  expect(inputs[1]!.groups[0]!.events.map(securityEventId)).toEqual([
+    "00000000-0000-4000-8000-000000000002",
+    "00000000-0000-4000-8000-000000000004",
   ]);
 });
