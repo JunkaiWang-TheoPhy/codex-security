@@ -26,7 +26,7 @@ const findingArn =
 const integrationSuffix = /^codesecurity-integration\/[a-f0-9-]{36}$/u;
 const projectSuffix =
   /^project-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
-const httpUrl = /^https?:\/\//iu;
+const absoluteUrl = /^[a-z][a-z\d+.-]*:\/\//iu;
 
 function repositoryUrl(value: unknown): string {
   const raw = requiredText(value, "Inspector --source-repository-url");
@@ -56,7 +56,7 @@ function matchesProject(
   const key = urlKey(source);
   const path = new URL(key).pathname.slice(1);
   const literal = github ? name.toLowerCase() : name;
-  if (httpUrl.test(name)) {
+  if (absoluteUrl.test(name)) {
     if (urlKey(repositoryUrl(name)) === key) return true;
   } else if (literal === path) return true;
   else if (literal === posix.basename(path)) return false;
@@ -133,8 +133,7 @@ function repositoryClaim(
       ? null
       : requiredText(repo["projectName"], "Inspector native project name");
   const nativeUrl =
-    httpUrl.test(nativeId) || (name !== null && httpUrl.test(name));
-  let project = nativeId;
+    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name));
   let integration =
     repo["integrationArn"] === undefined
       ? undefined
@@ -150,20 +149,18 @@ function repositoryClaim(
   if (nativeId.startsWith("arn:")) {
     const separator = nativeId.lastIndexOf("/");
     const parent = nativeId.slice(0, separator);
-    project = nativeId.slice(separator + 1);
     if (
       !parent.startsWith(issuer + ":") ||
       !integrationSuffix.test(parent.slice(issuer.length + 1)) ||
-      !projectSuffix.test(project) ||
+      !projectSuffix.test(nativeId.slice(separator + 1)) ||
       (integration !== undefined && parent !== integration)
     )
       throw new Error(
         "Inspector repository resource ARN does not match its project or integration.",
       );
     integration = parent;
-  } else if (nativeId.includes("/")) {
+  } else if (absoluteUrl.test(nativeId)) {
     matchesProject(nativeId, source, github);
-    project = (github ? cloudRepositoryUrlKey : repositoryUrlKey)(source);
   }
   const qualified = name !== null && matchesProject(name, source, github);
   if (!qualified && !nativeUrl)
@@ -173,19 +170,24 @@ function repositoryClaim(
   if (
     !nativeUrl &&
     provider !== "GITLAB_SELF_MANAGED" &&
-    !(knownGitHub && mapped.protocol === "https:" && !mapped.port)
+    !(
+      provider === "GITHUB" &&
+      mapped.hostname === "github.com" &&
+      mapped.protocol === "https:" &&
+      !mapped.port
+    )
   )
     throw new Error(
-      "Inspector needs a matching native repository URL to bind a project name to this host; a slug alone does not identify a GitHub Enterprise Server.",
+      "Inspector needs a matching native repository URL to bind a project name to this host; a slug alone does not identify a GitHub Enterprise tenant.",
     );
-  return { project: JSON.stringify([issuer, project]), integration, provider };
+  return { project: JSON.stringify([issuer, nativeId]), integration, provider };
 }
 
 function checkReportScope(
   rows: unknown[],
   source: string,
   target?: ExternalImportTarget,
-): void {
+): string | undefined {
   const projects = new Set<string>();
   const integrations = new Set<string>();
   const providers = new Set<string>();
@@ -204,6 +206,7 @@ function checkReportScope(
         );
     }
   }
+  return providers.values().next().value;
 }
 
 function selectedFinding(value: unknown): Native {
@@ -259,15 +262,15 @@ function selectedFinding(value: unknown): Native {
   return finding;
 }
 
-export function inspectorEvidenceRepositoryUrls(
+function retainedRepository(
   sourceData: unknown,
   expectedSourceId?: string,
   target?: ExternalImportTarget,
-): string[] {
-  if (!isRecord(sourceData) || sourceData["format"] !== format) return [];
+) {
+  if (!isRecord(sourceData) || sourceData["format"] !== format) return;
   const source = repositoryUrl(sourceData["sourceRepositoryUrl"]);
   const finding = selectedFinding(sourceData["finding"]);
-  checkReportScope([finding], source, target);
+  const provider = checkReportScope([finding], source, target);
   if (
     expectedSourceId !== undefined &&
     finding["findingArn"] !== expectedSourceId
@@ -275,7 +278,24 @@ export function inspectorEvidenceRepositoryUrls(
     throw new Error(
       "Inspector source_finding_id does not match the retained finding ARN.",
     );
-  return [source];
+  return { source, provider };
+}
+
+export function inspectorEvidenceRepositoryUrls(
+  sourceData: unknown,
+  expectedSourceId?: string,
+  target?: ExternalImportTarget,
+): string[] {
+  const repository = retainedRepository(sourceData, expectedSourceId, target);
+  return repository ? [repository.source] : [];
+}
+
+export function inspectorEvidencePlatform(
+  sourceData: unknown,
+): "github" | undefined {
+  return retainedRepository(sourceData)?.provider === "GITHUB"
+    ? "github"
+    : undefined;
 }
 
 function repoFile(value: unknown): string | null {
@@ -382,30 +402,8 @@ function evidence(
     "Inspector description",
   );
   const remediation = record(finding["remediation"], "Inspector remediation");
-  const recommendation = record(
-    remediation["recommendation"] ?? {},
-    "Inspector recommendation",
-  );
-  const resource = record(
-    array(finding["resources"], "Inspector resources")[0],
-    "Inspector repository",
-  );
-  const project = record(
-    record(resource["details"] ?? {}, "Inspector resource details")[
-      "codeRepository"
-    ] ?? {},
-    "Inspector codeRepository",
-  );
-  const common = {
-    repository: {
-      url: source,
-      id: resource["id"],
-      name: project["projectName"],
-    },
-    source_status: requiredText(finding["status"], "Inspector status"),
-    scanner_origin: "Amazon Inspector",
-    remediation_instructions: text(recommendation["text"]),
-  };
+  record(remediation["recommendation"] ?? {}, "Inspector recommendation");
+  requiredText(finding["status"], "Inspector status");
   timestamp(finding["firstObservedAt"]);
   timestamp(finding["lastObservedAt"]);
   const level = requiredText(
@@ -499,10 +497,6 @@ function evidence(
       advisory_ids: [...advisoryIds],
       packages,
       locations,
-      details:
-        finding["type"] === "PACKAGE_VULNERABILITY"
-          ? { ...common, kind: "advisory", advisory: { source: "repository" } }
-          : undefined,
       source_updated_at:
         finding["updatedAt"] === undefined
           ? null

@@ -13,6 +13,46 @@ import {
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
 
+test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", async () => {
+  const url = "https://git.example.test/example/project";
+  const fixture = await localFindingsFixture({
+    remote: "git@git.example.test:EXAMPLE/Project.git",
+  });
+  try {
+    const input = inspectorPackageFinding();
+    input.resources[0]!.details.codeRepository.projectName =
+      "https://git.example.test/Example/Project";
+    const path = join(fixture.root, "enterprise.json");
+    await writeFile(path, JSON.stringify({ findings: [input] }));
+    const options = {
+      provider: "inspector" as const,
+      sourceRepositoryUrl: url,
+      sourceKey: "inspector/enterprise/project",
+      repository: fixture.repository,
+    };
+    const dependencies = { environment: fixture.environment };
+    const prepared = await prepareLocalExternalImport(
+      path,
+      options,
+      dependencies,
+    );
+    expect(prepared.preview.findings).toHaveLength(1);
+    expect(
+      (
+        await (
+          await prepareNormalizedLocalImport(
+            prepared.preview,
+            options,
+            dependencies,
+          )
+        ).import()
+      ).counts.created,
+    ).toBe(1);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("Inspector replays, suppression and an empty export preserve unassessed repository history", async () => {
   const fixture = await localFindingsFixture({
     remote: inspectorRepositoryUrl,
@@ -59,8 +99,10 @@ test("Inspector replays, suppression and an empty export preserve unassessed rep
       ),
     ).rejects.toThrow(/repository|remote/i);
     const altered = structuredClone(original.preview);
-    altered.findings[0]!.evidence.details!.repository!.url =
-      "https://github.com/example/other";
+    altered.findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: "https://github.com/example/other" },
+    };
     await expect(
       prepareNormalizedLocalImport(altered, options, dependencies),
     ).rejects.toThrow(/retained scanner repository/i);

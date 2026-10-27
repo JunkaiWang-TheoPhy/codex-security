@@ -9,8 +9,8 @@ code finding does not establish that a source checkout contains vulnerable code.
 
 First confirm that Inspector Code Security covers the repository in the intended
 AWS account and Region. Use a read-only principal with `inspector2:ListFindings`.
-The following example is for GitHub; substitute the account ID, repository
-resource ID from Inspector coverage, and exact project name. The resource ID
+The following example is for GitHub; substitute the account ID and repository
+resource ID from Inspector coverage. The resource ID
 distinguishes integrations that report the same project name. Keep the raw JSON
 outside the checkout. It may include source
 paths, account and integration identifiers, and other sensitive evidence.
@@ -25,15 +25,16 @@ AWS_PAGER="" aws inspector2 list-findings --region "$AWS_REGION" \
     "awsAccountId":[{"comparison":"EQUALS","value":"ACCOUNT_ID"}],
     "resourceType":[{"comparison":"EQUALS","value":"CODE_REPOSITORY"}],
     "resourceId":[{"comparison":"EQUALS","value":"REPOSITORY_RESOURCE_ID"}],
-    "codeRepositoryProviderType":[{"comparison":"EQUALS","value":"GITHUB"}],
-    "codeRepositoryProjectName":[{"comparison":"EQUALS","value":"example/project"}]
+    "codeRepositoryProviderType":[{"comparison":"EQUALS","value":"GITHUB"}]
   }' --output json > "$out/inspector.json.tmp"
 mv "$out/inspector.json.tmp" "$out/inspector.json"
 ```
 
-Leave automatic pagination enabled. Do not use `--no-paginate`, `--max-items`,
-or a `--query` that drops continuation information. A response carrying a
-continuation token is not a complete export. A narrower, intentional selection
+Start at the first page and leave automatic pagination enabled. Do not use
+`--starting-token`, `--no-paginate`, `--max-items`, or a `--query` that drops
+continuation information. A response carrying a continuation token is
+incomplete; a response **without** a token can still be just the final page.
+The optional project-name filter is mutable after a rename. A narrower, intentional selection
 (for example, just active findings) is not a complete account history.
 
 ## Preview and import
@@ -57,7 +58,7 @@ repository is not a substitute for a GitHub Cloud destination.
 
 Inspector must supply a verifiable repository claim: a bare project name or
 opaque resource ID alone is not enough. A namespace path does not prove an
-arbitrary GitHub Enterprise Server hostname; include a native URL binding
+GitHub Enterprise tenant or Server hostname; include a native URL binding
 that agrees with the selected host. Reject a mixed repository or integration
 export rather than selecting a repository by its display name. For delegated
 accounts, the account and resource ID filters in the example matter.
@@ -71,6 +72,12 @@ accounts, the account and resource ID filters in the example matter.
 | Repository `CODE_VULNERABILITY` | Code finding with reported detector and source location when available; an unsafe or absent source path is not a checkout location. |
 | Severity, status, and remediation | Source evidence. `UNTRIAGED` is not low severity. `CLOSED` and `SUPPRESSED` do not mean Codex verified a fix or assessed the finding. |
 | Coverage, inventory, and other resources | Not vulnerability occurrences in a source repository. No commit is inferred from a default branch, scan date, or the latest commit in a separate coverage response. |
+
+An NVD or other vendor advisory is not a disclosure published by the selected
+repository. Package fields and advisory identifiers use the shared schema; the
+upstream advisory source, repository, and workflow status stay in the native
+evidence. A generic Inspector code finding is not automatically tagged SAST
+or IaC when the report does not distinguish them.
 
 Reimporting an ARN under the same source key updates that occurrence. Findings
 omitted from a later selection are not deleted or marked fixed. For large

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { ExternalImportTarget } from "../src/external-import-contract.js";
 import {
+  inspectorEvidencePlatform,
   inspectorEvidenceRepositoryUrls,
   normalizeInspectorFindings,
   readInspectorFindings,
@@ -70,7 +71,7 @@ function projectFinding(
   };
 }
 
-test("projects a repository advisory and its reported package without inferring a revision or assessment", () => {
+test("projects the vulnerable package and advisory IDs without attributing the advisory to the scanned repository", () => {
   const report = inspectorReport();
   const native = report.findings[0]!;
   const original = structuredClone(native);
@@ -95,23 +96,19 @@ test("projects a repository advisory and its reported package without inferring 
       },
     ],
     locations: [{ path: "apps/web/package-lock.json", line: null }],
-    details: {
-      kind: "advisory",
-      advisory: { source: "repository" },
-      repository: {
-        url: inspectorRepositoryUrl,
-        id: native.resources[0]!.id,
-        name: "example/project",
-      },
-      source_status: "ACTIVE",
-      scanner_origin: "Amazon Inspector",
-      remediation_instructions: "Review the dependency update.",
-    },
     source_updated_at: Date.parse(native.updatedAt) / 1000,
     source_data: {
       sourceRepositoryUrl: inspectorRepositoryUrl,
       finding: original,
     },
+  });
+  expect(row.evidence).not.toHaveProperty("details");
+  expect(
+    normalize([native], inspectorRepositoryUrl, "local").findings[0]!.evidence,
+  ).not.toHaveProperty("details");
+  expect(row.evidence.source_data?.["finding"]).toMatchObject({
+    status: "ACTIVE",
+    packageVulnerabilityDetails: { source: "NVD" },
   });
   expect(row.evidence.branch ?? null).toBeNull();
   expect(row.evidence.code_revision ?? null).toBeNull();
@@ -125,7 +122,7 @@ test("projects a repository advisory and its reported package without inferring 
   native.packageVulnerabilityDetails.vulnerablePackages[0]!.version = "^2.0";
   const updated = normalize([native]).findings[0]!;
   expect(updated.source_finding_id).toBe(row.source_finding_id);
-  expect(updated.evidence.details?.source_status).toBe("CLOSED");
+  expect(updated.evidence).not.toHaveProperty("details");
   expect(updated.evidence.packages![0]!.installed_version ?? null).toBeNull();
   expect(row.evidence.source_data?.["finding"]).toEqual(original);
   expect(updated.evidence.source_data?.["finding"]).toMatchObject({
@@ -463,26 +460,56 @@ test("requires a complete explicit mapping; a bare name or opaque project ID can
   ).toHaveLength(1);
 });
 
-test("GitHub project slugs bind only on known hosted endpoints; custom hosts require a matching native URL", () => {
+test("GitHub project slugs bind only on github.com; tenants and custom hosts require matching native URLs", () => {
   const host = "https://git.example.test/Example/Project";
   const slug = projectFinding({ projectName: "EXAMPLE/PROJECT" });
   const nativeUrl = projectFinding({
     projectName: "https://GIT.EXAMPLE.TEST/example/project.git",
   });
+  const tenantA = "https://tenant-a.ghe.com/example/project";
+  const tenantB = "https://tenant-b.ghe.com/example/project";
+  const tenantFinding = projectFinding({
+    projectName: "https://TENANT-A.GHE.COM/Example/Project.git",
+  });
   for (const target of ["local", "cloud"] as const) {
+    const slugRow = normalize([slug], inspectorRepositoryUrl, target)
+      .findings[0]!;
+    const tenantRow = normalize([tenantFinding], tenantA, target).findings[0]!;
+    expect(
+      inspectorEvidenceRepositoryUrls(
+        tenantRow.evidence.source_data,
+        tenantFinding.findingArn,
+        target,
+      ),
+    ).toEqual([tenantA]);
+    expect(() => normalize([tenantFinding], tenantB, target)).toThrow(
+      "does not match",
+    );
+    expect(() =>
+      inspectorEvidenceRepositoryUrls(
+        { ...tenantRow.evidence.source_data, sourceRepositoryUrl: tenantB },
+        tenantFinding.findingArn,
+        target,
+      ),
+    ).toThrow("does not match");
     for (const source of [
-      inspectorRepositoryUrl,
-      "https://acme.ghe.com/example/project",
-    ])
-      expect(normalize([slug], source, target).findings).toHaveLength(1);
-    for (const source of [
+      tenantA,
+      tenantB,
       host,
       "https://github.com.example.test/example/project",
       "https://github.com:8443/example/project",
-    ])
+    ]) {
       expect(() => normalize([slug], source, target)).toThrow(
         "native repository URL",
       );
+      expect(() =>
+        inspectorEvidenceRepositoryUrls(
+          { ...slugRow.evidence.source_data, sourceRepositoryUrl: source },
+          slug.findingArn,
+          target,
+        ),
+      ).toThrow("native repository URL");
+    }
     expect(normalize([nativeUrl], host, target).findings).toHaveLength(1);
     expect(() =>
       normalize([nativeUrl], host.replace("git.", "other."), target),
@@ -495,6 +522,20 @@ test("GitHub project slugs bind only on known hosted endpoints; custom hosts req
       { id: host.toLowerCase() },
     );
     expect(normalize([resourceUrl], host, target).findings).toHaveLength(1);
+    expect(
+      normalize(
+        [projectFinding({ projectName: undefined }, { id: host })],
+        host,
+        target,
+      ).findings,
+    ).toHaveLength(1);
+    expect(() =>
+      normalize(
+        [projectFinding({ providerType: undefined })],
+        inspectorRepositoryUrl,
+        target,
+      ),
+    ).toThrow("native repository URL");
     expect(() =>
       normalize(
         [projectFinding({ projectName: "wrong" }, { id: host })],
@@ -537,6 +578,89 @@ test("retained GitLab evidence is local only even when a Cloud catalog could con
       ),
     ).toThrow("local only");
   }
+});
+
+test("compares exact native resource IDs and never treats opaque slash strings as namespace claims", () => {
+  const opaqueId = "integrations/00001/projects/00002";
+  const mapped = projectFinding(
+    { projectName: "example/project" },
+    { id: opaqueId },
+  );
+  const duplicateProject = { ...mapped, findingArn: codeFinding().findingArn };
+  expect(normalize([mapped, duplicateProject]).findings).toHaveLength(2);
+  for (const projectName of [undefined, "project", "other/project"])
+    expect(() =>
+      normalize([projectFinding({ projectName }, { id: "example/project" })]),
+    ).toThrow();
+  for (const [firstId, otherId] of [
+    ["example/project", "EXAMPLE/PROJECT"],
+    [inspectorRepositoryUrl, inspectorRepositoryUrl.toUpperCase()],
+    [opaqueId, "integrations/00002/projects/00002"],
+  ] as const) {
+    const first = projectFinding({}, { id: firstId });
+    const other = {
+      ...projectFinding({}, { id: otherId }),
+      findingArn: duplicateProject.findingArn,
+    };
+    expect(() => normalize([first, other])).toThrow("more than one repository");
+  }
+  expect(() =>
+    normalize([
+      projectFinding(
+        {},
+        { id: "ssh://git@other.example.test/example/project" },
+      ),
+    ]),
+  ).toThrow("HTTP(S)");
+});
+
+test("exposes GitHub remote semantics only from the validated native repository provider", () => {
+  const host = "https://git.example.test/example/project";
+  const known = projectFinding({ projectName: host });
+  const raw = normalize([known], host, "local").findings[0]!.evidence
+    .source_data!;
+  expect(inspectorEvidencePlatform(raw)).toBe("github");
+  for (const providerType of [undefined, "GITLAB_SELF_MANAGED"]) {
+    const finding = projectFinding({ providerType, projectName: host });
+    expect(
+      inspectorEvidencePlatform({ ...raw, finding, providerType: "GITHUB" }),
+    ).toBeUndefined();
+  }
+  const noProvider = projectFinding({
+    providerType: undefined,
+    projectName: inspectorRepositoryUrl,
+  });
+  expect(
+    inspectorEvidencePlatform(
+      normalize([noProvider]).findings[0]!.evidence.source_data,
+    ),
+  ).toBeUndefined();
+  expect(inspectorEvidencePlatform(undefined)).toBeUndefined();
+  expect(inspectorEvidencePlatform({ providerType: "GITHUB" })).toBeUndefined();
+  expect(() =>
+    inspectorEvidencePlatform({
+      ...raw,
+      sourceRepositoryUrl: "https://other.example.test/example/project",
+    }),
+  ).toThrow("does not match");
+  expect(() =>
+    inspectorEvidencePlatform({
+      ...raw,
+      finding: projectFinding({ projectName: "example/project" }),
+    }),
+  ).toThrow("native repository URL");
+  expect(() =>
+    inspectorEvidencePlatform({
+      ...raw,
+      finding: {
+        ...known,
+        resources: [
+          ...known.resources,
+          { type: "AWS_EC2_INSTANCE", id: "synthetic" },
+        ],
+      },
+    }),
+  ).toThrow("CODE_REPOSITORY");
 });
 
 test("checks native scope before discarding duplicates or unsupported finding types", () => {
