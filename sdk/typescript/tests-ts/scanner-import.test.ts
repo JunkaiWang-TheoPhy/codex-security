@@ -3,7 +3,24 @@ import {
   hasSarifExternalPropertyReferences,
   relativePath,
   sarifRunContextForResult,
+  successfulSarifInvocations,
 } from "../src/scanner-import.js";
+
+test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
+  "SARIF %s warnings preserve a successful invocation",
+  (property) => {
+    const invocation = {
+      executionSuccessful: true,
+      [property]: [
+        { level: "warning", message: { text: "Synthetic scan warning" } },
+        { level: "note", message: { text: "Synthetic scan note" } },
+      ],
+    };
+    expect(
+      successfulSarifInvocations({ invocations: [invocation] }, "Example"),
+    ).toEqual([invocation]);
+  },
+);
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {
   expect(relativePath("schema:prod.json")).toBe("schema:prod.json");

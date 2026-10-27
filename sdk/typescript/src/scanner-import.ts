@@ -37,6 +37,22 @@ export function successfulSarifInvocations(
         throw new Error(
           `${producer} SARIF executionSuccessful must be a boolean.`,
         );
+      for (const property of [
+        "toolExecutionNotifications",
+        "toolConfigurationNotifications",
+      ]) {
+        const notifications = invocation[property];
+        if (
+          Array.isArray(notifications) &&
+          notifications.some(
+            (notification) =>
+              isRecord(notification) && notification["level"] === "error",
+          )
+        )
+          throw new Error(
+            `${producer} SARIF contains scan error notifications.`,
+          );
+      }
       return invocation;
     },
   );

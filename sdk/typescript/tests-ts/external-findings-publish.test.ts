@@ -710,6 +710,17 @@ test("failed or malformed vendor collections never report a successful empty imp
       return [
         [{ executionSuccessful: false }, "unsuccessful invocation"],
         [{ exitCode: 2 }, "executionSuccessful must be a boolean"],
+        ...["toolExecutionNotifications", "toolConfigurationNotifications"].map(
+          (property) => [
+            {
+              executionSuccessful: true,
+              [property]: [
+                { level: "error", message: { text: "Synthetic scan error" } },
+              ],
+            },
+            "scan error notifications",
+          ],
+        ),
       ].map(
         ([invocation, reason]) =>
           [
@@ -734,6 +745,14 @@ test("failed or malformed vendor collections never report a successful empty imp
       { ...snykJson(), ok: false, uniqueCount: 1, vulnerabilities: [] },
       "reported issues",
     ],
+    ...[undefined, 0].map(
+      (uniqueCount) =>
+        [
+          "snyk",
+          { ...snykJson(), ok: false, uniqueCount, vulnerabilities: [] },
+          "reported issues",
+        ] as [string, unknown, string],
+    ),
     [
       "snyk",
       {

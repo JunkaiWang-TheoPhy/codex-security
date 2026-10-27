@@ -473,8 +473,13 @@ export function normalizeSnykJson(
       text(project["displayTargetFile"]) ?? text(project["targetFile"]);
     const { vulnerabilities, ...context } = project;
     const records = array(vulnerabilities, "Snyk vulnerabilities");
-    if (!records.length)
+    if (!records.length) {
+      if (!project["ok"])
+        throw new Error(
+          "Snyk reported issues but the findings array is empty.",
+        );
       requireEmptyIssueCount(project["uniqueCount"], "Snyk native uniqueCount");
+    }
     return records.map((value) => ({
       value,
       context,
