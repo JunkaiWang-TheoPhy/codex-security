@@ -27,6 +27,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   github: "github",
   inspector: "inspector",
   blackduck: "blackduck",
+  veracode: "veracode",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;

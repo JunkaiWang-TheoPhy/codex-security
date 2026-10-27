@@ -1,5 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
-import { type ExternalImportTarget } from "./external-import-contract.js";
+import { cloudRepositoryUrlKey, repositoryUrlKey, type ExternalImportTarget } from "./external-import-contract.js";
 import type {
   ExternalFinding,
   ExternalSourceRepository,
@@ -16,11 +16,14 @@ import {
   readBlackDuckFindings,
 } from "./blackduck-findings.js";
 
+import { readVeracodeFindings, veracodeEvidenceRepositoryUrls } from "./veracode-findings.js";
+
 export const repositoryBoundScanners: Partial<
   Record<Provider, typeof readInspectorFindings>
 > = {
   inspector: readInspectorFindings,
   blackduck: readBlackDuckFindings,
+  veracode: readVeracodeFindings,
 };
 
 export function boundScannerRepositories(
@@ -46,5 +49,17 @@ export function boundScannerRepositories(
     return inspectorReportRepositories(findings, target);
   if (provider === "blackduck")
     return blackDuckReportRepositories(findings, target);
-  return new Map();
+  const repositories = new Map<string, ExternalSourceRepository>();
+  if (provider === "veracode") {
+    const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    for (const { source_finding_id: id, evidence } of findings) {
+      const [url] = veracodeEvidenceRepositoryUrls(evidence.source_data, id);
+      if (!url) continue;
+      const declared = evidence.details?.repository?.url;
+      if (declared && key(declared) !== key(url))
+        throw new CodexSecurityError("Retained scanner repository does not match the normalized evidence repository.");
+      repositories.set(id, { url });
+    }
+  }
+  return repositories;
 }

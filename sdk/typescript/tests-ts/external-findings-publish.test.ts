@@ -51,6 +51,10 @@ import {
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import {
+  veracodePolicyPage,
+  veracodePolicyRow,
+} from "./support/veracode-import-fixtures.js";
+import {
   blackDuckBomReport,
   blackDuckBomRow,
 } from "./support/blackduck-import-fixtures.js";
@@ -1043,6 +1047,29 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     selected,
     correct.deps,
   );
+});
+
+test("Veracode Cloud replays an application policy issue and rejects a foreign destination before POST", async () => {
+  const page = veracodePolicyPage([veracodePolicyRow(1)]);
+  const correct = await fixture([page]);
+  const selected = {
+    ...options,
+    provider: "veracode" as const,
+    sourceRepositoryUrl: "https://github.com/example/project",
+    sourceKey: "veracode/example/static",
+  };
+  const prepare = () =>
+    prepareExternalPublication(correct.file, selected, correct.deps);
+  const first = await prepare();
+  expect(correct.posts).toHaveLength(0);
+  expect(first.preview.requests[0]!.source.provider).toBe("veracode");
+  expect((await first.publish()).counts.created).toBe(1);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
+  const other = await fixture([page], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(other.posts).toHaveLength(0);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

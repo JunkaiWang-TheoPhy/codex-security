@@ -312,6 +312,7 @@ export async function externalPublication(
     | "semgrep"
     | "inspector"
     | "blackduck"
+    | "veracode"
     | undefined;
   const prepared = await prepareNormalizedExternalPublication(input, {
     ...options,

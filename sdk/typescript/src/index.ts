@@ -331,6 +331,10 @@ export {
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
 export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
 } from "./blackduck-findings.js";
