@@ -65,12 +65,12 @@ accounts, the account and resource ID filters in the example matter.
 
 ## What gets tracked
 
-| Inspector evidence | Codex Security interpretation |
-| --- | --- |
-| Finding ARN and repository resource | A stable source occurrence, not a global CVE ID. An explicit repository URL is required; do not use it to relabel a different project's results. |
-| Repository `PACKAGE_VULNERABILITY` | Advisory and reported vulnerable packages, installed versions, and fixed versions when supplied. An absent fixed version is unknown. |
-| Repository `CODE_VULNERABILITY` | Code finding with reported detector and source location when available; an unsafe or absent source path is not a checkout location. |
-| Severity, status, and remediation | Source evidence. `UNTRIAGED` is not low severity. `CLOSED` and `SUPPRESSED` do not mean Codex verified a fix or assessed the finding. |
+| Inspector evidence                       | Codex Security interpretation                                                                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Finding ARN and repository resource      | A stable source occurrence, not a global CVE ID. An explicit repository URL is required; do not use it to relabel a different project's results.                    |
+| Repository `PACKAGE_VULNERABILITY`       | Advisory and reported vulnerable packages, installed versions, and fixed versions when supplied. An absent fixed version is unknown.                                |
+| Repository `CODE_VULNERABILITY`          | Code finding with reported detector and source location when available; an unsafe or absent source path is not a checkout location.                                 |
+| Severity, status, and remediation        | Source evidence. `UNTRIAGED` is not low severity. `CLOSED` and `SUPPRESSED` do not mean Codex verified a fix or assessed the finding.                               |
 | Coverage, inventory, and other resources | Not vulnerability occurrences in a source repository. No commit is inferred from a default branch, scan date, or the latest commit in a separate coverage response. |
 
 An NVD or other vendor advisory is not a disclosure published by the selected
