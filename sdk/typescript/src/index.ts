@@ -49,11 +49,13 @@ export type { ScanSettings } from "./scan-settings.js";
 export {
   reviewSecurityEvents,
   securityEventBatchSchema,
+  securityEventInputSchema,
   securityEventReviewSchema,
 } from "./review-events.js";
 export type {
   ReviewSecurityEventsOptions,
   SecurityEventBatch,
+  SecurityEventInput,
   SecurityEventReview,
 } from "./review-events.js";
 export { classifySeverity } from "./classify-severity.js";

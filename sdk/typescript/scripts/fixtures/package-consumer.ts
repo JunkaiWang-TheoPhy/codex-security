@@ -51,6 +51,7 @@ import {
   type PatchResult,
   type ProjectConfigInput,
   type SecurityEventBatch,
+  type SecurityEventInput,
   type SecurityEventReview,
   type SeverityClassification,
   type ScanSeverityClassification,
@@ -447,4 +448,8 @@ export async function importLocalFile(
 
 export function snykPluginFindings(bundle: unknown): ExternalFindings {
   return normalizeSnykFindingsExport(bundle);
+}
+
+export function reviewNativeEvents(input: SecurityEventInput) {
+  return reviewSecurityEvents(input);
 }

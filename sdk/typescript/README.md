@@ -617,8 +617,8 @@ and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/example
 
 ### Review audit events
 
-Use `review-events` or `reviewSecurityEvents()` to assess grouped service audit
-events. Add `--screen-with-decisions` to screen the evidence with the OpenAI
+Use `review-events` or `reviewSecurityEvents()` to assess native CloudTrail or OCSF events,
+with optional grouping and historical context. Add `--screen-with-decisions` to screen the evidence with the OpenAI
 Decisions API before spending a Codex review on a group. See the
 [batch format and SDK example](docs/cli.md#review-audit-events).
 
