@@ -1902,7 +1902,9 @@ codex-security review-events --screen-with-decisions --cyber-access-program dayb
 
 Each event requires an `id`, ISO timestamp with a time zone, and `action`. Optional fields are `actor`, `resource`, `outcome`, and a JSON object named `details`. Each group has a unique ID and an array of new `events`. The optional `contextEvents` array holds prior evidence. IDs must identify distinct records within a group.
 
-By default each nonempty group gets one read-only Codex review. With `--screen-with-decisions`, the command sends that group's evidence and service context to the OpenAI Decisions API using `OPENAI_API_KEY`. This is an additional API call even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
+By default each nonempty group gets one read-only Codex review using your configured Codex authentication, including a ChatGPT sign-in. **Decisions screening requires an OpenAI API key in `OPENAI_API_KEY`.** Signing in to Codex with ChatGPT alone cannot authenticate the Decisions API call. This applies to both single-batch and live reviews.
+
+With `--screen-with-decisions`, the command sends each group's evidence and service context to the OpenAI Decisions API in a separate call, even when full reviews use a different Codex provider. The v1 screen uses `gpt-6-luna` and skips Codex only for a `routine` choice whose confidence meets or exceeds the cutoff. Set `--decisions-cutoff` to a number from 0 to 1 (default 0.95). Setting the cutoff alone leaves screening off. Uncertain or suspicious activity goes to Codex with the same evidence. Empty groups make no model calls.
 
 For repeated reviews, select a trusted project file with `-c FILE` or `CODEX_SECURITY_PROJECT_CONFIG`. Explicit CLI options take precedence over the file.
 

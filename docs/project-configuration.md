@@ -142,6 +142,8 @@ supported scan types, cost-limit behavior, and the saved report.
 
 `review-events` reads the `review_events` section of the selected file.
 `screen_with_decisions` enables the optional first pass and defaults to `false`.
+Enabling it requires an OpenAI API key in the `OPENAI_API_KEY` environment
+variable, even if you are already signed in to Codex with ChatGPT.
 `decisions_cutoff` accepts a confidence from 0 to 1 and defaults to 0.95.
 The corresponding CLI flags are `--screen-with-decisions` and `--decisions-cutoff`.
 `loadProjectConfig()` exposes both values as `reviewEvents.screenWithDecisions` and
