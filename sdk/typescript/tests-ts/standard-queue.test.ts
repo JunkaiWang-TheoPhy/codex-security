@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { nodeCommand } from "./support/shell.js";
@@ -28,7 +28,7 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
       { path: "^src/route-0" },
     ]),
   );
-  const run = (command: string, ...values: string[]) =>
+  const run = (command: string, values: string[], input?: string) =>
     spawnSync(
       nodeCommand().command,
       [
@@ -38,10 +38,10 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
         scan,
         ...values,
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", input },
     );
   const success = (command: string, ...values: string[]) => {
-    const result = run(command, ...values);
+    const result = run(command, values);
     expect(result.status, result.stderr).toBe(0);
     return JSON.parse(result.stdout);
   };
@@ -55,13 +55,38 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
   const [first, second] = success("pending", "0", "2").pending;
   expect(first.files).toEqual(["selected.txt", ...matched.slice(0, 4)]);
   expect(second.files).toEqual(matched.slice(4));
-  success("reviewed", ...first.files.slice(1), ...second.files);
+  const reviewed = (id: number, paths: string[], findings: unknown[] = []) =>
+    run(
+      "reviewed",
+      [String(id)],
+      JSON.stringify({
+        reviewed_files: paths,
+        findings,
+        resolved_questions: [],
+      }),
+    );
+  const partial = () =>
+    reviewed(first.id, first.files.slice(1), [{ title: "Retained claim" }]);
+  expect(partial().status).toBe(0);
+  expect(partial().status).toBe(0);
+  expect(reviewed(second.id, second.files).status).toBe(0);
   expect(success("pending", "0", "2").pending).toEqual([
     { id: 1, files: ["selected.txt"] },
   ]);
-  expect(run("check").status).toBe(1);
-  expect(run("build", repo, ".").status).toBe(1);
-  expect(run("reviewed", "outside.ts").status).toBe(1);
-  success("reviewed", "selected.txt");
+  expect(run("check", []).status).toBe(1);
+  expect(run("build", [repo, "."]).status).toBe(1);
+  expect(run("reviewed", [String(first.id)], "{}").status).toBe(1);
+  expect(reviewed(first.id, second.files).status).toBe(1);
+  expect(reviewed(first.id, ["selected.txt"]).status).toBe(0);
   expect(success("check").remaining).toBe(0);
+  const queue = JSON.parse(
+    readFileSync(join(context, "standard-queue.json"), "utf8"),
+  );
+  expect(queue.returns.map((row: { count: number }) => row.count)).toEqual([
+    1, 0, 0,
+  ]);
+  const saved = JSON.parse(
+    readFileSync(join(scan, queue.returns[0].file), "utf8"),
+  );
+  expect(saved.findings).toEqual([{ title: "Retained claim" }]);
 });

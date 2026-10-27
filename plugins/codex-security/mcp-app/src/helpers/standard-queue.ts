@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { writeJsonAtomic } from "../deep-scan/artifacts";
+import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
 import { append, exists } from "./inventory-paths";
@@ -13,22 +14,10 @@ interface Queue {
   rules: Rule[];
   batches: string[][];
   reviewed: string[];
+  returns?: { file: string; count: number }[];
 }
 
 const readJson = (file: string) => JSON.parse(readFile(file).toString("utf8"));
-
-export function remainingPaths(queue: Queue): string[] {
-  const reviewed = new Set(queue.reviewed);
-  return queue.batches.flat().filter((path) => !reviewed.has(path));
-}
-
-export function requireEmptyQueue(queue: Queue) {
-  const remaining = remainingPaths(queue);
-  if (remaining.length)
-    throw new Error(
-      `${remaining.length} Standard target files still need review. Resume with standard-queue pending.`,
-    );
-}
 
 export async function standardQueue(args: string[], home?: string) {
   const [command, scanDir, ...values] = args;
@@ -37,7 +26,13 @@ export async function standardQueue(args: string[], home?: string) {
       "Expected standard-queue <build|pending|reviewed|check> <scan_dir> [arguments]",
     );
   const context = join(scanDir, "artifacts", "01_context");
-  const file = join(context, "standard-queue.json");
+  const destination = (name: string) =>
+    artifactDestination(
+      { root: scanDir },
+      name.split("/"),
+      "Standard file queue",
+    );
+  const file = await destination("artifacts/01_context/standard-queue.json");
   let queue: Queue;
   if (command === "build") {
     if (exists(file))
@@ -81,28 +76,49 @@ export async function standardQueue(args: string[], home?: string) {
       }
     }
     const paths = [...matches].sort();
-    queue = { rules, batches: [], reviewed: [] };
+    queue = { rules, batches: [], reviewed: [], returns: [] };
     for (let i = 0; i < paths.length; i += 5)
       queue.batches.push(paths.slice(i, i + 5));
-    await writeJsonAtomic(file, queue);
+    await replaceArtifactJson(file, queue);
   } else {
     queue = readJson(file);
   }
   const paths = new Set(queue.batches.flat());
   const reviewed = new Set(queue.reviewed);
   if (command === "reviewed") {
-    for (const path of values) {
-      if (!paths.has(path))
-        throw new Error(`File is outside the queue: ${path}`);
+    const batch = Number(values[0]);
+    const assigned = queue.batches[batch - 1];
+    if (!assigned) throw new Error("Expected the assigned file batch ID.");
+    const { reviewed_files, findings, resolved_questions } = JSON.parse(
+      readFile(0).toString("utf8"),
+    );
+    if (![reviewed_files, findings, resolved_questions].every(Array.isArray))
+      throw new Error("Expected the worker's complete JSON return.");
+    for (const path of reviewed_files) {
+      if (!assigned.includes(path))
+        throw new Error(`File is outside batch ${batch}: ${path}`);
       reviewed.add(path);
     }
+    const result = { batch, reviewed_files, findings, resolved_questions };
+    const digest = createHash("sha256")
+      .update(JSON.stringify(result))
+      .digest("hex");
+    const returned = `artifacts/02_discovery/standard-returns/${digest}.json`;
+    queue.returns ??= [];
+    if (!queue.returns.some((saved) => saved.file === returned)) {
+      await replaceArtifactJson(await destination(returned), result);
+      queue.returns.push({ file: returned, count: findings.length });
+    }
     queue.reviewed = [...reviewed].sort();
-    await writeJsonAtomic(file, queue);
+    await replaceArtifactJson(file, queue);
   } else if (!["build", "pending", "check"].includes(command)) {
     throw new Error(`Unknown queue operation: ${command}`);
   }
-  const remaining = remainingPaths(queue).length;
-  if (command === "check") requireEmptyQueue(queue);
+  const remaining = paths.size - reviewed.size;
+  if (command === "check" && remaining)
+    throw new Error(
+      `${remaining} Standard target files still need review. Resume with standard-queue pending.`,
+    );
   const summary = {
     files: paths.size,
     batches: queue.batches.length,
