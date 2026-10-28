@@ -6,7 +6,6 @@ import {
 } from "../src/monitor-events.js";
 import {
   reviewSecurityEventsInternal,
-  securityEventId,
   type SecurityEventBatch,
 } from "../src/review-events.js";
 
