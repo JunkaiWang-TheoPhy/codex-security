@@ -19,6 +19,9 @@ import {
 const checkoutUrl = "https://github.com/example/project";
 const foreignUrl = "https://github.com/example/other";
 const enterpriseUrl = "https://git.example.test/Example/Project";
+const enterpriseHttp = enterpriseUrl.replace("https:", "http:");
+const singleSuffix = `${enterpriseUrl.toLowerCase()}.git`;
+const doubleSuffix = `${singleSuffix}.git`;
 const enterpriseSsh = "git@git.example.test:example/project.git";
 const mismatch = "does not match a configured remote";
 const ambiguousSsh = /Trivy omitted the SSH user/u;
@@ -188,43 +191,36 @@ test.each([
 );
 
 test.each([
+  [singleSuffix, enterpriseUrl, "different repositories"],
   [
-    "http://git.example.test/example/project.git",
-    "http://git.example.test/Example/Project",
-    true,
-  ],
-  [
-    "https://git.example.test/example/project.git",
-    "https://git.example.test/Example/Project",
-    true,
+    singleSuffix.replace("https:", "http:"),
+    enterpriseHttp,
+    "different repositories",
   ],
   [
     "ssh://git.example.test/example/project",
     "ssh://git@git.example.test/example/project",
-    false,
+    ambiguousSsh,
   ],
   [
     "ssh://git.example.test/example/other",
     "ssh://git@git.example.test/example/other",
-    false,
+    ambiguousSsh,
   ],
   [
     "ssh://git.example.test/example/project",
     "ssh://other@git.example.test/example/project",
-    false,
+    ambiguousSsh,
   ],
 ] as const)(
-  "a local GitHub source hint corroborates report %s and artifact %s: %j",
-  async (remote, artifact, accepts) => {
+  "a local GitHub source hint rejects conflicting report %s and artifact %s",
+  async (remote, artifact, error) => {
     const scheme = remote.startsWith("http:") ? "http" : "https";
     const url = `${scheme}://git.example.test/example/project`;
     await using checkout = await trivyCheckout(url, url);
     const report = { ...trivyReport(), ...repositoryClaims(artifact, remote) };
-    for (const prepare of [checkout.fromNormalized, checkout.fromFile]) {
-      const pending = prepare(report, ".");
-      if (accepts) expect((await pending).preview.findings).toHaveLength(1);
-      else await expect(pending).rejects.toThrow(ambiguousSsh);
-    }
+    for (const prepare of [checkout.fromNormalized, checkout.fromFile])
+      await expect(prepare(report, ".")).rejects.toThrow(error);
   },
 );
 
@@ -238,6 +234,8 @@ test.each([
   [aliasScp, aliasScp, true],
   [aliasSsh, aliasSsh, true],
   [aliasWeb, aliasWeb, true],
+  [enterpriseHttp, enterpriseHttp, true],
+  [doubleSuffix, doubleSuffix, true],
   [checkoutUrl, "git@github.com:example/project.git", true],
 ] as const)(
   "a GitHub source hint for %s matches checkout %s: %j",
@@ -382,22 +380,30 @@ test("Trivy distinguishes a differently cased checkout alias from a separate dir
 test.each([
   [foreignUrl, checkoutUrl, undefined],
   [enterpriseUrl, enterpriseSsh, enterpriseUrl],
+  [doubleSuffix, singleSuffix, doubleSuffix, doubleSuffix],
+  [singleSuffix, singleSuffix, doubleSuffix],
 ] as const)(
-  "normalized Trivy report %s and finding %s must agree without a checkout remote",
-  async (reportUrl, findingUrl, githubSource) => {
+  "normalized Trivy report %s, finding %s and reader hint %s must agree",
+  async (reportUrl, findingUrl, githubSource, artifact = ".") => {
     await using checkout = await trivyCheckout(undefined, githubSource);
     const plainDirectory = join(dirname(checkout.repository), "unpacked");
     await mkdir(plainDirectory);
     const input = normalizeTrivyFindings(
-      { ...trivyReport(), Metadata: { RepoURL: findingUrl } },
+      { ...trivyReport(), ...repositoryClaims(artifact, findingUrl) },
       "local",
       ".",
     );
     input.report = trivyRepositoryHeader(reportUrl);
-    for (const repository of [checkout.repository, plainDirectory])
-      await expect(checkout.prepare(input, repository)).rejects.toThrow(
+    const reject = (repository: string) =>
+      expect(checkout.prepare(input, repository)).rejects.toThrow(
         "different repositories",
       );
+    await reject(plainDirectory);
+    await reject(checkout.repository);
+    const origin = githubSource ?? reportUrl;
+    git(checkout.repository, "remote", "add", "origin", origin);
+    git(checkout.repository, "remote", "add", "upstream", findingUrl);
+    await reject(checkout.repository);
   },
 );
 
@@ -482,9 +488,9 @@ test.each([
     enterpriseUrl,
     "https://checkout-user@git.example.test/Example/Project",
     true,
-    true,
+    false,
   ],
-  [enterpriseUrl, enterpriseUrl.toLowerCase(), true, true],
+  [enterpriseUrl, enterpriseUrl.toLowerCase(), true, false],
   [enterpriseUrl, enterpriseUrl.toLowerCase(), false, false],
 ] as const)(
   "Trivy checks source %s against checkout %s (GitHub hint %j, match %j)",

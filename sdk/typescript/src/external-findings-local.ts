@@ -21,7 +21,7 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import { parseGitRemote } from "./git-remote.js";
 import { trivyRemoteKey, trivyBatchSourceUrls } from "./trivy-findings.js";
 import { isRecord } from "./record.js";
 import {
@@ -108,7 +108,6 @@ function requireIdentity(
 function remoteRepositoryKey(
   value: string,
   provider: Provider,
-  githubSource?: string,
   checkout = false,
 ): string | undefined {
   const drivePath =
@@ -136,11 +135,7 @@ function remoteRepositoryKey(
     ].includes(remote.url.protocol)
   )
     return undefined;
-  if (provider === "trivy") {
-    // A web URL cannot resolve a checkout's SSH Host aliases.
-    const webSource = /^https?:\/\//u.test(value) ? githubSource : undefined;
-    return trivyRemoteKey(value, webSource, checkout);
-  }
+  if (provider === "trivy") return trivyRemoteKey(value, undefined, checkout);
   const url = remote.url;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
@@ -159,10 +154,7 @@ function remoteRepositoryKey(
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key =
-    provider === "github" || githubSource
-      ? cloudRepositoryUrlKey
-      : repositoryUrlKey;
+  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   return key(
     `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
   );
@@ -356,15 +348,6 @@ async function hasGitMetadata(
   );
 }
 
-function trivyWebUrlKey(url: string, githubSource?: string): string {
-  if (githubSource) return cloudRepositoryUrlKey(url);
-  const authority = /^https?:\/\/([^/?#]+)/iu.exec(url)?.[1] ?? "";
-  if (isGitHubCloudHost(authority.toLowerCase().replace(/:\d+$/u, "")))
-    return repositoryUrlKey(url);
-  // Keep the full path and explicit port on Git servers with unknown alias rules.
-  return url.replace(/^https?:/iu, (scheme) => scheme.toLowerCase());
-}
-
 async function requireMatchingRepository(
   repository: string,
   provider: Provider,
@@ -375,30 +358,30 @@ async function requireMatchingRepository(
   checkTrivyBinding?: () => void,
 ): Promise<void> {
   if (sources.length === 0 && provider !== "trivy") return;
-  const webUrl = /^https?:\/\//iu;
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
-      // An SSH Host alias cannot establish the Enterprise web hostname.
-      if (provider === "trivy" && !webUrl.test(source.url)) return [];
       const key = remoteRepositoryKey(source.url, "github");
       return key === undefined ? [] : [key];
     }),
   );
-  const githubSourceFor = (url: string) => {
-    const key = remoteRepositoryKey(url, "github");
-    return key && githubRepositories.has(key) ? key : undefined;
-  };
   const claims = sources.map(({ url, platform, typedTrivyUrl }) => {
-    const githubSource = githubSourceFor(url);
-    const readerWebUrl =
-      provider === "trivy" && platform === "github" && webUrl.test(url);
+    const githubKey = remoteRepositoryKey(url, "github");
+    const sourceProvider =
+      provider !== "trivy" &&
+      (platform === "github" ||
+        (githubKey && githubRepositories.has(githubKey)))
+        ? "github"
+        : provider;
+    // URL schemes are case-insensitive in web references. Git transports are literal.
+    const remote =
+      provider === "trivy" && (typedTrivyUrl || platform === "github")
+        ? url.replace(/^https?:\/\//iu, (scheme) => scheme.toLowerCase())
+        : url;
     const key =
-      typedTrivyUrl || readerWebUrl
-        ? trivyWebUrlKey(url, githubSource)
-        : (remoteRepositoryKey(url, provider, githubSource) ??
-          (provider === "trivy" ? url : undefined));
-    return { url, githubSource, key };
+      remoteRepositoryKey(remote, sourceProvider) ??
+      (provider === "trivy" ? remote : undefined);
+    return { url, sourceProvider, key };
   });
   const requireConsistentClaims = () => {
     if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
@@ -470,16 +453,15 @@ async function requireMatchingRepository(
   if (
     checkTrivyBinding &&
     remotes.some(
-      (remote) =>
-        remoteRepositoryKey(remote, provider, undefined, true) !== undefined,
+      (remote) => remoteRepositoryKey(remote, provider, true) !== undefined,
     )
   )
     checkTrivyBinding();
   requireConsistentClaims();
-  for (const { url, githubSource, key } of claims) {
+  for (const { url, sourceProvider, key } of claims) {
     const remoteKeys = new Set(
       remotes.flatMap((remote) => {
-        const key = remoteRepositoryKey(remote, provider, githubSource, true);
+        const key = remoteRepositoryKey(remote, sourceProvider, true);
         return key === undefined ? [] : [key];
       }),
     );
