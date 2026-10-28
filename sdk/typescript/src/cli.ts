@@ -428,7 +428,7 @@ async function* readLiveEventLines(input: Readable): AsyncGenerator<unknown> {
   function parse(value: string): unknown {
     line++;
     try {
-      return JSON.parse(value);
+      return parseSecurityEventInputText(value.replace(/\r$/, ""));
     } catch (cause) {
       throw new CodexSecurityError(
         `Live input line ${line}: ${errorMessage(cause)}`,
@@ -4690,7 +4690,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Continuously review batches from JSONL stdin and write JSONL results.",
+            "Continuously review CEF lines or JSONL batches and write JSONL results.",
           ),
         batchSize: ReviewEventSettingsSchema.shape.batch_size,
         maxWaitSeconds: ReviewEventSettingsSchema.shape.max_wait_seconds,

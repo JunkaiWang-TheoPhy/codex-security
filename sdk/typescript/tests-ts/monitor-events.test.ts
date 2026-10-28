@@ -172,31 +172,25 @@ test.each([
   ).rejects.toThrow();
 });
 
-test("sample collector carries the role assumption into the second review window", async () => {
-  const { execFileSync } = await import("node:child_process");
+test("static CEF history example carries the session start into the second window", async () => {
   const { readFileSync } = await import("node:fs");
-  const { fileURLToPath } = await import("node:url");
-  const fixture = new URL("../../../examples/live-audit/", import.meta.url);
-  const normalized = execFileSync(
-    "node",
-    [fileURLToPath(new URL("collect.mjs", fixture))],
-    {
-      input: readFileSync(new URL("cloudtrail.jsonl", fixture)),
-      encoding: "utf8",
-    },
-  )
-    .trim()
+  const fixture = new URL(
+    "../../../examples/live-audit/batches.jsonl",
+    import.meta.url,
+  );
+  const records = readFileSync(fixture, "utf8")
+    .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line) as SecurityEventBatch);
   const inputs: SecurityEventBatch[] = [];
   const reviews = await Array.fromAsync(
     monitorSecurityEventsInternal(
-      Readable.from(normalized),
+      Readable.from(records),
       { batchSize: 2 },
       "sdk",
       async (value) => {
         inputs.push(value as SecurityEventBatch);
-        return { schemaVersion: 1, source: normalized[0]!.source, groups: [] };
+        return { schemaVersion: 1, source: records[0]!.source, groups: [] };
       },
     ),
   );
@@ -204,11 +198,11 @@ test("sample collector carries the role assumption into the second review window
     [1, 2],
     [3, 4],
   ]);
-  expect(inputs[1]!.groups[0]!.contextEvents?.map(securityEventId)).toEqual([
-    "00000000-0000-4000-8000-000000000001",
-  ]);
-  expect(inputs[1]!.groups[0]!.events.map(securityEventId)).toEqual([
-    "00000000-0000-4000-8000-000000000002",
-    "00000000-0000-4000-8000-000000000004",
+  expect(inputs[1]!.groups[0]!.contextEvents).toEqual(
+    records[0]!.groups[0]!.events,
+  );
+  expect(inputs[1]!.groups[0]!.events).toEqual([
+    ...records[2]!.groups[0]!.events,
+    ...records[3]!.groups[0]!.events,
   ]);
 });

@@ -2,7 +2,7 @@
 
 Examples and templates for using Codex Security:
 
-- [Live authentication log review](live-audit/README.md) normalizes session logs and streams grouped reviews through the CLI.
+- [Live CEF audit review](live-audit/README.md): stream native CEF records with an optional static history example.
 - [GitHub Actions with Amazon Bedrock](github-actions/README.md): a copyable
   workflow for PR-diff and full-repository scans with AWS OIDC authentication,
   SARIF uploads, and downloadable reports.
