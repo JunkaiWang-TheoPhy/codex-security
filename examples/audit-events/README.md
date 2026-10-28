@@ -36,7 +36,8 @@ Direct review uses the configured Codex authentication. Decisions screening is o
 and needs `OPENAI_API_KEY`; its confidence cutoff defaults to 0.95. A `page` result is
 a recommendation, not a delivered page. These examples do not measure detection quality.
 
-JSONL is an optional transport for JSON strings and envelopes, separate from CEF.
+JSONL is a transport format, separate from CEF. The one-shot command expects one
+JSON value; native CEF files use one record per line.
 Existing CloudTrail, OCSF, and legacy custom JSON inputs remain compatible.
 
 Reference: [ArcSight CEF implementation standard](https://www.microfocus.com/documentation/arcsight/arcsight-smartconnectors-8.3/cef-implementation-standard/Content/CEF/Chapter%201%20What%20is%20CEF.htm).
