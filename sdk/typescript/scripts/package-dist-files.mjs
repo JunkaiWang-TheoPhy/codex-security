@@ -33,6 +33,8 @@ const distModules = [
   "semgrep-findings",
   "semgrep-platform-findings",
   "hosted-scanner-http",
+  "native-json-findings",
+  "opengrep-findings",
   "trivy-findings",
   "external-findings-publish",
   "external-import-contract",

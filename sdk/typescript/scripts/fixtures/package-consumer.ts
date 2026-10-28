@@ -309,7 +309,10 @@ export async function externalPublication(
   const fromFile = await prepareExternalPublication(file, options);
   fromFile.preview.requests[0]?.source.provider satisfies
     "wiz" | "endor" | "snyk" | "github" | "semgrep" | "trivy" | undefined;
-  const prepared = await prepareNormalizedExternalPublication(input, options);
+  const prepared = await prepareNormalizedExternalPublication(input, {
+    ...options,
+    provider: fromFile.preview.source.provider,
+  });
   return prepared.publish();
 }
 

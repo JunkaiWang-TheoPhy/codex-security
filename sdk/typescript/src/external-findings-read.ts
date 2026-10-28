@@ -24,6 +24,7 @@ import {
   normalizeTrivyFindings,
   trivyRepositoryUrl,
 } from "./trivy-findings.js";
+import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -36,6 +37,8 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   snyk: "snyk",
   semgrep: "semgrep",
   trivy: "trivy",
+  // OpenGrep uses the existing SAST contract; evidence retains its scanner origin.
+  opengrep: "semgrep",
   endor: "endor",
   github: "github",
 } as const satisfies Record<string, Provider>;
@@ -107,6 +110,17 @@ export async function readExternalFindings(
   }
   if (options.trivyScanRoot !== undefined)
     throw new Error("--trivy-scan-root applies only to --provider trivy.");
+  if (options.provider === "opengrep") {
+    const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
+    return {
+      findings: await readOpenGrepFindings(
+        path,
+        { sourceRepositoryUrl },
+        target,
+      ),
+      reportRepositoryUrl: sourceRepositoryUrl,
+    };
+  }
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
     if (
