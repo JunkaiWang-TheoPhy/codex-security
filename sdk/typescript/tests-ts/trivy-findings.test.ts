@@ -108,9 +108,13 @@ test("uses Git metadata for a repository target with a mixed-case HTTPS scheme",
       ArtifactName: "HTTPS://github.com/example/other",
     }),
   ).toThrow("different repositories");
-  expect(
-    normalizeAtRoot({ ...report, Metadata: {} }).sourceRepositoryUrls,
-  ).toEqual([report.ArtifactName]);
+  const targetOnly = { ...report, Metadata: {} };
+  expect(() => normalizeTrivyFindings(targetOnly)).toThrow("--trivy-scan-root");
+  const selected = normalizeAtRoot(targetOnly);
+  expect(selected.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
+  expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
+    ArtifactName: report.ArtifactName,
+  });
 });
 
 test("retains a provisional Enterprise SSH alias until the destination is known", () => {
@@ -135,14 +139,6 @@ test("retains a provisional Enterprise SSH alias until the destination is known"
       "http://git.example.test/org/project",
       "http://git.example.test/ORG/other",
     ],
-    [
-      "ssh://other@git.example.test/org/project",
-      "ssh://git.example.test/org/project",
-    ],
-    [
-      "ssh://git@git.example.test:2222/org/project",
-      "ssh://git.example.test:2222/org/project",
-    ],
   ]) {
     expect(() =>
       normalizeTrivyFindings({
@@ -151,6 +147,29 @@ test("retains a provisional Enterprise SSH alias until the destination is known"
         Metadata: { RepoURL },
       }),
     ).toThrow("different repositories");
+  }
+  for (const [ArtifactName, RepoURL] of [
+    [
+      "ssh://other@git.example.test/org/project",
+      "ssh://git.example.test/org/project",
+    ],
+    [
+      "ssh://git@git.example.test:2222/org/project",
+      "ssh://git.example.test:2222/org/project",
+    ],
+  ] as const) {
+    const batch = normalizeAtRoot({
+      ...report,
+      ArtifactName,
+      Metadata: { RepoURL },
+    });
+    expect(batch.sourceRepositoryUrls).toEqual([ArtifactName]);
+    expect(
+      trivyRepositoryUrl(
+        batch.findings[0]!.evidence.source_data!["report"],
+        report.ArtifactName,
+      ),
+    ).toBe(ArtifactName);
   }
 });
 
@@ -668,16 +687,6 @@ test("clean native reports differ from unsupported, mixed and malformed findings
   );
   expect(() => normalizeAtRoot({ version: "2.1.0", runs: [] })).toThrow(
     /SchemaVersion 2/,
-  );
-});
-
-test("Trivy's userless GitHub SSH origin matches the selected Cloud repository", () => {
-  const report = {
-    ...trivyReport(),
-    Metadata: { RepoURL: "ssh://github.com/example/project" },
-  };
-  expect(trivyRepositoryUrl(report, "https://github.com/example/project")).toBe(
-    "https://github.com/example/project",
   );
 });
 

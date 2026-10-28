@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -17,6 +18,7 @@ const foreignUrl = "https://github.com/example/other";
 const enterpriseUrl = "https://git.example.test/Example/Project";
 const enterpriseSsh = "git@git.example.test:example/project.git";
 const mismatch = "does not match a configured remote";
+const ambiguousSsh = /Trivy omitted the SSH user/u;
 
 function repositoryClaims(artifactName: string, repoUrl: string) {
   return { ArtifactName: artifactName, Metadata: { RepoURL: repoUrl } };
@@ -56,6 +58,33 @@ async function trivyCheckout(remote?: string, githubSource?: string) {
     list: () => listLocalExternalFindings(options, deps),
   };
 }
+
+test("normalized Trivy batch URLs reject credentials before local or Cloud preparation", async () => {
+  const input = normalizeTrivyFindings(trivyReport(), "cloud", ".");
+  input.sourceRepositoryUrls = [
+    "https://scanner:fixture@github.com/example/other",
+  ];
+  const error =
+    "Use a Trivy repository URL without credentials, a query, or a fragment.";
+  await using local = await trivyCheckout(checkoutUrl);
+  await expect(local.prepare(input)).rejects.toThrow(error);
+  await expect(
+    prepareNormalizedExternalPublication(
+      input,
+      {
+        provider: "trivy",
+        repository: "repo-example",
+        sourceKey: "example/project/main",
+      },
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected Cloud authentication");
+        },
+      },
+    ),
+  ).rejects.toThrow(error);
+});
 
 test.each([
   ["foreign empty report", {}, foreignUrl, mismatch],
@@ -187,6 +216,14 @@ test.each([
     }
   },
 );
+
+test("a reader-declared Trivy source must agree with the finding even when both are checkout remotes", async () => {
+  await using checkout = await trivyCheckout(checkoutUrl, foreignUrl);
+  git(checkout.repository, "remote", "add", "upstream", foreignUrl);
+  await expect(checkout.fromNormalized(trivyReport(), ".")).rejects.toThrow(
+    "different repositories",
+  );
+});
 
 test("selected and stored Trivy findings retain their artifact-only checkout binding", async () => {
   await using source = await trivyCheckout(checkoutUrl);
@@ -347,7 +384,7 @@ test.each([
     "ssh://github.com/example/project",
     "git@github.com:example/project.git",
     false,
-    true,
+    ambiguousSsh,
   ],
   [
     checkoutUrl,
@@ -365,13 +402,13 @@ test.each([
     "ssh://tenant.ghe.com/team/project",
     "ssh://tenant@tenant.ghe.com/team/project",
     false,
-    true,
+    ambiguousSsh,
   ],
   [
     "ssh://tenant.ghe.com/team/project",
     "ssh://other@tenant.ghe.com/team/project",
     false,
-    false,
+    ambiguousSsh,
   ],
   [checkoutUrl, "ssh://github.com/example/project", false, false],
   [checkoutUrl, "ssh://git@github.com/example/project", false, true],
@@ -403,7 +440,8 @@ test.each([
     const report = trivyReport();
     report.Metadata.RepoURL = source;
     const pending = local.fromFile(report, ".");
-    if (matches) expect((await pending).preview.findings).toHaveLength(1);
-    else await expect(pending).rejects.toThrow(mismatch);
+    if (matches === true)
+      expect((await pending).preview.findings).toHaveLength(1);
+    else await expect(pending).rejects.toThrow(matches || mismatch);
   },
 );

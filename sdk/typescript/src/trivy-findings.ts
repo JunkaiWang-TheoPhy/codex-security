@@ -56,7 +56,6 @@ function networkRepository(value: unknown): string | null {
 function comparableGitHubRemote(
   remote: string,
   cloudRepositoryUrl?: string,
-  checkout = false,
 ): string | undefined {
   if (/[?#\t\r\n]/u.test(remote)) return undefined;
   const parsed = parseGitRemote(remote);
@@ -73,10 +72,7 @@ function comparableGitHubRemote(
     const pathStart = remote.indexOf("/", authorityStart);
     if (pathStart < 0 || remote.slice(pathStart) !== parsed.url.pathname)
       return undefined;
-    // Trivy strips SSH userinfo from reported URLs. Git checkout remotes
-    // retain their actual spelling and may use a different configured SSH user.
-    const authority = remote.slice(authorityStart, pathStart);
-    remote = `ssh://${checkout || authority.includes("@") ? "" : "git@"}${authority}${parsed.url.pathname}`;
+    remote = `ssh://${remote.slice(authorityStart)}`;
   }
   const normalized = normalizeGitRepositoryUrl(remote, githubUrl);
   if (!/^https?:\/\//iu.test(normalized)) return undefined;
@@ -93,11 +89,7 @@ export function trivyRemoteKey(
   cloudRepositoryUrl?: string,
   checkout = false,
 ): string {
-  const normalized = comparableGitHubRemote(
-    remote,
-    cloudRepositoryUrl,
-    checkout,
-  );
+  const normalized = comparableGitHubRemote(remote, cloudRepositoryUrl);
   if (!normalized) return remote;
   // GitHub identifies an HTTPS repository by host and path. Other Git servers
   // may use the HTTP username to select the repository.
@@ -109,18 +101,35 @@ export function trivyRemoteKey(
     : repositoryUrlKey(url);
 }
 
+const sshScheme = /^(?:ssh|git\+ssh|ssh\+git):\/\//u;
+
+function userlessSsh(url: string): boolean {
+  return sshScheme.test(url) && !new URL(url).username;
+}
+
+function requireTrivySshUsers(urls: readonly string[]): void {
+  if (urls.some(userlessSsh))
+    throw new Error(
+      "Trivy omitted the SSH user, so this report cannot identify its source repository. Verify the checkout uses the intended git@host:path or HTTPS remote and regenerate the report.",
+    );
+}
+
 /** Findings are stored and published individually, without the batch repository URLs. */
 export function validateNormalizedTrivySources(input: ExternalFindings): void {
+  for (const url of input.sourceRepositoryUrls ?? []) networkRepository(url);
+  requireTrivySshUsers(input.sourceRepositoryUrls ?? []);
   for (const { evidence } of input.findings) {
     const report = evidence.source_data?.["report"];
     if (isRecord(report) && report["SchemaVersion"] === 2) {
       const name = text(report["ArtifactName"]);
       if (name && urlScheme.test(name)) networkRepository(name);
     }
+    const { urls } = trivyReportRemotes(report);
+    requireTrivySshUsers(urls);
     if (
       input.sourceRepositoryUrls?.length &&
       !evidence.details?.repository?.url &&
-      !trivyReportRemotes(report).urls.length
+      !urls.length
     )
       throw new Error(
         "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
@@ -151,21 +160,27 @@ export function trivyReportRemotes(report: unknown) {
   }
   const artifactRepository =
     artifact && artifact !== repository ? artifact : undefined;
-  if (
-    artifactRepository &&
-    report["ArtifactType"] === "repository" &&
-    artifactRepository.replace(/^https?:/iu, (scheme) =>
+  if (artifactRepository && report["ArtifactType"] === "repository") {
+    // Trivy parses HTTP target arguments as URLs. The checkout uses Git's literal transport.
+    const target = artifactRepository.replace(/^https?:/iu, (scheme) =>
       scheme.toLowerCase(),
-    ) === repository
-  ) {
-    // Trivy keeps the target spelling but clones with a lowercase HTTP scheme.
-    // A local scan can emit the same label, so keep the scan root explicit.
-    return { urls: [repository], artifactRepository };
+    );
+    if (target !== artifactRepository && (!repository || target === repository))
+      return { urls: [target], artifactRepository };
   }
-  return {
-    urls: [repository, artifact].filter((url) => url !== null),
-    artifactRepository,
-  };
+  const urls = [repository, artifact].filter((url) => url !== null);
+  const weak = urls.find(userlessSsh);
+  if (weak && urls.length === 2) {
+    const declared = urls.find((url) => url !== weak);
+    if (!declared) return { urls: [weak], artifactRepository };
+    // Compare the lost user against another retained declaration, never the destination.
+    if (
+      weak === declared.replace(/:\/\/[^/@]+@/u, "://") ||
+      declared === weak.replace(sshScheme, "https://")
+    )
+      return { urls: [declared, declared], artifactRepository };
+  }
+  return { urls, artifactRepository };
 }
 
 export function requireMatchingTrivyRemotes(

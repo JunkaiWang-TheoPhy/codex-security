@@ -373,7 +373,6 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   dependencies.signal?.throwIfAborted();
-  if (options.provider === "trivy") validateNormalizedTrivySources(input);
   return preparePublicationInput(
     normalizedPublicationInput(input),
     options,
@@ -459,6 +458,7 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
+  if (options.provider === "trivy") validateNormalizedTrivySources(parsed);
   const { sourceRepositoryUrls = [] } = parsed;
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
@@ -757,8 +757,8 @@ async function preparePublicationInput(
         );
     }
     for (const finding of parsed.findings) {
-      const sourceRepositories = [
-        finding.evidence.details?.repository?.url,
+      const typedUrl = finding.evidence.details?.repository?.url;
+      const scannerUrls = [
         ...scannerFindingRepositoryUrls(
           options.provider,
           finding.evidence.source_data,
@@ -771,14 +771,16 @@ async function preparePublicationInput(
           ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
       ];
-      for (const sourceRepository of sourceRepositories)
-        if (
-          sourceRepository &&
-          repositoryKey(sourceRepository) !== destinationKey
-        )
-          throw new CodexSecurityError(
-            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-          );
+      const mismatch =
+        typedUrl && cloudRepositoryUrlKey(typedUrl) !== destinationKey
+          ? typedUrl
+          : scannerUrls.find(
+              (url) => url && repositoryKey(url) !== destinationKey,
+            );
+      if (mismatch)
+        throw new CodexSecurityError(
+          `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(mismatch)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        );
     }
     let preparedCount = 0;
     progress({

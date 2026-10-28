@@ -21,9 +21,8 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { parseGitRemote } from "./git-remote.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import {
-  requireMatchingTrivyRemotes,
   trivyRemoteKey,
   validateNormalizedTrivySources,
 } from "./trivy-findings.js";
@@ -360,11 +359,19 @@ async function hasGitMetadata(
   );
 }
 
+function trivyWebUrlKey(url: string, githubSource?: string): string {
+  if (githubSource) return cloudRepositoryUrlKey(url);
+  const authority = /^https?:\/\/([^/?#]+)/iu.exec(url)?.[1] ?? "";
+  if (isGitHubCloudHost(authority.toLowerCase().replace(/:\d+$/u, "")))
+    return repositoryUrlKey(url);
+  // Keep the full path and explicit port on Git servers with unknown alias rules.
+  return url.replace(/^https?:/iu, (scheme) => scheme.toLowerCase());
+}
+
 async function requireMatchingRepository(
   repository: string,
   provider: Provider,
-  sources: readonly ExternalSourceRepository[],
-  trivyReportUrls: readonly string[],
+  sources: readonly (ExternalSourceRepository & { typedTrivyUrl?: boolean })[],
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -381,10 +388,17 @@ async function requireMatchingRepository(
     const key = remoteRepositoryKey(url, "github");
     return key && githubRepositories.has(key) ? key : undefined;
   };
-  if (trivyReportUrls.length > 1)
-    requireMatchingTrivyRemotes(
-      trivyReportUrls,
-      githubSourceFor(trivyReportUrls[0]!),
+  const claims = sources.map(({ url, typedTrivyUrl }) => {
+    const githubSource = githubSourceFor(url);
+    const key = typedTrivyUrl
+      ? trivyWebUrlKey(url, githubSource)
+      : (remoteRepositoryKey(url, provider, githubSource) ??
+        (provider === "trivy" ? url : undefined));
+    return { url, githubSource, key };
+  });
+  if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
+    throw new CodexSecurityError(
+      "Trivy source URLs identify different repositories.",
     );
 
   if (!(await hasGitMetadata(repository, signal))) return;
@@ -446,8 +460,7 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  for (const source of sources) {
-    const githubSource = githubSourceFor(source.url);
+  for (const { url, githubSource, key } of claims) {
     const remoteKeys = new Set(
       remotes.flatMap((remote) => {
         const key = remoteRepositoryKey(remote, provider, githubSource, true);
@@ -455,10 +468,9 @@ async function requireMatchingRepository(
       }),
     );
     if (remoteKeys.size === 0) continue;
-    const key = remoteRepositoryKey(source.url, provider, githubSource);
     if (key === undefined || !remoteKeys.has(key))
       throw new CodexSecurityError(
-        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+        `Imported repository ${JSON.stringify(url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
   }
 }
@@ -549,17 +561,19 @@ export async function prepareNormalizedLocalImport(
   const sources = new Map<string, ExternalSourceRepository>(
     current.sourceRepositoryUrls?.map((url) => [url, { url }]),
   );
+  const typedTrivyUrls = new Set<string>();
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
+    if (url) {
+      if (options.provider === "trivy") typedTrivyUrls.add(url);
+      else sources.set(url, { url });
+    }
     for (const source of scannerFindingRepositoryUrls(
       options.provider,
       evidence.source_data,
     ))
       sources.set(source, { url: source });
   }
-  const trivyReportUrls =
-    options.provider === "trivy" ? [...sources.keys()] : [];
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.
     if (sources.get(source.url)?.platform !== "github")
@@ -568,8 +582,10 @@ export async function prepareNormalizedLocalImport(
   await requireMatchingRepository(
     repository,
     options.provider,
-    [...sources.values()],
-    trivyReportUrls,
+    [
+      ...sources.values(),
+      ...Array.from(typedTrivyUrls, (url) => ({ url, typedTrivyUrl: true })),
+    ],
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

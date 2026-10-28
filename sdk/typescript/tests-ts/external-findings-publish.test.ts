@@ -3589,8 +3589,9 @@ test.each([
 
 async function trivyReplayTargets(
   input: ReturnType<typeof normalizeTrivyFindings>,
+  remote = gitHubProject,
 ) {
-  const local = await localFindingsFixture({ remote: gitHubProject });
+  const local = await localFindingsFixture({ remote });
   cleanups.push(local.dispose);
   const cloud = await fixture();
   return [
@@ -3604,6 +3605,42 @@ async function trivyReplayTargets(
   ];
 }
 
+const userlessSsh = "ssh://github.com/example/project";
+const explicitSsh = "ssh://git@github.com/example/project";
+
+test.each([
+  [userlessSsh, undefined, userlessSsh, false],
+  [userlessSsh, undefined, gitHubProject, false],
+  [userlessSsh, undefined, explicitSsh, false],
+  [explicitSsh, undefined, gitHubProject, true],
+  ["git@github.com:example/project", undefined, gitHubProject, true],
+  [userlessSsh, gitHubProject, gitHubProject, true],
+  [userlessSsh, explicitSsh, gitHubProject, true],
+] as const)(
+  "selected Trivy SSH finding with origin %s and artifact %s on checkout %s",
+  async (RepoURL, ArtifactName, remote, accepts) => {
+    const { findings } = normalizeTrivyFindings(
+      { ...trivyReport(), Metadata: {} },
+      "cloud",
+      ".",
+    );
+    findings[0]!.evidence.source_data!["report"] = {
+      SchemaVersion: 2,
+      ArtifactType: "repository",
+      Metadata: { RepoURL },
+      ...(ArtifactName && { ArtifactName }),
+    };
+    for (const prepare of await trivyReplayTargets(
+      { read: 1, findings, excluded: [] },
+      remote,
+    )) {
+      if (accepts) expect((await prepare()).preview.findings).toHaveLength(1);
+      else
+        await expect(prepare()).rejects.toThrow(/Trivy omitted the SSH user/u);
+    }
+  },
+);
+
 test("each normalized Trivy finding must retain its report's repository", async () => {
   const report = trivyReport();
   report.Results.push({
@@ -3615,6 +3652,36 @@ test("each normalized Trivy finding must retain its report's repository", async 
   for (const prepare of await trivyReplayTargets(input))
     await expect(prepare()).rejects.toThrow(/retain/i);
 });
+
+const uppercaseWebUrl = "HTTPS://github.com/Example/Project";
+test.each([
+  [uppercaseWebUrl, gitHubProject, true],
+  [foreignArtifactUrl, gitHubProject, false],
+  [gitHubProject, uppercaseWebUrl, false],
+  [uppercaseWebUrl, uppercaseWebUrl, false],
+] as const)(
+  "compares a typed repository URL %s and a raw Trivy remote %s independently",
+  async (typed, raw, matches) => {
+    const report = trivyReport();
+    report.Metadata.RepoURL = raw;
+    const { findings } = normalizeTrivyFindings(report, "cloud", ".");
+    findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: typed },
+    };
+    for (const prepare of await trivyReplayTargets({
+      read: 1,
+      findings,
+      excluded: [],
+    })) {
+      if (matches) expect((await prepare()).preview.findings).toHaveLength(1);
+      else
+        await expect(prepare()).rejects.toThrow(
+          /does not match|different repositories/,
+        );
+    }
+  },
+);
 
 const credentialUrl = "https://scanner:fixture@github.com/example/project";
 
