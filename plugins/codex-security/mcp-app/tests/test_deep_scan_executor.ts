@@ -2201,7 +2201,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 /^projects[.=]/.test(override),
               ),
               [],
-              "Patch project trust is not forwarded to discovery, reducer or resumed workers.",
+              "Discovery workers keep their own project trust when started or resumed.",
             );
             assert.deepEqual(
               JSON.parse(
@@ -2214,7 +2214,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               )["skills"],
               workerConfigurations[index].skills,
-              "Discovery, reducer and resumed concurrent launches retain their own skill selection.",
+              "Concurrent discovery workers retain their own skill selection on launch and resume.",
             );
             assert.deepEqual(
               JSON.parse(
@@ -3108,7 +3108,7 @@ function testCodeModeFrameDiagnosticBoundaries() {
   const failedArtifactTool = {
     type: "mcp_tool_call",
     server: "cs_artifacts",
-    tool: "get_codex_security_deep_reducer_inputs",
+    tool: "record_codex_security_scan_draft",
     status: "failed",
   };
   const resultWithText = (text: string) => ({
@@ -3132,7 +3132,7 @@ function testCodeModeFrameDiagnosticBoundaries() {
       {
         code: "artifact_tool_failed",
         message:
-          "Codex worker artifact tool get_codex_security_deep_reducer_inputs failed.",
+          "Codex worker artifact tool record_codex_security_scan_draft failed.",
       },
       { code: "artifact_tool_failed", message: ipcFrameError },
     ]);
@@ -3237,7 +3237,7 @@ async function testAbortPropagation() {
 
 function mockWorkerSpawn(
   executablePath: string,
-  onExec: (
+  onExec?: (
     child: ChildProcess,
     args: readonly string[],
     options: SpawnOptions,
@@ -3259,7 +3259,7 @@ function mockWorkerSpawn(
         : args,
       options,
     );
-    if (args[0] === "exec") onExec(child, args, options);
+    if (args[0] === "exec") onExec?.(child, args, options);
     return child;
   }) as typeof childProcess.spawn;
   syncBuiltinESMExports();
@@ -3639,15 +3639,14 @@ async function withWorkerFixture<Result>(
   ...options: Parameters<typeof fakeCodexFixture>
 ) {
   const fixture = await fakeCodexFixture(...options);
-  const previousPath = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const restoreSpawn = mockWorkerSpawn(fixture.executablePath);
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
     return await action(fixture, promptPath, workingDirectory);
   } finally {
-    restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreSpawn();
   }
 }
 
