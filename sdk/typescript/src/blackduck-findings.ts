@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
@@ -13,6 +14,7 @@ import {
   stableId,
   text,
 } from "./scanner-import.js";
+import { FailureSeveritySchema } from "./scan-settings.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -128,14 +130,19 @@ function collectionScope(collection: Record<string, unknown>) {
   return `${resource.base}/projects/${project[1]}/versions/${project[2]}`;
 }
 
-function projectReference(href: unknown, remediation: boolean) {
-  const label = remediation ? "remediation URL" : "matched-files link";
+function projectReference(
+  href: unknown,
+  relation: "remediation" | "matched-files",
+) {
+  const label =
+    relation === "remediation" ? "remediation URL" : "matched-files link";
   const resource = apiResource(href, label);
-  const path = remediation
-    ? /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)(?:\/origins\/([^/]+))?\/vulnerabilities\/[^/]+\/remediation$/u
-    : /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)(?:\/origins\/([^/]+))?\/matched-files$/u;
-  const match = path.exec(resource.path);
-  if (!match) throw new Error(`Invalid Black Duck project-version ${label}.`);
+  const match =
+    /^(projects\/[^/]+\/versions\/[^/]+)\/(components\/[^/]+\/versions\/[^/]+)(?:\/origins\/([^/]+))?\/(matched-files|vulnerabilities\/[^/]+\/remediation)$/u.exec(
+      resource.path,
+    );
+  if (!match || !match[4]!.endsWith(relation))
+    throw new Error(`Invalid Black Duck project-version ${label}.`);
   return {
     scope: `${resource.base}/${match[1]}`,
     component: `${resource.base}/${match[2]}`,
@@ -143,18 +150,29 @@ function projectReference(href: unknown, remediation: boolean) {
   };
 }
 
+const bomComponent = z.object(
+  {
+    vulnerabilityWithRemediation: z.custom<Record<string, unknown>>(
+      isRecord,
+      "Black Duck vulnerabilityWithRemediation must be an object.",
+    ),
+  },
+  "Black Duck BOM component must be an object.",
+);
+
 function scopedRow(
   value: unknown,
   scope: string | undefined,
   selected: boolean,
 ) {
-  const meta = isRecord(value) ? value["_meta"] : undefined;
+  const row = isRecord(value) ? value : {};
+  const meta = row["_meta"];
   const metadata = links(meta);
   const matched = metadata
     .filter((link) => link["rel"] === "matched-files")
-    .map((link) => projectReference(link["href"], false));
+    .map((link) => projectReference(link["href"], "matched-files"));
   if (isRecord(meta) && meta["href"] !== undefined)
-    matched.push(projectReference(meta["href"], true));
+    matched.push(projectReference(meta["href"], "remediation"));
   if (selected && !matched.length)
     throw new Error(
       "Each selected Black Duck row must identify its project version with a remediation or matched-files link.",
@@ -166,18 +184,25 @@ function scopedRow(
       );
     scope = reference.scope;
   }
-  return { value, matched, metadata, scope };
+  const component = bomComponent.safeParse(value);
+  return {
+    row,
+    matched,
+    metadata,
+    scope,
+    // Shape errors are row exclusions; project-scope errors abort the report.
+    get vulnerability() {
+      if (!component.success)
+        throw new Error(component.error.issues[0]!.message);
+      return component.data.vulnerabilityWithRemediation;
+    },
+  };
 }
 
 function occurrenceId(
-  { value, matched, metadata }: ReturnType<typeof scopedRow>,
+  { row, vulnerability, matched, metadata }: ReturnType<typeof scopedRow>,
   projectVersion: string,
 ) {
-  const row = record(value, "Black Duck BOM component");
-  const vulnerability = record(
-    row["vulnerabilityWithRemediation"],
-    "Black Duck vulnerabilityWithRemediation",
-  );
   const resource = apiResource(row["componentVersion"], "componentVersion");
   const component = `${resource.base}/${resource.path}`;
   if (
@@ -242,6 +267,21 @@ const nameVersionForges = new Map([
   ["crates", "cargo"],
 ]);
 
+function packageUrlName(ecosystem: string, parts: string[]) {
+  if (parts.includes("")) return;
+  if (ecosystem === "maven")
+    return parts.length === 2 ? parts.join(":") : undefined;
+  if (
+    parts.length === 1 ||
+    ecosystem === "golang" ||
+    ecosystem === "generic" ||
+    (parts.length === 2 &&
+      (ecosystem === "composer" ||
+        (ecosystem === "npm" && parts[0]!.startsWith("@"))))
+  )
+    return parts.join("/");
+}
+
 function blackDuckPackages(row: Record<string, unknown>) {
   const version = text(row["componentVersionName"]);
   const purl =
@@ -251,28 +291,18 @@ function blackDuckPackages(row: Record<string, unknown>) {
   if (purl) {
     try {
       const ecosystem = purl[1]!.toLowerCase();
-      const parts = purl[2]!.split("/").map(decodeURIComponent);
-      const name = parts.pop()!;
-      const installed_version = purl[3] ? decodeURIComponent(purl[3]) : version;
-      if (name && !parts.includes("")) {
-        if (ecosystem === "maven" && parts.length === 1)
-          return [
-            { name: `${parts[0]}:${name}`, ecosystem, installed_version },
-          ];
-        if (
-          (ecosystem === "npm" &&
-            parts.length === 1 &&
-            parts[0]!.startsWith("@")) ||
-          ecosystem === "golang" ||
-          ecosystem === "generic" ||
-          (ecosystem === "composer" && parts.length === 1)
-        )
-          return [
-            { name: [...parts, name].join("/"), ecosystem, installed_version },
-          ];
-        if (parts.length === 0 && ecosystem !== "maven")
-          return [{ name, ecosystem, installed_version }];
-      }
+      const name = packageUrlName(
+        ecosystem,
+        purl[2]!.split("/").map(decodeURIComponent),
+      );
+      if (name)
+        return [
+          {
+            name,
+            ecosystem,
+            installed_version: purl[3] ? decodeURIComponent(purl[3]) : version,
+          },
+        ];
     } catch {
       // A malformed escape does not invalidate the native origin coordinate.
     }
@@ -343,12 +373,7 @@ export function normalizeBlackDuckFindings(
   const projectVersion = scope;
   return normalizeRecords(
     rows,
-    ({ value }, id) => {
-      const row = record(value, "Black Duck BOM component");
-      const vulnerability = record(
-        row["vulnerabilityWithRemediation"],
-        "Black Duck vulnerabilityWithRemediation",
-      );
+    ({ row, vulnerability }, id) => {
       const advisory = requiredText(
         vulnerability["vulnerabilityName"],
         "Black Duck vulnerability name",
@@ -366,21 +391,18 @@ export function normalizeBlackDuckFindings(
             title: `${advisory} in ${name}`,
             description: text(vulnerability["description"]),
             severity:
-              severity &&
-              ["critical", "high", "medium", "low"].includes(severity)
-                ? severity
-                : "unknown",
+              FailureSeveritySchema.safeParse(severity).data ?? "unknown",
             advisory_ids:
               related && related !== advisory
                 ? [advisory, related]
                 : [advisory],
             packages: blackDuckPackages(row),
-            source_data: structuredClone({
+            source_data: {
               format,
               sourceRepositoryUrl: repository,
               projectVersionUrl: projectVersion,
-              row,
-            }),
+              row: structuredClone(row),
+            },
           },
           target,
         ),

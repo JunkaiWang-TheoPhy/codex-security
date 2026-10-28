@@ -34,10 +34,7 @@ import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import {
-  boundScannerRepositories,
-  repositoryBoundScanners,
-} from "./scanner-repository-provenance.js";
+import { boundScannerRepositories } from "./scanner-repository-provenance.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -878,9 +875,6 @@ async function preparePublicationInput(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
-    ...(parsed.report === undefined
-      ? {}
-      : { report: structuredClone(parsed.report) }),
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -891,10 +885,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    // Keep validated repository bindings intact if the caller edits the preview.
-    preview: repositoryBoundScanners[source.provider]
-      ? structuredClone(preview)
-      : preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
