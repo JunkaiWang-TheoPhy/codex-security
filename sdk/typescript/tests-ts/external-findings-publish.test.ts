@@ -3611,6 +3611,20 @@ async function trivyReplayTargets(
   ];
 }
 
+test("an ambiguous HTTP transport remains unbound when publishing a selected Trivy finding", async () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "HTTPS://github.com/example/project",
+  };
+  const { findings, read, excluded } = normalizeTrivyFindings(
+    report,
+    "cloud",
+    ".",
+  );
+  for (const prepare of await trivyReplayTargets({ findings, read, excluded }))
+    await expect(prepare()).rejects.toThrow("different repositories");
+});
+
 const userlessSsh = "ssh://github.com/example/project";
 const explicitSsh = "ssh://git@github.com/example/project";
 
@@ -4595,40 +4609,63 @@ test.each([
 );
 
 const checkpointRepository = "https://github.com/example/project";
-test("a changed Trivy artifact URL cannot resume an interrupted publication", async () => {
-  const report = {
-    ...trivyReport(),
-    Metadata: {},
-    ArtifactName: "ssh://git@github.com/example/project.git",
-  };
-  const cloud = await fixture(report, checkpointRepository);
-  const prepare = () =>
-    prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
-  const first = await prepare();
-  cloud.state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
+test.each(["file", "selected rows", "empty source list"] as const)(
+  "a Trivy %s retry requires the original source and a checkpoint from the current importer",
+  async (inputKind) => {
+    const cloud = await fixture();
+    const artifact = "ssh://git@github.com/example/project.git";
+    const prepare = async (ArtifactName = artifact) => {
+      const report = { ...trivyReport(), Metadata: {}, ArtifactName };
+      if (inputKind === "file") {
+        await writeFile(cloud.file, JSON.stringify(report));
+        return prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
+      }
+      const { findings, read, excluded } = normalizeTrivyFindings(
+        report,
+        "cloud",
+        ".",
+      );
+      return prepareNormalizedExternalPublication(
+        {
+          findings,
+          read,
+          excluded,
+          ...(inputKind === "empty source list" && {
+            sourceRepositoryUrls: [],
+          }),
+        },
+        trivyOptions,
+        cloud.deps,
+      );
+    };
+    const first = await prepare();
+    cloud.state.loseResponse = true;
+    await expect(first.publish()).rejects.toThrow("resume the saved request");
 
-  const directory = join(cloud.root, "state", "external-finding-publications");
-  const pending = (await readdir(directory)).find((name) =>
-    name.endsWith(".pending.json"),
-  )!;
-  const saved = JSON.parse(await readFile(join(directory, pending), "utf8"));
-  expect(saved.requests[0]).toEqual(JSON.parse(cloud.posts[0]!));
+    const directory = join(
+      cloud.root,
+      "state",
+      "external-finding-publications",
+    );
+    const pending = (await readdir(directory)).find((name) =>
+      name.endsWith(".pending.json"),
+    )!;
+    const filename = join(directory, pending);
+    const saved = JSON.parse(await readFile(filename, "utf8"));
+    expect(saved.requests[0]).toEqual(JSON.parse(cloud.posts[0]!));
+    await expect(prepare(foreignArtifactUrl)).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect((await prepare()).preview.resumed).toBe(true);
 
-  await writeFile(
-    cloud.file,
-    JSON.stringify({
-      ...report,
-      ArtifactName: "https://github.com/example/other",
-    }),
-  );
-  await expect(prepare()).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  await writeFile(cloud.file, JSON.stringify(report));
-  expect((await prepare()).preview.resumed).toBe(true);
-  expect(cloud.posts).toHaveLength(1);
-});
+    delete saved.trivyRepositoryBound;
+    const older = JSON.stringify(saved);
+    await writeFile(filename, older);
+    await expect(prepare()).rejects.toThrow("the build that created it");
+    expect(await readFile(filename, "utf8")).toBe(older);
+    expect(cloud.posts).toHaveLength(1);
+  },
+);
 
 test.each([
   [

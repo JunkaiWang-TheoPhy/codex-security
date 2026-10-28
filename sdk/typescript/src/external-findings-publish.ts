@@ -127,6 +127,7 @@ export class ExternalPublicationError extends CodexSecurityError {
 
 interface SavedSubmission {
   accountId: string;
+  trivyRepositoryBound?: true;
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
@@ -172,6 +173,7 @@ function sameSubmission(
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.trivyRepositoryBound === right.trivyRepositoryBound &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -562,7 +564,11 @@ async function preparePublicationInput(
   ];
   const inputDigest = hash("sha256", canonicalJson(currentIdentity));
   const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
-  function validateSaved(serialized: string, legacy = false): SavedSubmission {
+  function validateSaved(
+    serialized: string,
+    mode: "current" | "legacy" | "identify" = "current",
+  ): SavedSubmission {
+    const legacy = mode !== "current";
     const content = JSON.parse(serialized) as SavedSubmission;
     if (
       content.accountId !== credentials.account_id ||
@@ -595,6 +601,14 @@ async function preparePublicationInput(
       )
         throw new Error("Saved import destination does not match.");
     }
+    if (
+      mode !== "identify" &&
+      source.provider === "trivy" &&
+      content.trivyRepositoryBound !== true
+    )
+      throw new CodexSecurityError(
+        "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
+      );
     return content;
   }
   const key = hash(
@@ -634,7 +648,7 @@ async function preparePublicationInput(
         // must remain isolated by their deployment-bound checkpoint keys.
         const content = JSON.parse(serialized) as SavedSubmission | null;
         if (!content || content.inputProjection !== undefined) continue;
-        validateSaved(serialized, true);
+        validateSaved(serialized, "identify");
       } catch {
         continue;
       }
@@ -679,7 +693,7 @@ async function preparePublicationInput(
           }
           // A competing resumer may have completed and removed both paths while
           // this caller waited. Retain its observed immutable request and receipts.
-          const content = validateSaved(serialized ?? captured, true);
+          const content = validateSaved(serialized ?? captured, "legacy");
           if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
             throw new CodexSecurityError(
               "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
@@ -874,6 +888,7 @@ async function preparePublicationInput(
   }
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
+    ...(source.provider === "trivy" && { trivyRepositoryBound: true }),
     requests,
     receipts: saved?.receipts,
     inputProjection: saved?.inputProjection ?? {

@@ -86,28 +86,25 @@ test("corroborates Trivy's scheme-less repository target", () => {
     );
 });
 
-test("uses Git metadata for a repository target with a mixed-case HTTPS scheme", () => {
+test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root inspection", () => {
   const report = {
     ...trivyReport(),
     ArtifactName: "HTTPS://github.com/example/project",
   };
   expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
   const batch = normalizeTrivyFindings(report, "local", "apps/web");
-  expect(batch.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
+  expect(batch.sourceRepositoryUrls).toEqual([
+    report.Metadata.RepoURL,
+    report.ArtifactName,
+  ]);
   const retained = batch.findings[0]!.evidence.source_data!["report"];
   expect(retained).toMatchObject({
     ArtifactName: report.ArtifactName,
     Metadata: { RepoURL: report.Metadata.RepoURL },
   });
-  expect(trivyRepositoryUrl(retained, report.Metadata.RepoURL)).toBe(
-    report.Metadata.RepoURL,
+  expect(() => trivyRepositoryUrl(retained, report.Metadata.RepoURL)).toThrow(
+    "different repositories",
   );
-  expect(() =>
-    normalizeAtRoot({
-      ...report,
-      ArtifactName: "HTTPS://github.com/example/other",
-    }),
-  ).toThrow("different repositories");
   const targetOnly = { ...report, Metadata: {} };
   expect(() => normalizeTrivyFindings(targetOnly)).toThrow("--trivy-scan-root");
   const selected = normalizeAtRoot(targetOnly);
@@ -116,6 +113,34 @@ test("uses Git metadata for a repository target with a mixed-case HTTPS scheme",
     ArtifactName: report.ArtifactName,
   });
 });
+
+test.each([
+  ["team name/répo", "team%20name/r%C3%A9po", true],
+  ["a%2f b/repo", "a/%20b/repo", false],
+  ["other/../repo name", "repo%20name", false],
+  ["repo name", "Repo%20name", false],
+] as const)(
+  "retains the scanner target %s when the cloned path is %s",
+  (target, cloned, matches) => {
+    const base = "https://git.example.test:08443/";
+    const report = {
+      ...trivyReport(),
+      ArtifactName: base + target,
+      Metadata: { RepoURL: base + cloned },
+    };
+    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+    const input = normalizeAtRoot(report);
+    const saved = input.findings[0]!.evidence.source_data!["report"];
+    expect(saved).toMatchObject({
+      ArtifactName: report.ArtifactName,
+      Metadata: report.Metadata,
+    });
+    if (matches)
+      expect(trivyRepositoryUrl(saved)).toBe(report.Metadata.RepoURL);
+    else
+      expect(() => trivyRepositoryUrl(saved)).toThrow("different repositories");
+  },
+);
 
 test("retains a provisional Enterprise SSH alias until the destination is known", () => {
   const report = {
@@ -140,13 +165,13 @@ test("retains a provisional Enterprise SSH alias until the destination is known"
       "http://git.example.test/ORG/other",
     ],
   ]) {
-    expect(() =>
-      normalizeTrivyFindings({
-        ...report,
-        ArtifactName,
-        Metadata: { RepoURL },
-      }),
-    ).toThrow("different repositories");
+    const different = { ...report, ArtifactName, Metadata: { RepoURL } };
+    expect(() => normalizeTrivyFindings(different)).toThrow(
+      "--trivy-scan-root",
+    );
+    expect(() => trivyRepositoryUrl(different)).toThrow(
+      "different repositories",
+    );
   }
 });
 
