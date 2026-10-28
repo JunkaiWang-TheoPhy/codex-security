@@ -28,6 +28,7 @@ import {
 import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
+import { canonicalJson } from "../src/record.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -944,6 +945,64 @@ test("Inspector publication checks its source and reuses the finding ARN", async
     ).rejects.toThrow("requires the inspector provider");
   }
   expect(f.posts).toHaveLength(2);
+});
+
+test("an immutable pre-Inspector Wiz request can recover its receipt with upstream Inspector evidence", async () => {
+  const f = await fixture();
+  const deps = {
+    ...f.deps,
+    environment: { ...f.environment, CODEX_SECURITY_CLOUD_BASE_URL: undefined },
+  };
+  const { preview } = await prepareExternalPublication(f.file, options, deps);
+  const request = preview.requests[0]!;
+  const { source_finding_id, evidence } = request.items[0]!;
+  evidence.source_data = { finding: inspectorPackageFinding() };
+  const findings = [{ source_finding_id, evidence }];
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      { read: 1, excluded: [], findings },
+      options,
+      deps,
+    );
+  await expect(prepare()).rejects.toThrow("requires the inspector provider");
+
+  // The old client posted this request but never persisted its receipt.
+  const key = hash(
+    "sha256",
+    canonicalJson([
+      preview.accountId,
+      preview.destination.id,
+      preview.destination.repo_connector_id,
+      preview.source,
+      findings,
+    ]),
+  );
+  const directory = join(
+    f.environment.CODEX_SECURITY_STATE_DIR,
+    "external-finding-publications",
+  );
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(directory, key + ".pending.json"),
+    JSON.stringify({
+      accountId: preview.accountId,
+      requests: [request],
+    }),
+  );
+  const body = JSON.stringify(request);
+  await f.deps.fetch(preview.cloudApiUrl + "/finding_imports", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer synthetic-token",
+      "ChatGPT-Account-ID": preview.accountId,
+    },
+    body,
+  });
+  expect(f.reports.has(source_finding_id)).toBe(true);
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([body, body]);
 });
 
 test.each(["example/project", inspectorRepositoryUrl])(

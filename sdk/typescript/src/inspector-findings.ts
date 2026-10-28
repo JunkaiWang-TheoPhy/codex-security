@@ -247,31 +247,44 @@ function checkReportScope<
   shared("project");
   shared("integration");
   const provider = shared("provider");
+  type Claim = ReturnType<typeof repositoryClaim>;
+  // A bare project ID can recur across integrations in the same account and Region.
+  const sharedProvider = claims.find(
+    (claim) => claim.integration && claim.provider,
+  )?.provider;
+  const providerFor = (claim: Claim) =>
+    claim.provider ?? (claim.integration ? sharedProvider : undefined);
+  const missingHost = () =>
+    new Error(
+      "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
+    );
   const needHost = [];
-  let verified = false;
+  let sharedHost = false;
   for (const row of rows) {
-    if (!row.claims.length) continue;
     try {
-      // Check every claim even when an earlier one supplied host evidence.
-      const matches = row.claims.map((claim) =>
-        checkRepositoryMapping(claim, row.source, provider, target, projectMap),
-      );
-      if (matches.includes(true)) verified = true;
-      else needHost.push(row);
+      // Only a fully verified row can supply evidence to another row.
+      const scopedMatches = row.claims.flatMap((claim) => {
+        const proven = checkRepositoryMapping(
+          claim,
+          row.source,
+          providerFor(claim),
+          target,
+          projectMap,
+        );
+        if (claim.integration) return [proven];
+        if (!proven) throw missingHost();
+        return [];
+      });
+      if (scopedMatches.includes(true)) sharedHost = true;
+      else if (scopedMatches.length) needHost.push(row);
     } catch (error) {
       exclude(row, error);
     }
   }
-  if (!verified) {
-    for (const row of needHost)
-      exclude(
-        row,
-        new Error(
-          "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
-        ),
-      );
-  }
-  return provider;
+  if (!sharedHost) for (const row of needHost) exclude(row, missingHost());
+  return claims.every((claim) => providerFor(claim) === provider)
+    ? provider
+    : undefined;
 }
 
 const nonempty = z.string().regex(/\S/u, "Expected nonempty text.");
@@ -513,11 +526,17 @@ function manifestPath(path: string | null): string | null {
 function concreteVersion(
   value: unknown,
   ecosystem: string | null,
+  osPackage: boolean,
 ): string | null {
   const version = text(value);
   if (!version) return null;
+  // Debian versions use internal tildes for prereleases and backports.
+  if (osPackage && version.includes("~"))
+    return /^(?:\d+:)?\d[a-z\d.+~]*(?:-[a-z\d.+~]+)*$/iu.test(version)
+      ? version
+      : null;
   if (validSemver(version)) return version;
-  if (ecosystem === "npm") return null;
+  if (ecosystem === "npm" || ecosystem === "cargo") return null;
   if (ecosystem === "java" || ecosystem === "maven") {
     if (
       version === "LATEST" ||
@@ -565,11 +584,13 @@ function evidence(
     const path = repoFile(item.filePath);
     if (path) paths.add(path);
     const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
-    const fixed = concreteVersion(item.fixedInVersion, ecosystem);
+    const version = (value: unknown) =>
+      concreteVersion(value, ecosystem, item.packageManager === "OS");
+    const fixed = version(item.fixedInVersion);
     return {
       name: item.name,
       ecosystem,
-      installed_version: concreteVersion(item.version, ecosystem),
+      installed_version: version(item.version),
       manifest_path: manifestPath(path),
       fixed_versions: fixed ? [fixed] : [],
     };

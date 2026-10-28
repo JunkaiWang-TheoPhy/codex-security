@@ -737,14 +737,14 @@ async function preparePublicationInput(
     );
 
   function checkRepositories(findings: ExternalFindings["findings"]) {
+    // Validated non-Inspector checkpoints retain their original provider and repository ID.
+    if (saved && options.provider !== "inspector") return;
     const binding = inspectorReportRepository(
       options.provider,
       findings,
       "cloud",
       inspectorProjectMap,
     );
-    // Other providers' immutable requests follow the repository ID across renames.
-    if (saved && options.provider !== "inspector") return;
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&

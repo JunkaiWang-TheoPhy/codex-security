@@ -113,6 +113,8 @@ test("preserves the native package finding and projects only reported dependency
 test.each([
   ["NPM", "1.2.3+build.x.1", "2.x", "1.2.3+build.x.1", []],
   ["YARN", "workspace:1.2.3", "1.2.3-rc.x.1", null, ["1.2.3-rc.x.1"]],
+  ["CARGO", "1.2", "2", null, []],
+  ["CARGO", "1.2.3", "2.0.0", "1.2.3", ["2.0.0"]],
   ["JAR", "1.+", "1.3", null, ["1.3"]],
   ["POM", "First.RELEASE", "Next.RELEASE", "First.RELEASE", ["Next.RELEASE"]],
   ["POM", "LATEST", "RELEASE", null, []],
@@ -125,6 +127,7 @@ test.each([
     ["1!2.3rc1+lab"],
   ],
   ["OS", "1:2.3-4", "1:2.3-5", "1:2.3-4", ["1:2.3-5"]],
+  ["OS", "1.2.3~rc1-1", "1.2.3~rc2-1", "1.2.3~rc1-1", ["1.2.3~rc2-1"]],
 ] as const)(
   "projects exact %s versions from %s and %s",
   (
@@ -531,6 +534,46 @@ function projectRow(id: string, projectName?: string, providerType?: string) {
   row.findingArn = row.findingArn.replace(/a{32}$/u, id.repeat(32));
   return row;
 }
+
+test.each([
+  ["project slug without a host", "example/project", "GITHUB"],
+  ["native URL without a provider", enterprise, undefined],
+] as const)(
+  "sharing proof for a %s requires the same integration",
+  (_, name, provider) => {
+    const peer = projectRow("a", enterprise, "GITHUB");
+    const dependent = projectRow("b", name, provider);
+    const rows = [peer, dependent];
+    const { findings } = normalize(rows, enterprise);
+    const raw = () => normalize(rows, enterprise);
+    const replay = () =>
+      inspectorReportRepository("inspector", findings, "cloud");
+    for (const [index, finding] of rows.entries()) {
+      finding.resources[0]!.id = "example/project";
+      findings[index]!.evidence.source_data!["finding"] = finding;
+    }
+    for (const [peerArn, dependentArn] of [
+      [inspectorIntegrationArn, inspectorIntegrationArn],
+      [inspectorIntegrationArn, undefined],
+      [undefined, inspectorIntegrationArn],
+      [undefined, undefined],
+    ]) {
+      Object.assign(peer.resources[0]!.details.codeRepository, {
+        integrationArn: peerArn,
+      });
+      Object.assign(dependent.resources[0]!.details.codeRepository, {
+        integrationArn: dependentArn,
+      });
+      if (peerArn && dependentArn) {
+        expect(raw().findings).toHaveLength(2);
+        expect(replay()?.url).toBe(enterprise);
+      } else {
+        expect(raw).toThrow();
+        expect(replay).toThrow();
+      }
+    }
+  },
+);
 
 test("only surviving rows share project proof, independently of input order", () => {
   const known = projectRow("a", enterprise, "GITHUB");

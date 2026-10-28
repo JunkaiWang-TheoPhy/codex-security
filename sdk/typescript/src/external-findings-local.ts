@@ -123,11 +123,23 @@ function remoteRepository(
   bound: boolean,
 ): { key: string; account?: string; homeRelative?: boolean } | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
+  const transport = bound
+    ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
+    : null;
+  const authority = transport?.[1];
+  // Git decodes the authority before locating its path. An encoded delimiter
+  // cannot prove a match to another spelling through WHATWG URL's hostname.
+  if (
+    authority &&
+    (/%2f|[?#]/iu.test(authority) ||
+      authority.slice(authority.lastIndexOf("@") + 1).includes("%"))
+  )
+    return { key: value };
   let remote;
   try {
     remote = parseGitRemote(value);
   } catch {
-    return undefined;
+    return transport ? { key: value } : undefined;
   }
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
@@ -161,7 +173,6 @@ function remoteRepository(
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
-  const gitPath = scpStyle ? path : value.replace(/^[^:]+:\/\/[^/]*/u, "");
   const literal = (raw: string) => {
     const bytes = Buffer.from(raw).toString("latin1");
     return scpStyle
@@ -170,32 +181,34 @@ function remoteRepository(
           String.fromCharCode(parseInt(hex, 16)),
         );
   };
+  if (!scpStyle && !transport) return { key: value };
+  const gitPath = literal(transport?.[2] ?? path);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
-    : /^[^:]+:\/\/([^/]*)@/u.exec(value)?.[1];
+    : /^(.*)@/u.exec(authority ?? "")?.[1];
   const homeRelative =
-    /^\/?~(?:\/|$)/u.test(literal(gitPath)) ||
-    (scpStyle && !/^[~/]/u.test(path));
+    /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
-  const rawName = gitPath.slice(scpStyle ? 0 : 1, suffix?.index);
-  // URL.pathname encodes ordinary names but collapses Git's literal dot segments.
-  const name =
-    scpStyle || /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/iu.test(rawName)
-      ? rawName
-      : path;
+  // Express upload-pack bytes as a URL path for comparison with the HTTP source.
+  const name = gitPath
+    .slice(0, suffix?.index)
+    .replace(/^\//u, "")
+    .replace(
+      /[%\x00-\x20\x7f-\xff]/gu,
+      (byte) =>
+        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
+    );
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
-      literal(suffix[0])
-        .replace(/\/$/u, "")
-        .replace(/\.git$/u, "")
+      suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
     : key(origin + name);
   return {
     key: repository,
     account: ssh && login ? literal(login) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
-      ssh && !isGitHubCloudHost(hostname.toLowerCase())
+      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
         ? homeRelative
         : undefined,
   };

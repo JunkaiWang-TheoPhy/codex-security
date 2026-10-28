@@ -61,9 +61,10 @@ test("Enterprise GitHub scope applies to raw and replayed rows with and without 
   const rows = raw.preview.findings;
   expect(rows).toHaveLength(2);
   rows[1]!.evidence.source_data!["sourceRepositoryUrl"] = url.toLowerCase();
+  rows.push(typedRow("ssh://git@git.example.test/Example/Project.git"));
   const replay = () =>
     prepareNormalizedLocalImport(normalized(rows), f.options, f.deps);
-  expect((await replay()).preview.findings).toHaveLength(2);
+  expect((await replay()).preview.findings).toHaveLength(3);
 
   unknown.resources[0]!.details.codeRepository.providerType =
     "GITLAB_SELF_MANAGED";
@@ -89,6 +90,19 @@ function typedRow(url: string): ExternalFinding {
 const home = "host.test/~/project";
 const ssh = "ssh://git@github.com/example/project";
 const bindings: [string, string, string?][] = [
+  [" ssh://host.test/team/repo", "https://host.test/team/repo"],
+  ["ssh://bad@host.test:invalid/team/repo", "https://host.test/team/repo"],
+  ["ssh://other.test%2Fx@github.com/team/repo", "https://github.com/team/repo"],
+  [
+    "git@host.test:/srv/team/repo.git",
+    "ssh://git@host.test/team/repo",
+    "ssh://git@host.test/srv/team/repo.git",
+  ],
+  [
+    "git@host.test:~/team/repo%20data",
+    "ssh://git@host.test/~/team/repo%20data",
+    "ssh://git@host.test/~/team/repo%2520data",
+  ],
   [inspectorRepositoryUrl + "?repo=other", inspectorRepositoryUrl],
   [inspectorRepositoryUrl + "?", inspectorRepositoryUrl],
   [inspectorRepositoryUrl + "#", inspectorRepositoryUrl],
