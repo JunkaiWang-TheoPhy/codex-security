@@ -2,13 +2,8 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { nativeTarget } from "../../../plugins/codex-security/native/platform.mjs";
-import type {
-  ScanReadBinding,
-  ScanReadFile,
-} from "../../../plugins/codex-security/native/scan-read-binding.mjs";
+import type { ScanReadFile } from "../../../plugins/codex-security/native/scan-read-binding.mjs";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -38,23 +33,12 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { scanReadBinding } from "./support/scan-read-binding.js";
 import { readReviewState } from "./support/review-state.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
 afterEach(cleanup);
-
-function scanReadBinding(): ScanReadBinding {
-  return createRequire(import.meta.url)(
-    join(
-      PLUGIN_ROOT,
-      "mcp",
-      "native",
-      nativeTarget,
-      process.platform === "win32" ? "windows.node" : "unix.node",
-    ),
-  ) as ScanReadBinding;
-}
 
 async function save(path: string, value: unknown) {
   await writeFile(path, JSON.stringify(value));
