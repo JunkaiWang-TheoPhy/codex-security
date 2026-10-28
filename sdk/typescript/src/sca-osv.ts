@@ -1365,12 +1365,12 @@ export async function runOsvScan(
   let localReferences: DependencyLocalReference[] = [];
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
-  const processed = new Set<ScaInput>();
+  let inputsProcessed = 0;
   const reportMatching = (currentInput: string | null = null): void => {
     const progress: DependencyScanProgress = {
       phase: "matching",
       inputsTotal: selected.length,
-      inputsProcessed: processed.size,
+      inputsProcessed,
       inputsFailed: selected.filter((input) => input.status === "failed")
         .length,
       currentInput,
@@ -1629,7 +1629,7 @@ export async function runOsvScan(
         input.reason =
           "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
       }
-      processed.add(input);
+      inputsProcessed++;
       reportMatching();
     }
     try {
@@ -1716,7 +1716,7 @@ export async function runOsvScan(
         input.status = "failed";
         input.reason = errorMessage(error);
       }
-    if (pending !== null) processed.add(pending.input);
+    if (pending !== null) inputsProcessed++;
     reportMatching();
     if (options.signal?.aborted)
       throw Object.assign(new Error(errorMessage(error), { cause: error }), {

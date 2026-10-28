@@ -3,6 +3,10 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
+import {
+  forwardExternalImportSetting,
+  requireExternalImports,
+} from "./external-imports-feature.js";
 import type {
   ExternalFindings,
   ExternalSourceRepository,
@@ -10,6 +14,7 @@ import type {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -74,6 +79,7 @@ export interface LocalExternalImportPreview extends ExternalFindings {
 export interface LocalExternalImportResult {
   repository: string;
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   findings: StoredExternalFinding[];
@@ -425,9 +431,10 @@ async function localContext(
   mode: "import" | "read" = "import",
 ) {
   dependencies.signal?.throwIfAborted();
-  const environment = workbenchEnvironment(
-    dependencies.environment ?? process.env,
-  );
+  const selected = dependencies.environment ?? process.env;
+  const environment = workbenchEnvironment(selected);
+  forwardExternalImportSetting(selected, environment);
+  requireExternalImports(environment);
   const path = expandHome(selectedRepository, environment);
   const repository =
     mode === "read"
@@ -481,8 +488,10 @@ export async function prepareNormalizedLocalImport(
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
+  requireExternalImports(dependencies.environment);
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
+  validateExternalReport(current.report);
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -578,8 +587,11 @@ export async function prepareNormalizedLocalImport(
       return {
         repository,
         read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : { report: structuredClone(current.report) }),
         ready: current.findings.length,
-        excluded: current.excluded,
+        excluded: structuredClone(current.excluded),
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };
@@ -592,6 +604,8 @@ export async function listLocalExternalFindings(
   selection: { repository: string; id?: string },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
+  dependencies.signal?.throwIfAborted();
+  requireExternalImports(dependencies.environment);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, options } = await localContext(
     selection.repository,
