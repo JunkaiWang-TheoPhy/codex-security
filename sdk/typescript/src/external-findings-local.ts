@@ -170,15 +170,19 @@ function remoteRepository(
           String.fromCharCode(parseInt(hex, 16)),
         );
   };
-  const home =
-    bound &&
-    ssh &&
-    (/^~(?:\/|$)/u.test(literal(path)) || (scpStyle && !/^[~/]/u.test(path)));
-  // Git passes the raw SSH login to the server, including a literal colon.
+  // Git passes SSH paths to upload-pack before URL dot-segment normalization.
+  const sshPath = scpStyle ? path : value.replace(/^[^:]+:\/\/[^/]*/u, "");
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^[^:]+:\/\/([^/]*)@/u.exec(value)?.[1];
-  const account = home ? literal(login ?? url.username) : undefined;
+  const account =
+    bound &&
+    ssh &&
+    login &&
+    (/^\/?~(?:\/|$)/u.test(literal(sshPath)) ||
+      (scpStyle && !/^[~/]/u.test(path)))
+      ? literal(login)
+      : undefined;
   if (suffix === undefined) return { key: repository, account };
   if (["http:", "https:"].includes(url.protocol)) {
     // Git appends a slash to the URL and omits fragment text from HTTP requests.
@@ -188,7 +192,7 @@ function remoteRepository(
   }
   if (!ssh && url.protocol !== "git:") return { key: `${repository}\0` };
   return {
-    account: account ?? "",
+    account,
     key: `${repository}\0${literal(suffix)
       .replace(/\/$/u, "")
       .replace(/\.git$/u, "")}`,

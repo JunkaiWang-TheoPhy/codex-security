@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import { lstat, readlink, realpath, stat } from "node:fs/promises";
-import { format, isAbsolute, parse, relative, sep } from "node:path";
+import { format, isAbsolute, join, parse, relative, sep } from "node:path";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import { parentDirectory } from "./windows-path.js";
@@ -48,7 +48,21 @@ async function directoriesAlongPath(input: string, signal: AbortSignal) {
         );
       const target = bytes.toString("utf8");
       const raw = isAbsolute(target) ? target : `${parent}${sep}${target}`;
-      paths.set(raw, entry);
+      const root = parse(raw).root;
+      const components = raw
+        .slice(root.length)
+        .split(sep === "/" ? "/" : /[\\/]/u);
+      let physical = root;
+      for (const component of components) {
+        if (component === "..") {
+          // Keep the traversed checkout before resolving its physical parent.
+          paths.set(physical, entry);
+          physical = parentDirectory(await realpath(physical));
+        } else {
+          physical = join(physical, component);
+        }
+      }
+      paths.set(physical, entry);
     }
   }
   return directories;

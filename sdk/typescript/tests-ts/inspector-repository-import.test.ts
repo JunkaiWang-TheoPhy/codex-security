@@ -93,8 +93,24 @@ const repositoryBindings: [string, string, string?][] = [
     "ssh://u@host.test/~/repo#v%00%23x",
     "ssh://u%2500%23v@host.test/~/repo#x",
   ],
-  ["ssh://host.test/~/repo#blue", "ssh://alice@host.test/~/repo#blue"],
-  ["ssh://host.test/~/repo", "ssh://alice@host.test/~/repo"],
+  [
+    "ssh://host.test/~/repo#blue",
+    "ssh://alice@host.test/~/other#blue",
+    "ssh://alice@host.test/~/repo#blue",
+  ],
+  [
+    "ssh://alice@host.test/~/repo",
+    "ssh://bob@host.test/~/repo",
+    "ssh://host.test/~/repo",
+  ],
+  [
+    "ssh://alice@host.test/./~/repo",
+    "ssh://bob@host.test/./~/other",
+    "ssh://bob@host.test/./~/repo",
+  ],
+  ["alice@host.test:/~/repo", "bob@host.test:/~/repo"],
+  ["ssh://alice@host.test/~/../repo", "ssh://bob@host.test/~/../repo"],
+  ["ssh://alice@host.test/%7E%2F../repo", "ssh://bob@host.test/%7E%2F../repo"],
   [`${sshProject}#blue`, `${sshProject}.git#blue`, `${sshProject}#blue.git`],
   ["git://github.com/example/project?other", inspectorRepositoryUrl],
 ];

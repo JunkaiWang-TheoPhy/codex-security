@@ -83,6 +83,9 @@ same bindings in the `inspectorProjectMap` option of type
 `ReadonlyMap<string, string>` when preparing a raw or normalized Inspector
 import. Other providers reject this option. Normalized imports retain their
 selected provider even when a source ID happens to match an Inspector ARN.
+For a normalized local import with a home-relative SSH repository path, the SDK
+compares explicit login names. If either URL omits the login, verify that both
+refer to the same account. The SDK does not resolve SSH configuration.
 
 You can omit the map for exports that already contain a matching native
 repository URL. Rows in the same verified project can supply the native URL

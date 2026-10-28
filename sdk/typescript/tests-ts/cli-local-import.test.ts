@@ -346,6 +346,17 @@ test("Cloud permits a trusted configuration checkout and rejects maps controlled
     await symlink(`${bridge}//external`, repeated);
     expect(await run(repeated)).toContain("outside the selected repository");
 
+    const hop = join(external, "hop");
+    await symlink(config, hop);
+    const exported = join(external, "linked-report.json");
+    await symlink("hop/../example project/report.json", exported);
+    expect(await run(f.repository, f.root, exported)).toContain(
+      "outside the selected repository",
+    );
+    expect(await run(f.root, f.root, exported)).toContain(
+      "CODEX_SECURITY_CLOUD_BASE_URL",
+    );
+
     const replacement = join(f.root, "\uFFFD");
     const validAlias = join(f.root, "valid-alias");
     await symlink(f.root, replacement);
