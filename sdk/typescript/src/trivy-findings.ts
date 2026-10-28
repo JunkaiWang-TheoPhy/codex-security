@@ -165,6 +165,16 @@ export function isTrivyReportHeader(report: NativeRecord): boolean {
   );
 }
 
+// Go may rewrite escaped separators or unreserved bytes in mixed Unicode paths.
+// Only escape spaces and non-ASCII bytes when existing escapes are unambiguous.
+function escapedHttpTarget(target: string): string {
+  return target.replace(
+    /^(https?:\/\/[^/]+)(\/(?:[^%]|%(?:2[05]|[89A-F][\dA-F]))*)$/u,
+    (_, authority: string, path: string) =>
+      authority + path.replace(/[ \P{ASCII}]+/gu, encodeURIComponent),
+  );
+}
+
 export function trivyReportRemotes(report: unknown) {
   if (!isRecord(report) || report["SchemaVersion"] !== 2) return { urls: [] };
   const metadata = report["Metadata"];
@@ -176,29 +186,18 @@ export function trivyReportRemotes(report: unknown) {
   // A filesystem display label is validated but never identifies the repository.
   if (report["ArtifactType"] === "filesystem")
     return { urls: repository ? [repository] : [] };
+  // Trivy accepts scheme-less HTTPS targets and relative checkout paths.
+  // A scheme-less name identifies a remote only when Git metadata corroborates it.
+  const target =
+    artifact ??
+    (name && /^[^./:\\][^/:\\]*\//u.test(name) ? `https://${name}` : null);
   if (
-    name &&
-    /^[^./:\\][^/:\\]*\//u.test(name) &&
-    repository === `https://${name}`
-  ) {
-    // Trivy can omit the HTTPS scheme, but also accepts relative checkout paths.
+    target &&
+    repository &&
+    report["ArtifactType"] === "repository" &&
+    (target === repository || escapedHttpTarget(target) === repository)
+  )
     artifact = repository;
-  }
-  if (
-    artifact &&
-    artifact !== repository &&
-    report["ArtifactType"] === "repository"
-  ) {
-    // Trivy clones an escaped HTTP path but retains the scanner argument as its label.
-    // Existing spaces, percent signs and non-ASCII bytes stay escaped in a mixed path.
-    // Go can rewrite escaped separators or unreserved bytes when it encounters raw Unicode.
-    const escaped = artifact.replace(
-      /^(https?:\/\/[^/]+)(\/(?:[^%]|%(?:2[05]|[89A-F][\dA-F]))*)$/u,
-      (_, authority: string, path: string) =>
-        authority + path.replace(/[ \P{ASCII}]+/gu, encodeURIComponent),
-    );
-    if (escaped === repository) artifact = repository;
-  }
   // A checkout-supplied label cannot restore an omitted SSH user. Keep any
   // other difference visible when validating the report's repository claims.
   if (

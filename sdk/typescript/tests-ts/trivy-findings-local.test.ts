@@ -228,16 +228,27 @@ test.each([
   },
 );
 
-test("a GitHub SSH hint cannot bind a Host alias to an HTTPS checkout", async () => {
-  const ssh = "git@work:team/project.git";
-  const report = { ...trivyReport(), Metadata: { RepoURL: ssh } };
-  await using checkout = await trivyCheckout("https://work/team/project", ssh);
-  await expect(checkout.fromNormalized(report, ".")).rejects.toThrow(mismatch);
-  git(checkout.repository, "remote", "set-url", "origin", ssh);
-  expect(
-    (await checkout.fromNormalized(report, ".")).preview.findings,
-  ).toHaveLength(1);
-});
+const aliasWeb = "https://work/team/project";
+const aliasScp = "git@work:team/project.git";
+const aliasSsh = "ssh://git@work/team/project.git";
+test.each([
+  [aliasScp, aliasWeb, false],
+  [aliasWeb, aliasScp, false],
+  [aliasWeb, aliasSsh, false],
+  [aliasScp, aliasScp, true],
+  [aliasSsh, aliasSsh, true],
+  [aliasWeb, aliasWeb, true],
+  [checkoutUrl, "git@github.com:example/project.git", true],
+] as const)(
+  "a GitHub source hint for %s matches checkout %s: %j",
+  async (source, remote, matches) => {
+    await using checkout = await trivyCheckout(remote, source);
+    const report = { ...trivyReport(), Metadata: { RepoURL: source } };
+    const prepared = checkout.fromNormalized(report, ".");
+    if (matches) expect((await prepared).preview.findings).toHaveLength(1);
+    else await expect(prepared).rejects.toThrow(mismatch);
+  },
+);
 
 test("a reader's GitHub web hint cannot change the meaning of the raw Trivy transport", async () => {
   const web = "HTTPS://github.com/example/project";
@@ -369,11 +380,11 @@ test("Trivy distinguishes a differently cased checkout alias from a separate dir
 });
 
 test.each([
-  [foreignUrl, checkoutUrl, undefined, false],
-  [enterpriseUrl, enterpriseSsh, enterpriseUrl, true],
+  [foreignUrl, checkoutUrl, undefined],
+  [enterpriseUrl, enterpriseSsh, enterpriseUrl],
 ] as const)(
   "normalized Trivy report %s and finding %s must agree without a checkout remote",
-  async (reportUrl, findingUrl, githubSource, matches) => {
+  async (reportUrl, findingUrl, githubSource) => {
     await using checkout = await trivyCheckout(undefined, githubSource);
     const plainDirectory = join(dirname(checkout.repository), "unpacked");
     await mkdir(plainDirectory);
@@ -383,11 +394,10 @@ test.each([
       ".",
     );
     input.report = trivyRepositoryHeader(reportUrl);
-    for (const repository of [checkout.repository, plainDirectory]) {
-      const prepared = checkout.prepare(input, repository);
-      if (matches) expect((await prepared).preview.findings).toHaveLength(1);
-      else await expect(prepared).rejects.toThrow("different repositories");
-    }
+    for (const repository of [checkout.repository, plainDirectory])
+      await expect(checkout.prepare(input, repository)).rejects.toThrow(
+        "different repositories",
+      );
   },
 );
 
@@ -418,6 +428,13 @@ test.each([
     false,
   ],
   [checkoutUrl, "g:team/two", false, process.platform === "win32"],
+  [checkoutUrl, "g:/srv/other.git", false, process.platform === "win32"],
+  [
+    "ssh://g/srv/project.git",
+    "g:/srv/other.git",
+    false,
+    process.platform === "win32" || ambiguousSsh,
+  ],
   ["user@g:team/one", "user@g:team/two", false, false],
   [
     "ssh://github.com/example/project",

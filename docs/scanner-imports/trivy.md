@@ -20,7 +20,7 @@ A saved Git origin such as `r:org/repo.git` can name either a Windows drive-rela
 
 Use a stable source key per project and branch across commits and scans. Check the source, destination, package locations, and exclusions in the preview. Repeat without `--dry-run` to confirm. Read the stored evidence with `codex-security findings imported "$checkout" --format json`.
 
-For Cloud, replace `--to local --repository "$checkout"` with `--to cloud --repository URL_OR_ID`. You need access to the destination and a Cloud deployment that accepts the `trivy` provider. The importer compares the report’s Git remote with the destination when both are available. On unknown Git hosts, use the same remote spelling because distinct SSH users or paths can select different repositories. The importer rejects conflicting repository URLs. If either side lacks a comparable remote, verify the report’s origin before confirming.
+For Cloud, replace `--to local --repository "$checkout"` with `--to cloud --repository URL_OR_ID`. You need access to the destination and a Cloud deployment that accepts the `trivy` provider. The importer compares the report’s Git remote with the destination when both are available. On unknown Git hosts, use the same remote spelling because distinct SSH users or paths can select different repositories. In a local checkout, an Enterprise web URL cannot resolve a custom SSH host alias. The importer rejects conflicting repository URLs. If either side lacks a comparable remote, verify the report’s origin before confirming.
 
 ## Evidence and repeat imports
 

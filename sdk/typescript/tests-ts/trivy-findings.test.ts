@@ -86,6 +86,7 @@ test("corroborates Trivy's scheme-less repository target", () => {
   for (const uncorroborated of [
     { ...report, Metadata: {} },
     { ...report, ArtifactName: "github.com/example/other" },
+    { ...report, ArtifactName: "./github.com/example/project" },
     { ...report, ArtifactType: "filesystem" },
     { ...report, Metadata: { RepoURL: "http://github.com/example/project" } },
   ])
@@ -118,6 +119,7 @@ test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root 
 });
 
 test.each([
+  ["é/repo", "%C3%A9/repo", true],
   ["team name/répo", "team%20name/r%C3%A9po", true],
   ["Team%20Name/répo", "Team%20Name/r%C3%A9po", true],
   ["a%2520b/x é", "a%2520b/x%20%C3%A9", true],
@@ -129,29 +131,37 @@ test.each([
 ] as const)(
   "retains the scanner target %s when the cloned path is %s",
   (target, cloned, matches) => {
-    const base = "https://git.example.test:08443/";
-    const report = {
-      ...trivyReport(),
-      ArtifactName: base + target,
-      Metadata: { RepoURL: base + cloned },
-    };
-    const input = normalizeAtRoot(report);
-    if (matches) {
-      expect(normalizeTrivyFindings(report)).toEqual(input);
-      expect(() => normalizeTrivyFindings(report, "local", "nested")).toThrow(
-        "must be .",
-      );
-    } else
-      expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
-    const saved = input.findings[0]!.evidence.source_data!["report"];
-    expect(saved).toMatchObject({
-      ArtifactName: report.ArtifactName,
-      Metadata: report.Metadata,
-    });
-    if (matches)
-      expect(trivyRepositoryUrl(saved)).toBe(report.Metadata.RepoURL);
-    else
-      expect(() => trivyRepositoryUrl(saved)).toThrow("different repositories");
+    for (const [prefix, clonedBase] of [
+      ["https://git.example.test:08443/", "https://git.example.test:08443/"],
+      ["git.example.test/", "https://git.example.test/"],
+    ] as const) {
+      const report = {
+        ...trivyReport(),
+        ArtifactName: prefix + target,
+        Metadata: { RepoURL: clonedBase + cloned },
+      };
+      const input = normalizeAtRoot(report);
+      if (matches) {
+        expect(normalizeTrivyFindings(report)).toEqual(input);
+        expect(() => normalizeTrivyFindings(report, "local", "nested")).toThrow(
+          "must be .",
+        );
+      } else
+        expect(() => normalizeTrivyFindings(report)).toThrow(
+          "--trivy-scan-root",
+        );
+      const saved = input.findings[0]!.evidence.source_data!["report"];
+      expect(saved).toMatchObject({
+        ArtifactName: report.ArtifactName,
+        Metadata: report.Metadata,
+      });
+      if (matches || prefix !== clonedBase)
+        expect(trivyRepositoryUrl(saved)).toBe(report.Metadata.RepoURL);
+      else
+        expect(() => trivyRepositoryUrl(saved)).toThrow(
+          "different repositories",
+        );
+    }
   },
 );
 

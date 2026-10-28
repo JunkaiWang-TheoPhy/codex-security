@@ -111,14 +111,11 @@ function remoteRepositoryKey(
   githubSource?: string,
   checkout = false,
 ): string | undefined {
-  if (
-    /^[A-Za-z]:[\\/]/u.test(value) ||
-    (provider === "trivy" &&
-      checkout &&
-      process.platform === "win32" &&
-      /^[a-z]:/iu.test(value))
-  )
-    return undefined;
+  const drivePath =
+    provider === "trivy" && checkout
+      ? process.platform === "win32" && /^[a-z]:/iu.test(value)
+      : /^[A-Za-z]:[\\/]/u.test(value);
+  if (drivePath) return undefined;
   let remote;
   try {
     remote = parseGitRemote(value);
@@ -139,8 +136,11 @@ function remoteRepositoryKey(
     ].includes(remote.url.protocol)
   )
     return undefined;
-  if (provider === "trivy")
-    return trivyRemoteKey(value, githubSource, checkout);
+  if (provider === "trivy") {
+    // A web URL cannot resolve a checkout's SSH Host aliases.
+    const webSource = /^https?:\/\//u.test(value) ? githubSource : undefined;
+    return trivyRemoteKey(value, webSource, checkout);
+  }
   const url = remote.url;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
