@@ -20,6 +20,7 @@ function retainedUrl(
   source_finding_id = "sdk-key",
 ) {
   const repositories = blackDuckReportRepositories(
+    "blackduck",
     [
       {
         source_finding_id,

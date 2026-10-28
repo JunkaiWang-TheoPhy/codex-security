@@ -84,6 +84,8 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
+  [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over

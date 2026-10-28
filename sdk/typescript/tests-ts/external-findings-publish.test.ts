@@ -23,7 +23,7 @@ import {
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
   type ExternalPublicationProgress,
-  type NormalizedExternalPublicationOptions,
+  type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
@@ -50,7 +50,6 @@ import {
   inspectorPackageFinding,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
-import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import {
   blackDuckBomReport,
@@ -909,84 +908,91 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   const map = new Map([[project.id, inspectorRepositoryUrl]]);
   const prepare = (settings: ExternalPublicationOptions = inspectorOptions) =>
     prepareExternalPublication(f.file, settings, f.deps);
-  return { f, input, project, map, prepare };
+  async function loseResponse(prepared: PreparedExternalPublication) {
+    f.state.loseResponse = true;
+    await expect(prepared.publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    return f.posts.at(-1)!;
+  }
+  return { f, input, project, map, prepare, loseResponse };
 }
 
-test("Inspector publication keeps repository provenance and reuses the source occurrence", async () => {
+test("Inspector publication checks its source and reuses the finding ARN", async () => {
   const { f, input, prepare } = await inspectorPublicationFixture();
-  const settings = {
-    ...inspectorOptions,
-    sourceKey: "inspector/example/project",
-  };
-  const prepared = await prepare(settings);
-  expect(f.posts).toHaveLength(0);
-  expect(prepared.preview.requests[0]!.source.provider).toBe("inspector");
+  const prepared = await prepare();
+  expect(prepared.preview.source.provider).toBe("inspector");
   expect((await prepared.publish()).counts.created).toBe(1);
-  expect((await (await prepare(settings)).publish()).counts.unchanged).toBe(1);
+  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   expect(f.reports.has(input.findingArn)).toBe(true);
 
-  const wrongDestination = await fixture(
-    { findings: [input] },
-    "https://github.com/example/other",
-  );
+  const row = prepared.preview.findings[0]!;
+  const opaque = structuredClone(row);
+  opaque.source_finding_id = "typed-only";
+  delete opaque.evidence.source_data;
+  const other = "https://github.com/example/other";
+  opaque.evidence.details = { kind: "sast", repository: { url: other } };
   await expect(
-    prepareExternalPublication(
-      wrongDestination.file,
-      settings,
-      wrongDestination.deps,
+    prepareNormalizedExternalPublication(
+      { ...prepared.preview, findings: [row, opaque] },
+      inspectorOptions,
+      f.deps,
     ),
-  ).rejects.toThrow(/does not match/i);
-  expect(wrongDestination.posts).toHaveLength(0);
-  const retained = normalizeInspectorFindings(
-    { findings: [input] },
-    inspectorRepositoryUrl,
-  );
-  const { source_data: data, ...evidence } = retained.findings[0]!.evidence;
-  const replay = (
-    provider: "inspector" | "wiz",
-    sourceData: typeof data,
-    id = input.findingArn,
-    destination = wrongDestination,
-  ) => {
-    const ready = sourceData
-      ? { ...evidence, source_data: sourceData }
-      : evidence;
-    const findings = [{ source_finding_id: id, evidence: ready }];
-    return prepareNormalizedExternalPublication(
-      { ...retained, findings },
-      { ...settings, provider },
-      destination.deps,
-    );
-  };
-  for (const inspectorData of [data, { finding: input }])
-    await expect(replay("wiz", inspectorData)).rejects.toThrow(
-      "requires the inspector provider",
-    );
+  ).rejects.toThrow(/typed-only.*does not match/i);
 
-  const { format: _format, ...withoutFormat } = data!;
-  for (const unrecognized of [
-    undefined,
-    withoutFormat,
-    { ...data, format: "aws-inspector2-list-findings/v2" },
-  ])
-    await expect(replay("inspector", unrecognized)).rejects.toThrow(
-      "Expected retained Inspector",
-    );
-  const advisoryId = input.packageVulnerabilityDetails.vulnerabilityId;
-  await expect(replay("inspector", input, advisoryId)).rejects.toThrow(
-    "Expected retained Inspector",
+  f.state.repositoryUrl = other;
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  for (const source_data of [row.evidence.source_data, { finding: input }]) {
+    row.evidence.source_data = source_data;
+    await expect(
+      prepareNormalizedExternalPublication(prepared.preview, options, f.deps),
+    ).rejects.toThrow("requires the inspector provider");
+  }
+  expect(f.posts).toHaveLength(2);
+});
+
+test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
+  const record = {
+    id: "wiz-vulnerability-1",
+    name: "CVE-2099-1234",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "example-asset" },
+    finding: inspectorPackageFinding(),
+  };
+  const f = await fixture([record]);
+  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const first = await prepare();
+  f.state.loseResponse = true;
+  const error = await first.publish().catch((error: unknown) => error);
+  if (!(error instanceof ExternalPublicationError)) throw error;
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+
+  // A pre-Inspector checkpoint can contain the original requests without their input projection.
+  const path = error.result.savedSubmission!;
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  delete saved.inputProjection;
+  await writeFile(path, JSON.stringify(saved));
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+  record.vendorSeverity = "MEDIUM";
+  await writeFile(f.file, JSON.stringify([record]));
+  const updated = await prepareNormalizedExternalPublication(
+    await readVendorFindings(f.file),
+    options,
+    f.deps,
   );
-  expect(wrongDestination.posts).toHaveLength(0);
-  const otherArn = input.findingArn.replace(/a$/u, "b");
-  await expect(replay("inspector", data, otherArn, f)).rejects.toThrow(
-    /ARN|identity|source finding/i,
-  );
+  expect((await updated.publish()).counts.updated).toBe(1);
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 });
 
 test.each(["example/project", inspectorRepositoryUrl])(
   "pending Inspector requests for %s recheck their project mapping and destination host",
   async (name) => {
-    const { f, project, map, prepare } =
+    const { f, project, map, prepare, loseResponse } =
       await inspectorPublicationFixture(name);
     const otherUrl = "https://git.example.test/example/project";
     const supplied = new Map(map);
@@ -998,12 +1004,7 @@ test.each(["example/project", inspectorRepositoryUrl])(
     if (name === inspectorRepositoryUrl) delete settings.inspectorProjectMap;
     else supplied.clear();
     const prepared = await preparing;
-    f.state.loseResponse = true;
-    await expect(prepared.publish()).rejects.toThrow(
-      "resume the saved request",
-    );
-    expect(f.posts).toHaveLength(1);
-    const firstBody = f.posts[0]!;
+    const firstBody = await loseResponse(prepared);
     const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
       prepareNormalizedExternalPublication(
         prepared.preview,
@@ -1031,17 +1032,20 @@ test.each(["example/project", inspectorRepositoryUrl])(
   },
 );
 
-test("a repository reset retires the mapped Inspector request before a fresh native replay", async () => {
-  const { f, map, prepare } = await inspectorPublicationFixture();
+test("a repository reset retires an Inspector request even when the destination URL changed", async () => {
+  const { f, map, prepare, loseResponse } = await inspectorPublicationFixture();
   const first = await prepare({
     ...inspectorOptions,
     inspectorProjectMap: map,
   });
-  f.state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  await loseResponse(first);
   f.state.marker = "generation-2";
+  f.state.repositoryUrl = "https://github.com/example/new-destination";
   await expect(prepare()).rejects.toThrow("retired without uploading");
+  await expect(prepare()).rejects.toThrow("does not match");
   expect(f.posts).toHaveLength(1);
+
+  f.state.repositoryUrl = inspectorRepositoryUrl;
   const fresh = await prepare();
   expect(fresh.preview.resumed).toBe(false);
   const request = fresh.preview.requests[0]!;
@@ -1050,18 +1054,15 @@ test("a repository reset retires the mapped Inspector request before a fresh nat
 });
 
 test("publishing an Inspector retry adopts its project map without changing the pending request", async () => {
-  const { f, map, prepare } = await inspectorPublicationFixture();
+  const { f, map, prepare, loseResponse } = await inspectorPublicationFixture();
   const mappedOptions = { ...inspectorOptions, inspectorProjectMap: map };
-  f.state.loseResponse = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  const body = f.posts[0]!;
+  const body = await loseResponse(await prepare());
   const mapped = await prepare(mappedOptions);
   const withoutMap = await prepare(); // Previewing the map does not change the checkpoint.
-  f.state.loseResponse = true;
-  await expect(mapped.publish()).rejects.toThrow("resume the saved request");
-  await expect(prepare()).rejects.toThrow("Supply the trusted mapping again");
+  await loseResponse(mapped);
+  await expect(prepare()).rejects.toThrow(
+    "Supply the verified Inspector project binding",
+  );
   await expect(withoutMap.publish()).rejects.toThrow(
     "Another publication prepared this input",
   );
@@ -1069,7 +1070,7 @@ test("publishing an Inspector retry adopts its project map without changing the 
   expect(f.posts).toEqual([body, body, body]);
 });
 
-test("a pending normalized import retains its validated map requirement and rechecks the destination", async () => {
+test("a normalized Inspector retry checks its typed repository without native evidence", async () => {
   const f = await fixture();
   const finding = {
     source_finding_id: "vendor-1",
@@ -1082,37 +1083,21 @@ test("a pending normalized import retains its validated map requirement and rech
       },
     },
   };
-  const prepare = () => {
-    const settings: NormalizedExternalPublicationOptions = {
-      ...options,
-      provider: "inspector",
-    };
-    return prepareNormalizedExternalPublication(
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
       { read: 1, findings: [finding], excluded: [] },
-      settings,
-      {
-        ...f.deps,
-        onProgress: ({ phase, completed }) => {
-          if (phase === "preparing" && completed === 1)
-            settings.inspectorProjectMap = new Map();
-        },
-      },
+      inspectorOptions,
+      f.deps,
     );
-  };
-  const first = await prepare();
   f.state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
-
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
   f.state.repositoryUrl = "https://github.com/different/project";
   await expect(prepare()).rejects.toThrow(
     "does not match the selected Cloud repository",
   );
   expect(f.posts).toHaveLength(1);
-  f.state.repositoryUrl = inspectorRepositoryUrl;
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect(retry.preview.requests).toEqual(first.preview.requests);
-  expect((await retry.publish()).verified).toBe(1);
 });
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {

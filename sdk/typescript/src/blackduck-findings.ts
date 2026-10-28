@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { CodexSecurityError } from "./errors.js";
+import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
@@ -75,10 +77,22 @@ function retainedRepository(
 }
 
 export function blackDuckReportRepositories(
+  provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
 ): Map<string, ExternalSourceRepository> {
   const repositories = new Map<string, ExternalSourceRepository>();
+  if (provider !== "blackduck") {
+    if (
+      findings.some(({ evidence }) =>
+        hasBlackDuckEvidence(evidence.source_data),
+      )
+    )
+      throw new CodexSecurityError(
+        "Retained Black Duck evidence requires the blackduck provider.",
+      );
+    return repositories;
+  }
   const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
   let scope: string | undefined;
   let repository: string | undefined;
