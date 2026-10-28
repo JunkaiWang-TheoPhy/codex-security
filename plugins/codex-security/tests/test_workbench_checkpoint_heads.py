@@ -806,7 +806,7 @@ def test_legacy_live_head_sources_convert_their_recorded_observation(
     scan_id, pending, closed, binding = checkpoint_scan
     checkpoint = write_checkpoint(tmp_path / "checkpoints", closed)
     set_fixture_mtime(checkpoint, 100)
-    select(tmp_path, checkpoint, 200)
+    observed = select(tmp_path, checkpoint, 200)
     paths = [checkpoint.relative_to(tmp_path).as_posix(), "checkpoint-head.json"]
     frozen = {path: saved._read_saved_result(tmp_path, path, scan_id)[1] for path in paths}
     first = saved.merge_saved_results(
@@ -831,7 +831,7 @@ def test_legacy_live_head_sources_convert_their_recorded_observation(
     snapshot = next(path for path in published if path.startswith("checkpoint-heads/"))
     assert json.loads((tmp_path / snapshot).read_text()) == {
         "checkpoint": checkpoint.name,
-        "observedAtNs": "200",
+        "observedAtNs": str(observed),
     }
     select(tmp_path, checkpoint, 300)
     with pytest.raises(
@@ -1361,7 +1361,7 @@ def test_legacy_tied_worker_heads_keep_pending_work_on_replay(tmp_path: Path, sc
     reopened = write_checkpoint(output / "checkpoints", pending)
     frozen = {}
     for checkpoint in (completed, reopened):
-        os.utime(checkpoint, ns=(100, 100))
+        set_fixture_mtime(checkpoint, 100)
         select(output, checkpoint, 500)
         frozen.update(
             {

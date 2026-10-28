@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -118,7 +117,7 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
             tmp_path / "checkpoints", saved_draft("coverage-scan", surfaces=[rejection])
         )
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        set_fixture_mtime(head, observed)
         documents = recover(tmp_path, workers, project=True)
         assert [
             row["reason"] for row in documents[2]["deferred"] if row["id"] != "scan-stopped"
@@ -235,10 +234,10 @@ def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
     earlier = saved_draft(scan_id, surfaces=[surface])
     earlier["coverage"]["openQuestions"] = [question]
     head = tmp_path / "checkpoint-head.json"
-    for observed, draft in [(100_000, earlier), (200_000, saved_draft(scan_id))]:
+    for observed, draft in [(100, earlier), (200, saved_draft(scan_id))]:
         checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        set_fixture_mtime(head, observed)
         saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
 
     finding_path = (
@@ -249,7 +248,7 @@ def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
     reducer = worker(tmp_path, "reducer", result)
     output = Path(reducer["artifact_dir"])
     write_checkpoint(output / "checkpoints", result)
-    os.utime(output / "result.json", ns=(300_000, 300_000))
+    set_fixture_mtime(output / "result.json", 300)
     reducer.update(
         kind="dedup",
         status="succeeded",
@@ -1125,7 +1124,7 @@ def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, e
     )
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+    set_fixture_mtime(head, 200)
 
     _, findings, coverage = recover(tmp_path, [first, second], project=True, warnings=[])
     collision = earlier_ref != ref
