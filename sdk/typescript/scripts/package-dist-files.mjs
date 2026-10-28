@@ -12,6 +12,7 @@ const distModules = [
   "cli",
   "cli-daybreak",
   "cli-help",
+  "cli-output-directory",
   "cli-scan-logs-json",
   "cli-signals",
   "classify-severity",
