@@ -61,12 +61,12 @@ authorized GitHub repository and a deployment that accepts provider `veracode`.
 Local import compares the source with the checkout’s Git remotes when
 comparable remotes are configured.
 
-If an interrupted Cloud upload reports `result.savedSubmission`, the SDK
-reads that checkpoint on retry. Use the same state directory, build, provider,
-source key and destination. Rerun the CLI with the original HAL export. For
-`prepareNormalizedExternalPublication`, supply your original normalized
-`ExternalFindings` input. Check `preview.resumed` before calling `publish()`
-and review any fresh preview before approving it.
+If an interrupted Cloud upload reports `result.savedSubmission`, keep its
+checkpoint and use the same build, state directory, account and import settings.
+Preview the original export with `--dry-run --format json`. Check `accountId`
+and `destination`. When `resumed` is false, review the new upload before approving it.
+For `prepareNormalizedExternalPublication`, pass your original normalized
+`ExternalFindings` and check `preview.resumed` before calling `publish()`.
 Passing different normalized findings prepares a new upload. Save each finding
 with its original `source_finding_id` and `evidence.source_data` so the SDK can
 verify its application and repository when replayed with the Veracode provider.
