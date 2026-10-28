@@ -10,12 +10,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { resolvePluginPython } from "../src/runtime.js";
 import {
   dependencies as cliDependencies,
   FakeSignals,
 } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 import {
@@ -217,19 +220,17 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
   const map = join(f.root, "projects.json");
   await writeFile(map, mapping);
+  const command = (mapPath: string) => [
+    ...f.command.map((value) => (value === "wiz" ? "inspector" : value)),
+    "--source-repository-url",
+    inspectorRepositoryUrl,
+    "--inspector-project-map",
+    mapPath,
+    "--dry-run",
+  ];
   const run = async (path: string) => {
     const cli = createCliTest(main);
-    const code = await cli.runCli(
-      [
-        ...f.command.map((value) => (value === "wiz" ? "inspector" : value)),
-        "--source-repository-url",
-        inspectorRepositoryUrl,
-        "--inspector-project-map",
-        path,
-        "--dry-run",
-      ],
-      f.deps,
-    );
+    const code = await cli.runCli(command(path), f.deps);
     return { code, stdout: cli.stdout.text(), stderr: cli.stderr.text() };
   };
   const preview = await run("projects.json");
@@ -238,6 +239,35 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
     findings: [{ source_finding_id: report.findings[0]!.findingArn }],
     dryRun: true,
   });
+
+  if (process.platform === "linux") {
+    const args = [
+      process.execPath,
+      fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+      ...command(map).map((value) =>
+        value === "selected.json" ? "/dev/stdin" : value,
+      ),
+    ];
+    const memfd = `
+import os, sys
+fd = os.memfd_create("scanner/../report")
+os.write(fd, sys.stdin.buffer.read())
+os.lseek(fd, 0, 0)
+os.dup2(fd, 0)
+os.execv(sys.argv[1], sys.argv[1:])
+`;
+    for (const [program, ...wrapper] of [
+      ["sh", "-c", 'cat | exec "$@"', "sh"],
+      [await resolvePluginPython(), "-c", memfd],
+    ] as const) {
+      const output = execFileSync(program, [...wrapper, ...args], {
+        cwd: f.root,
+        env: f.deps.environment,
+        input: JSON.stringify(report),
+      });
+      expect(JSON.parse(output.toString()).findings).toHaveLength(1);
+    }
+  }
 
   const checkoutMap = join(f.repository, "projects.json");
   await writeFile(checkoutMap, mapping);
@@ -248,6 +278,19 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
     expect(rejected.code).not.toBe(0);
     expect(rejected.stderr).toContain("outside the selected repository");
   }
+  // A plain source directory can still own a link between two outside paths.
+  await rm(join(f.repository, ".git"), { recursive: true });
+  const config = join(f.root, "config");
+  execFileSync("git", ["init", "--quiet", config]);
+  await writeFile(join(config, "projects.json"), mapping);
+  const bridge = join(f.repository, "maps");
+  await symlink(config, bridge, "junction");
+  const view = join(f.root, "config-view");
+  await symlink(bridge, view, "junction");
+  expect((await run(join(config, "projects.json"))).code).toBe(0);
+  expect((await run(join(view, "projects.json"))).stderr).toContain(
+    "outside the selected repository",
+  );
   for (const contents of [
     Buffer.of(0xff),
     "[]",
@@ -261,27 +304,36 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   }
 });
 
-test("Cloud excludes maps from the report checkout even through directory links", async () => {
+test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async () => {
   const f = await fixture();
   const report = inspectorReport();
   const resource = report.findings[0]!.resources[0]!;
   resource.details.codeRepository.projectName = "example/project";
-  await writeFile(join(f.repository, "report.json"), JSON.stringify(report));
-  const linked = join(f.root, "linked-checkout");
-  await symlink(f.repository, linked, "junction");
+  const reportInSource = join(f.repository, "report.json");
+  await writeFile(reportInSource, JSON.stringify(report));
+  await writeFile(f.file, JSON.stringify(report));
   const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
-  await writeFile(join(f.repository, "map.json"), mapping);
-  const operator = join(f.root, "operator-config");
-  await mkdir(operator);
-  execFileSync("git", ["init", "--quiet", operator]);
-  await writeFile(join(operator, "map.json"), mapping);
-  const run = async (map: string) => {
+  const config = join(f.root, "config");
+  execFileSync("git", ["init", "--quiet", config]);
+  for (const directory of [f.root, f.repository, config])
+    await writeFile(join(directory, "projects.json"), mapping);
+  // This external alias enters the checkout and follows a second link back out.
+  const bridge = join(f.repository, "maps");
+  await symlink(f.root, bridge, "junction");
+  const alias = join(f.root, "alias");
+  await symlink(bridge, alias, "junction");
+  const run = async (
+    directory: string,
+    cwd = f.repository,
+    reportFile = reportInSource,
+    environment = f.deps.environment,
+  ) => {
     const cli = createCliTest(main);
     await cli.runCli(
       [
         "publish",
         "findings",
-        join(linked, "report.json"),
+        reportFile,
         "--provider",
         "inspector",
         "--to",
@@ -293,20 +345,135 @@ test("Cloud excludes maps from the report checkout even through directory links"
         "--source-key",
         "inspector/example/project",
         "--inspector-project-map",
-        map,
+        join(directory, "projects.json"),
         "--dry-run",
       ],
-      f.deps,
+      { ...f.deps, environment, currentDirectory: () => cwd },
     );
     return cli.stderr.text();
   };
-  expect(await run(join(linked, "map.json"))).toContain(
-    "outside the selected repository",
+  if (process.platform !== "win32") {
+    const external = join(f.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "projects.json"), mapping);
+    const repeated = join(f.root, "repeated-separators");
+    await symlink(`${bridge}//external`, repeated);
+    expect(await run(repeated)).toContain("outside all Git checkouts");
+
+    const hop = join(external, "hop");
+    await symlink(config, hop);
+    const exported = join(external, "linked-report.json");
+    await symlink("hop/../example project/report.json", exported);
+    expect(await run(f.repository, f.root, exported)).toContain(
+      "outside all Git checkouts",
+    );
+    expect(await run(f.root, f.root, exported)).toContain(
+      "CODEX_SECURITY_CLOUD_BASE_URL",
+    );
+
+    const replacement = join(f.root, "\uFFFD");
+    const validAlias = join(f.root, "valid-alias");
+    await symlink(f.root, replacement);
+    await symlink(replacement, validAlias);
+    expect(await run(validAlias)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  }
+  if (process.platform === "linux") {
+    // The kernel traverses this checkout even though the target cannot round-trip through UTF-8.
+    const rawName = Buffer.concat([Buffer.from(f.root + "/"), Buffer.of(0xff)]);
+    await symlink(f.repository, rawName);
+    const rawAlias = join(f.root, "byte-alias");
+    await symlink(Buffer.concat([rawName, Buffer.from("/maps")]), rawAlias);
+    expect(await run(rawAlias)).toContain("UTF-8 symlink targets");
+  }
+  expect(await run(config)).toContain("outside all Git checkouts");
+  expect(await run(config, config, f.file)).toContain(
+    "outside all Git checkouts",
   );
-  // Only the independent map can pass normalization and reach Cloud configuration.
-  expect(await run(join(operator, "map.json"))).toContain(
+  for (const directory of [f.repository, alias])
+    expect(await run(directory)).toContain("outside all Git checkouts");
+  // The report path enters the checkout and follows its "maps" link back out.
+  expect(
+    await run(f.repository, f.root, join(alias, "selected.json")),
+  ).toContain("outside all Git checkouts");
+  // Ordinary operator storage can contain these names with non-Git file types.
+  for (const name of ["HEAD", "objects", "refs"])
+    await writeFile(join(f.root, name), "");
+  await mkdir(join(f.root, "commondir"));
+  expect(await run(f.root, f.root, f.file)).toContain(
     "CODEX_SECURITY_CLOUD_BASE_URL",
   );
+  const workTree = join(f.root, "markerless");
+  await mkdir(workTree);
+  await writeFile(join(workTree, "projects.json"), mapping);
+  const selected = {
+    ...f.deps.environment,
+    GIT_DIR: join(f.repository, ".git"),
+    GIT_WORK_TREE: ".",
+    GIT_IMPLICIT_WORK_TREE: "1",
+  };
+  execFileSync("git", ["add", "projects.json"], {
+    cwd: workTree,
+    env: { ...selected, GIT_INDEX_FILE: join(f.root, "markerless.index") },
+  });
+  for (const environment of [
+    selected,
+    ...(process.platform === "win32"
+      ? []
+      : [{ ...selected, GIT_WORK_TREE: "projects.json/.." }]),
+    { ...selected, GIT_WORK_TREE: undefined },
+  ]) {
+    expect(await run(workTree, workTree, f.file, environment)).toContain(
+      "outside all Git checkouts",
+    );
+    expect(await run(f.root, workTree, f.file, environment)).toContain(
+      "CODEX_SECURITY_CLOUD_BASE_URL",
+    );
+  }
+  const noWorkTree = {
+    ...selected,
+    GIT_WORK_TREE: undefined,
+    GIT_IMPLICIT_WORK_TREE: "0",
+  };
+  expect(await run(workTree, workTree, f.file, noWorkTree)).toContain(
+    "CODEX_SECURITY_CLOUD_BASE_URL",
+  );
+  const admin = join(f.root, "admin");
+  await mkdir(admin);
+  await writeFile(join(admin, "projects.json"), mapping);
+  for (const name of ["GIT_DIR", "GIT_COMMON_DIR"])
+    expect(
+      await run(admin, workTree, f.file, { ...selected, [name]: admin }),
+    ).toContain("outside all Git checkouts");
+  const bare = join(f.root, "bare");
+  execFileSync("git", ["init", "--quiet", "--bare", bare]);
+  await writeFile(join(bare, "projects.json"), mapping);
+  expect(await run(bare)).toContain("outside all Git checkouts");
+  const linked = join(f.root, "linked-admin");
+  await mkdir(linked);
+  await writeFile(join(linked, "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(linked, "commondir"), bare);
+  await rm(join(bare, "HEAD"));
+  expect(await run(bare)).toContain("outside all Git checkouts");
+  await mkdir(join(bare, "HEAD"));
+  expect(
+    await realpath(git(linked, "--git-dir=.", "rev-parse", "--git-common-dir")),
+  ).toBe(bare);
+  await writeFile(join(linked, "projects.json"), mapping);
+  for (const directory of [linked, bare])
+    expect(await run(directory)).toContain("outside all Git checkouts");
+  if (process.platform === "win32") {
+    const linkedConfig = join(f.root, "linked-config");
+    try {
+      await symlink("missing\\..\\config", linkedConfig, "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+      throw error;
+    }
+    expect(await realpath(linkedConfig)).toBe(await realpath(config));
+    expect(await run(linkedConfig)).toContain("outside all Git checkouts");
+    await rm(join(config, ".git"), { recursive: true });
+    expect(await run(linkedConfig)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  }
 });
 
 test("the Inspector map option cannot be used for other providers", async () => {

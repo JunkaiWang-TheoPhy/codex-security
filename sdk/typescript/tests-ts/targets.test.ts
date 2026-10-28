@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { windowsParentDirectory } from "../src/windows-path.js";
 import {
   DiffTarget,
   InvalidTargetError,
@@ -820,6 +821,17 @@ describe("scan target normalization", () => {
       canonicalProject,
     ]);
   });
+});
+
+test("Windows ancestor searches stop at the named UNC share", () => {
+  for (const root of [
+    String.raw`\\?\UNC\server\share`,
+    String.raw`\\.\unc\server\share`,
+  ]) {
+    expect(windowsParentDirectory(`${root}\\folder`)).toBe(root);
+    expect(windowsParentDirectory(root)).toBe(root);
+    expect(windowsParentDirectory(`${root}\\`)).toBe(`${root}\\`);
+  }
 });
 
 test("finds Git boundaries through directory aliases and file inputs", async () => {
