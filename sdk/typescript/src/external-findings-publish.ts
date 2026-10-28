@@ -33,10 +33,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
-import {
-  trivyRemoteKey,
-  validateNormalizedTrivySources,
-} from "./trivy-findings.js";
+import { trivyRemoteKey, normalizedTrivySourceUrls } from "./trivy-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -454,7 +451,7 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
-  if (options.provider === "trivy") validateNormalizedTrivySources(parsed);
+  const reportUrls = normalizedTrivySourceUrls(parsed, options.provider);
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
@@ -732,10 +729,7 @@ async function preparePublicationInput(
       ? trivyRemoteKey(url, repositoryUrl)
       : cloudRepositoryUrlKey(url);
   if (!saved || source.provider === "trivy") {
-    for (const url of [
-      reportRepositoryUrl,
-      ...(parsed.sourceRepositoryUrls ?? []),
-    ]) {
+    for (const url of [reportRepositoryUrl, ...reportUrls]) {
       if (url && repositoryKey(url) !== destinationKey)
         throw new CodexSecurityError(
           `Source report belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(repositoryUrl)}.`,

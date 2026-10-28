@@ -38,8 +38,9 @@ test("infers a whole checkout only when Git metadata corroborates the remote", (
   });
   const displayName = "arbitrary filesystem display label";
   expect(
-    JSON.stringify(normalizeAtRoot({ ...report, ArtifactName: displayName })),
-  ).not.toContain(displayName);
+    normalizeAtRoot({ ...report, ArtifactName: displayName }).findings[0]!
+      .evidence.source_data?.["report"],
+  ).toMatchObject({ ArtifactName: displayName });
   const colonDirectory = { ...report, ArtifactName: "apps:web" };
   expect(() => normalizeTrivyFindings(colonDirectory)).toThrow(
     "--trivy-scan-root",
@@ -75,6 +76,15 @@ test("corroborates Trivy's scheme-less repository target", () => {
   expect(() => normalizeTrivyFindings(report, "cloud", "apps/web")).toThrow(
     "must be .",
   );
+  const targetOnly = { ...report, Metadata: {} };
+  const selected = normalizeAtRoot(targetOnly);
+  expect(selected.sourceRepositoryUrls).toBeUndefined();
+  expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
+    ArtifactName: report.ArtifactName,
+  });
+  expect(
+    trivyRepositoryUrl(selected.findings[0]!.evidence.source_data!["report"]),
+  ).toBeNull();
   for (const uncorroborated of [
     { ...report, Metadata: {} },
     { ...report, ArtifactName: "github.com/example/other" },
@@ -168,21 +178,23 @@ test("identical SSH declarations can use an SSH-config host alias", () => {
   expect(() => trivyRepositoryUrl(native)).toThrow("different repositories");
 });
 
-test("retains a provisional Enterprise SSH alias until the destination is known", () => {
+test("requires a scan root for aliases on an unverified Git host", () => {
   const report = {
     ...trivyReport(),
     ArtifactName: "https://git.example.test/org/project",
     Metadata: { RepoURL: "git@git.example.test:org/project.git" },
   };
-  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
-  expect(() => normalizeTrivyFindings(report, "cloud", "apps/web")).toThrow(
-    "--trivy-scan-root",
-  );
-  expect(normalizeTrivyFindings(report, "local").sourceRepositoryUrls).toEqual([
+  const scoped = normalizeTrivyFindings(report, "local", "apps/web");
+  expect(scoped.sourceRepositoryUrls).toEqual([
     report.Metadata.RepoURL,
     report.ArtifactName,
   ]);
+  expect(scoped.findings[0]!.evidence.packages![0]!.manifest_path).toBe(
+    "apps/web/package-lock.json",
+  );
   for (const [ArtifactName, RepoURL] of [
+    [report.ArtifactName, report.Metadata.RepoURL],
+    [report.ArtifactName, "https://git.example.test/org/Project"],
     [report.ArtifactName, "https://git.example.test/org/other"],
     [report.ArtifactName, "https://other.example.test/org/project"],
     [report.ArtifactName, "https://git.example.test:8443/org/project"],
@@ -567,7 +579,12 @@ test.each([
 
 test("keeps ambiguous Java package paths in the original evidence", () => {
   const result = trivyReport().Results[0]!;
-  const paths = ["service.war/lib/dep.jar", "lib/dep.jar"] as const;
+  const paths = [
+    "service.war/lib/dep.jar",
+    "lib/dep.jar",
+    "service.war/lib/dep.par",
+    "service.war/lib/dep.JAR",
+  ];
   const { findings, excluded } = normalizeResult({
     ...result,
     Type: "jar",
@@ -580,7 +597,7 @@ test("keeps ambiguous Java package paths in the original evidence", () => {
   expect(excluded).toEqual([]);
   expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
     [],
-    [{ path: paths[1], line: null }],
+    ...paths.slice(1).map((path) => [{ path, line: null }]),
   ]);
   expect(findings[0]!.evidence.source_data?.["vulnerability"]).toMatchObject({
     PkgPath: paths[0],

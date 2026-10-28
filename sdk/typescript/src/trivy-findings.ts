@@ -5,6 +5,7 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
+import type { Provider } from "./external-import-models.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   isGitHubCloudHost,
@@ -107,6 +108,13 @@ function userlessSsh(url: string): boolean {
   return sshScheme.test(url) && !new URL(url).username;
 }
 
+function requireUnambiguousHttpTarget(url: string): void {
+  if (/^https?:\/\//iu.test(url) && !/^https?:\/\//u.test(url))
+    throw new Error(
+      "Trivy's mixed-case HTTP target cannot identify the Git transport. Verify the source remote and regenerate the report.",
+    );
+}
+
 function requireTrivySshUsers(urls: readonly string[]): void {
   if (urls.some(userlessSsh))
     throw new Error(
@@ -115,36 +123,45 @@ function requireTrivySshUsers(urls: readonly string[]): void {
 }
 
 /** Findings are stored and published individually, without the batch repository URLs. */
-export function validateNormalizedTrivySources(input: ExternalFindings): void {
-  for (const url of input.sourceRepositoryUrls ?? []) {
+export function normalizedTrivySourceUrls(
+  input: ExternalFindings,
+  provider: Provider,
+): string[] {
+  const reportUrls = input.sourceRepositoryUrls ?? [];
+  if (provider !== "trivy") {
+    if (reportUrls.length)
+      throw new Error("Only Trivy findings support sourceRepositoryUrls.");
+    return reportUrls;
+  }
+  for (const url of reportUrls) {
     if (!networkRepository(url))
       throw new Error(
         "Trivy sourceRepositoryUrls must contain network repository URLs.",
       );
+    // With no retained rows, the batch cannot distinguish a target label from Git metadata.
+    if (!input.findings.length) requireUnambiguousHttpTarget(url);
   }
-  requireTrivySshUsers(input.sourceRepositoryUrls ?? []);
+  requireTrivySshUsers(reportUrls);
   for (const { evidence } of input.findings) {
     const report = evidence.source_data?.["report"];
     if (isRecord(report) && report["SchemaVersion"] === 2) {
       const name = text(report["ArtifactName"]);
       if (name && urlScheme.test(name)) networkRepository(name);
     }
-    const { urls } = trivyReportRemotes(report);
+    const { urls, uncorroboratedTarget } = trivyReportRemotes(report);
+    if (uncorroboratedTarget)
+      requireUnambiguousHttpTarget(uncorroboratedTarget);
     requireTrivySshUsers(urls);
-    if (
-      input.sourceRepositoryUrls?.length &&
-      !evidence.details?.repository?.url &&
-      !urls.length
-    )
+    if (reportUrls.length && !evidence.details?.repository?.url && !urls.length)
       throw new Error(
         "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
       );
   }
+  return reportUrls;
 }
 
 export function trivyReportRemotes(report: unknown) {
-  if (!isRecord(report) || report["SchemaVersion"] !== 2)
-    return { urls: [], artifactRepository: undefined };
+  if (!isRecord(report) || report["SchemaVersion"] !== 2) return { urls: [] };
   const metadata = report["Metadata"];
   const repository = networkRepository(
     isRecord(metadata) && metadata["RepoURL"],
@@ -163,13 +180,15 @@ export function trivyReportRemotes(report: unknown) {
     // Trivy can omit the HTTPS scheme, but also accepts relative checkout paths.
     artifact = repository;
   }
-  const artifactRepository =
-    artifact && artifact !== repository ? artifact : undefined;
-  if (artifactRepository && report["ArtifactType"] === "repository") {
+  if (
+    artifact &&
+    artifact !== repository &&
+    report["ArtifactType"] === "repository"
+  ) {
     // Trivy clones an escaped HTTP path but retains the scanner argument as its label.
     // Existing spaces, percent signs and non-ASCII bytes stay escaped in a mixed path.
     // Go can rewrite escaped separators or unreserved bytes when it encounters raw Unicode.
-    const escaped = artifactRepository.replace(
+    const escaped = artifact.replace(
       /^(https?:\/\/[^/]+)(\/(?:[^%]|%(?:2[05]|[89A-F][\dA-F]))*)$/u,
       (_, authority: string, path: string) =>
         authority + path.replace(/[ \P{ASCII}]+/gu, encodeURIComponent),
@@ -177,11 +196,10 @@ export function trivyReportRemotes(report: unknown) {
     if (escaped === repository) artifact = repository;
   }
   // ArtifactName can come from the scanned checkout's etc/hostname.
-  if (repository && userlessSsh(repository))
-    return { urls: [repository], artifactRepository };
+  if (repository && userlessSsh(repository)) return { urls: [repository] };
   return {
     urls: [repository, artifact].filter((url) => url !== null),
-    artifactRepository,
+    uncorroboratedTarget: repository ? null : artifact,
   };
 }
 
@@ -404,7 +422,7 @@ export function normalizeTrivyFindings(
       "Only Trivy repository and filesystem reports are supported.",
     );
   const metadata = record(document["Metadata"] ?? {}, "Trivy Metadata");
-  const { urls, artifactRepository } = trivyReportRemotes(document);
+  const { urls } = trivyReportRemotes(document);
   const report = {
     ...pick(document, [
       "SchemaVersion",
@@ -416,13 +434,15 @@ export function normalizeTrivyFindings(
     ...(isRecord(document["Trivy"])
       ? { Trivy: pick(document["Trivy"], ["Version"]) }
       : {}),
-    ...(artifactRepository ? { ArtifactName: artifactRepository } : {}),
+    ...(document["ArtifactType"] === "repository" &&
+    typeof document["ArtifactName"] === "string"
+      ? { ArtifactName: document["ArtifactName"] }
+      : {}),
     Metadata: pick(metadata, ["RepoURL", "Branch", "Commit"]),
   };
   // A scan root requires corroboration. Explicit-root readers can inspect a report
   // whose declarations still have to agree with the destination at import.
-  const hint = urls.find((url) => /^https?:\/\//u.test(url));
-  const root = resolveScanRoot(scanRoot, matchingTrivyRemotes(urls, hint));
+  const root = resolveScanRoot(scanRoot, matchingTrivyRemotes(urls));
 
   const entries: (Entry | string)[] = [];
   for (const group of array(document["Results"] ?? [], "Trivy Results")) {
@@ -503,7 +523,10 @@ export function normalizeTrivyFindings(
       }
       // Trivy uses the same spelling for archive members and files in exploded archives.
       const ambiguousJavaPath =
-        result.Type === "jar" && javaArchiveAncestor.test(pkgPath ?? "");
+        result.Type === "jar" &&
+        pkgPath !== null &&
+        javaArchiveAncestor.test(pkgPath) &&
+        /\.(?:jar|ear|war)$/u.test(pkgPath);
       if (packagePath && packagePath !== targetPath && !ambiguousJavaPath)
         locations.push({ path: packagePath, line: null });
       const severity = text(vulnerability["Severity"])?.toLowerCase();

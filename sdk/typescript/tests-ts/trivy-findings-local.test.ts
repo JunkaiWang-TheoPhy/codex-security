@@ -119,8 +119,8 @@ test.each([
   ],
   [
     "case-sensitive HTTPS claims without a GitHub source",
-    repositoryClaims(enterpriseUrl, enterpriseUrl.toLowerCase() + ".git"),
-    undefined,
+    repositoryClaims(enterpriseUrl, enterpriseUrl.toLowerCase()),
+    enterpriseUrl,
     "identify different repositories",
   ],
   [

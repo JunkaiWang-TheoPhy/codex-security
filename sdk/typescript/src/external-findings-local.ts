@@ -22,10 +22,7 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
-import {
-  trivyRemoteKey,
-  validateNormalizedTrivySources,
-} from "./trivy-findings.js";
+import { trivyRemoteKey, normalizedTrivySourceUrls } from "./trivy-findings.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -558,12 +555,15 @@ export async function prepareNormalizedLocalImport(
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
   }
-  if (options.provider === "trivy") validateNormalizedTrivySources(current);
+  const sources = new Set(normalizedTrivySourceUrls(current, options.provider));
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
   );
-  const sources = new Set(current.sourceRepositoryUrls);
+  const githubSources = new Set<string>();
+  for (const { url, platform } of dependencies.sourceRepositories ?? []) {
+    (platform === "github" ? githubSources : sources).add(url);
+  }
   const typedTrivyUrls = new Set<string>();
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
@@ -582,7 +582,10 @@ export async function prepareNormalizedLocalImport(
     options.provider,
     [
       ...Array.from(sources, (url) => ({ url })),
-      ...(dependencies.sourceRepositories ?? []),
+      ...Array.from(githubSources, (url) => ({
+        url,
+        platform: "github" as const,
+      })),
       ...Array.from(typedTrivyUrls, (url) => ({ url, typedTrivyUrl: true })),
     ],
     workbenchOptions.protectedRoot,

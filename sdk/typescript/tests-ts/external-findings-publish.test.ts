@@ -2953,6 +2953,41 @@ test("human previews stay compact while JSON previews retain complete evidence",
   expect(f.posts).toHaveLength(0);
 });
 
+test("only Trivy accepts report-level repository URLs, including on a Cloud retry", async () => {
+  const { root, file, deps, state, posts } = await fixture();
+  const input = await readVendorFindings(file);
+  const empty = { ...input, sourceRepositoryUrls: [] };
+  const claimed = { ...input, sourceRepositoryUrls: [gitHubProject] };
+  const error = "Only Trivy findings support sourceRepositoryUrls";
+  const repository = join(root, "checkout");
+  const local = (report: typeof input) =>
+    prepareNormalizedLocalImport(report, { ...options, repository }, deps);
+  await expect(local(claimed)).rejects.toThrow(error);
+  await mkdir(repository);
+  await local(empty);
+
+  const first = await prepareNormalizedExternalPublication(
+    empty,
+    options,
+    deps,
+  );
+  state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const unexpected = () => Promise.reject(new Error("Unexpected Cloud access"));
+  const guarded = { ...deps, credentials: unexpected, fetch: unexpected };
+  await expect(
+    prepareNormalizedExternalPublication(claimed, options, guarded),
+  ).rejects.toThrow(error);
+  expect(posts).toHaveLength(1);
+  const retry = await prepareNormalizedExternalPublication(
+    input,
+    options,
+    deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests).toEqual(first.preview.requests);
+});
+
 test("normalized SDK publication preserves caller evidence and exclusion accounting", async () => {
   const f = await fixture();
   const input = {
@@ -3634,10 +3669,18 @@ test.each([{}, { RepoURL: gitHubProject }])(
       Metadata,
       ArtifactName: "HTTPS://github.com/example/project",
     };
-    await expectTrivyReplay(
-      selectedTrivyRows(report),
-      /different repositories|does not match/,
-    );
+    for (const remote of [gitHubProject, report.ArtifactName])
+      await expectTrivyReplay(
+        selectedTrivyRows(report),
+        /mixed-case HTTP target|different repositories|does not match/,
+        remote,
+      );
+    if (!Metadata.RepoURL)
+      await expectTrivyReplay(
+        normalizeTrivyFindings({ ...report, Results: [] }, "local", "."),
+        "mixed-case HTTP target",
+        report.ArtifactName,
+      );
   },
 );
 
