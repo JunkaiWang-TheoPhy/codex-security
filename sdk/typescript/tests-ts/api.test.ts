@@ -10179,6 +10179,14 @@ if __name__ == "__main__":
           .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
           .join("\n");
 
+  function lastLiveAnchor(steps: readonly ProgressScenarioStep[]): number {
+    return steps.findLastIndex(
+      (step) =>
+        (step[0] === "live" || step[0] === "live-message") &&
+        step[1] === "anchor",
+    );
+  }
+
   async function runProgressScenario(
     {
       steps,
@@ -10198,10 +10206,10 @@ if __name__ == "__main__":
       partition?: "batch" | "staged" | "each";
     },
     {
-      resolveAtLastAnchor = false,
+      resolutionIndex = -1,
       pollReceipts = true,
     }: {
-      resolveAtLastAnchor?: boolean;
+      resolutionIndex?: number;
       pollReceipts?: boolean;
     } = {},
   ): Promise<void> {
@@ -10261,15 +10269,8 @@ if __name__ == "__main__":
         async function* events(): AsyncGenerator<ThreadEvent> {
           expect(tracker).toBeDefined();
           await tracker!.stop();
-          const resolution = resolveAtLastAnchor
-            ? steps.findLastIndex(
-                (step) =>
-                  (step[0] === "live" || step[0] === "live-message") &&
-                  step[1] === "anchor",
-              )
-            : -1;
           for (const [index, step] of steps.entries()) {
-            if (stopBeforeResolution && index === resolution) {
+            if (stopBeforeResolution && index === resolutionIndex) {
               await tracker!.stop();
               await tracker!.refresh();
             }
@@ -12304,7 +12305,7 @@ if __name__ == "__main__":
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
       (scenario) =>
         runProgressScenario(scenario, {
-          resolveAtLastAnchor: true,
+          resolutionIndex: lastLiveAnchor(scenario.steps),
           pollReceipts: false,
         }),
     );
@@ -12455,42 +12456,14 @@ if __name__ == "__main__":
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
       (scenario) =>
         runProgressScenario(scenario, {
-          resolveAtLastAnchor: true,
+          resolutionIndex: lastLiveAnchor(scenario.steps),
           pollReceipts: false,
         }),
     );
   });
 
   describe("inventory authority across source partitions", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          "save" | "live" | "save-message" | "live-message",
-          string,
-          Value,
-        ]
-      | readonly ["worker" | "check" | "receipt", ScanProgress]
-      | readonly ["poll"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const partitioned: Scenario[] = [6, 7].flatMap((total) =>
+    const partitioned: ProgressScenario[] = [6, 7].flatMap((total) =>
       ["oversized", "without-oversized", "eligible-review"].flatMap((control) =>
         Array.from({ length: 8 }, (_, partition) => {
           const final = progress(
@@ -12504,7 +12477,9 @@ if __name__ == "__main__":
             inventory(total),
             final,
           ];
-          const steps: Step[] = [["worker", progress("attack_path", 6, 8)]];
+          const steps: ProgressScenarioStep[] = [
+            ["worker", progress("attack_path", 6, 8)],
+          ];
           for (const [index, row] of rows.entries()) {
             if (!(control === "without-oversized" && index === 1))
               steps.push(["save", `row-${index}`, row]);
@@ -12522,7 +12497,7 @@ if __name__ == "__main__":
         }),
       ),
     );
-    const delayed: Scenario[] = [
+    const delayed: ProgressScenario[] = [
       {
         name: "an exact message uses each source prefix once",
         expected: progress("reporting", 2, 8),
@@ -12597,7 +12572,7 @@ if __name__ == "__main__":
       ].flatMap(({ older, current, count }) =>
         [false, true].map((reviewLocated) => {
           const review = progress("validation", count, current);
-          const steps: Step[] = [
+          const steps: ProgressScenarioStep[] = [
             ["live", "older displayed", inventory(older)],
             ["save", "older", inventory(older)],
             ["poll"],
@@ -12618,7 +12593,7 @@ if __name__ == "__main__":
       ),
       ...["provisional", "without-zero", "exact-review"].map((control) => {
         const review = progress("reporting", 3, 8);
-        const steps: Step[] = [
+        const steps: ProgressScenarioStep[] = [
           [
             "live",
             control === "exact-review" ? "review" : "review displayed",
@@ -12648,9 +12623,9 @@ if __name__ == "__main__":
         "full-output",
         "exact-command",
       ].map((control) => {
-        const first = text(inventory(9));
+        const first = progressText(inventory(9));
         const review = progress("validation", 3, 9);
-        const markers = [first, text(review)];
+        const markers = [first, progressText(review)];
         if (control !== "without-repeat") markers.push(first);
         const prefixMarkers =
           control === "full-prefix" ? markers.join("\n") : first;
@@ -12698,158 +12673,19 @@ if __name__ == "__main__":
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: registerEightFileScan,
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              const resolution = steps.findLastIndex(
-                (step) => step[0] === "live" && step[1] === "anchor",
-              );
-              for (const [index, step] of steps.entries()) {
-                if (stopBeforeResolution && index === resolution) {
-                  await tracker!.stop();
-                  await tracker!.refresh();
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "receipt" ? parentPath : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      ({ steps, expected, workerFirst, stopBeforeResolution = false }) =>
+        runProgressScenario(
+          { steps, expected, workerFirst, stopBeforeResolution },
+          {
+            resolutionIndex: steps.findLastIndex(
+              (step) => step[0] === "live" && step[1] === "anchor",
+            ),
+          },
+        ),
     );
   });
 
   describe("source eligibility and applied progress", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
     const initial: readonly Step[] = [
       ["save", "initial", inventory(8)],
       ["live", "initial", inventory(8)],
@@ -13044,7 +12880,7 @@ if __name__ == "__main__":
       ),
     )(
       "reconciles $name (workers first=$workerFirst, stop=$stopBeforeResolution, control=$causalControl)",
-      async ({
+      ({
         steps: originalSteps,
         expected,
         control,
@@ -13061,126 +12897,19 @@ if __name__ == "__main__":
                   : step,
               )
             : originalSteps.filter((step) => step[1] !== control);
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const text = (
-          value: string | ScanProgress | readonly ScanProgress[],
-        ) =>
-          typeof value === "string"
-            ? value
-            : [value]
-                .flat()
-                .map((p) =>
-                  progressMarker(p.phase, p.filesCompleted, p.filesTotal),
-                )
-                .join("\n");
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: registerEightFileScan,
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              const anchor = steps.findLastIndex(
-                (step) =>
-                  (step[0] === "save" || step[0] === "live") &&
-                  step[1] === "anchor",
-              );
-              const resolution =
-                anchor === -1
-                  ? steps.findLastIndex((step) => step[0] === "save")
-                  : anchor;
-              for (const [index, step] of steps.entries()) {
-                if (stopBeforeResolution && index === resolution) {
-                  await tracker!.stop();
-                  await tracker!.refresh();
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
+        const anchor = steps.findLastIndex(
+          (step) =>
+            (step[0] === "save" || step[0] === "live") && step[1] === "anchor",
+        );
+        return runProgressScenario(
+          { steps, expected, workerFirst, stopBeforeResolution },
+          {
+            resolutionIndex:
+              anchor === -1
+                ? steps.findLastIndex((step) => step[0] === "save")
+                : anchor,
+          },
+        );
       },
     );
   });
