@@ -174,26 +174,11 @@ function checkRepositoryMapping(
       "Inspector Cloud requires a GitHub repository provider; self-managed GitLab is local only.",
     );
   const github = provider === "GITHUB" || knownGitHub;
-  const nativeUrl =
-    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name));
   if (absoluteUrl.test(nativeId)) matchesProject(nativeId, source, github);
-  const qualified = name !== null && matchesProject(name, source, github);
-  if (!qualified && !nativeUrl)
-    throw new Error(
-      "Inspector needs a native repository URL or namespace-qualified project path to check --source-repository-url; an opaque ID or bare project name is insufficient.",
-    );
-  if (
-    !nativeUrl &&
-    !(
-      provider === "GITHUB" &&
-      mapped.hostname === "github.com" &&
-      mapped.protocol === "https:" &&
-      !mapped.port
-    )
-  )
-    throw new Error(
-      "Inspector needs a matching native repository URL to bind a project name to this host; a slug alone does not identify a self-managed GitLab or GitHub Enterprise host.",
-    );
+  if (name !== null) matchesProject(name, source, github);
+  return (
+    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name))
+  );
 }
 
 class InspectorReportScope {
@@ -232,9 +217,15 @@ class InspectorReportScope {
   }
   validate(target?: ExternalImportTarget): string | undefined {
     const provider = this.providers.values().next().value;
+    let hasNativeUrl = false;
     for (const { nativeId, name, source } of this.mappings) {
-      checkRepositoryMapping(nativeId, name, source, provider, target);
+      if (checkRepositoryMapping(nativeId, name, source, provider, target))
+        hasNativeUrl = true;
     }
+    if (this.mappings.length && !hasNativeUrl)
+      throw new Error(
+        "Inspector needs a matching native repository URL for the project; a project name or resource ARN does not identify its Git host.",
+      );
     return provider;
   }
 }
@@ -302,15 +293,25 @@ function selectedFinding(value: unknown): Native {
   return finding;
 }
 
-export function hasInspectorEvidence(sourceData: unknown): boolean {
-  if (!isRecord(sourceData)) return false;
-  const finding = sourceData["finding"];
+function isInspectorRepositoryFinding(value: unknown): boolean {
   return (
-    sourceData["format"] === format ||
-    (isRecord(finding) &&
-      typeof finding["findingArn"] === "string" &&
-      findingArn.test(finding["findingArn"]) &&
-      Object.hasOwn(sourceData, "sourceRepositoryUrl"))
+    isRecord(value) &&
+    typeof value["findingArn"] === "string" &&
+    findingArn.test(value["findingArn"]) &&
+    Array.isArray(value["resources"]) &&
+    value["resources"].some(
+      (resource) =>
+        isRecord(resource) && resource["type"] === "CODE_REPOSITORY",
+    )
+  );
+}
+
+export function hasInspectorEvidence(sourceData: unknown): boolean {
+  return (
+    isRecord(sourceData) &&
+    (sourceData["format"] === format ||
+      isInspectorRepositoryFinding(sourceData["finding"]) ||
+      isInspectorRepositoryFinding(sourceData))
   );
 }
 
@@ -471,14 +472,23 @@ function concreteVersion(
   if (!version) return null;
   if (validSemver(version)) return version;
   if (ecosystem === "npm") return null;
-  if (
-    (!ecosystem || ecosystem === "java" || ecosystem === "maven") &&
-    version.endsWith("+")
-  )
-    return null;
+  if (ecosystem === "java" || ecosystem === "maven") {
+    if (
+      version === "LATEST" ||
+      version === "RELEASE" ||
+      version.startsWith("latest.")
+    )
+      return null;
+    return /^[a-z\d][\w.+-]*$/iu.test(version) && !version.endsWith("+")
+      ? version
+      : null;
+  }
+  if (!ecosystem && version.endsWith("+")) return null;
+  const publicVersion =
+    ecosystem === "pypi" ? version.split("+", 1)[0]! : version;
   return /\d/u.test(version) &&
     /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
-    !/(?:^|\.)x(?:\.|$)/iu.test(version)
+    !/(?:^|\.)x(?:\.|$)/iu.test(publicVersion)
     ? version
     : null;
 }
@@ -526,6 +536,7 @@ function evidence(
         requiredText(alias, "Inspector related vulnerability ID"),
       );
     url = text(detail["sourceUrl"]);
+    const seenPaths = new Set<string>();
     for (const value of array(
       detail["vulnerablePackages"] ?? [],
       "Inspector vulnerable packages",
@@ -549,8 +560,10 @@ function evidence(
         manifest_path: manifestPath(path),
         fixed_versions: fixed ? [fixed] : [],
       });
-      if (path && !locations.some((location) => location.path === path))
+      if (path && !seenPaths.has(path)) {
+        seenPaths.add(path);
         locations.push({ path, line: null });
+      }
     }
   }
   if (finding["codeVulnerabilityDetails"] !== undefined) {
@@ -621,15 +634,29 @@ export function normalizeInspectorFindings(
     );
   const rows = array(report["findings"], "Inspector findings");
   checkReportScope(rows, source, target);
-  return normalizeRecords(
-    rows,
-    (row, id) => ({
-      source_finding_id: id,
-      evidence: evidence(selectedFinding(row), id, source, target),
-    }),
-    (row) => identity(record(row, "Inspector finding")).arn,
-    target,
-  );
+  const normalize = (requireOwnMapping: boolean) =>
+    normalizeRecords(
+      rows,
+      (row, id) => {
+        const finding = selectedFinding(row);
+        const projected = evidence(finding, id, source, target);
+        if (requireOwnMapping) checkReportScope([finding], source, target);
+        return { source_finding_id: id, evidence: projected };
+      },
+      (row) => identity(record(row, "Inspector finding")).arn,
+      target,
+    );
+  const result = normalize(false);
+  if (result.excluded.length && result.findings.length) {
+    try {
+      inspectorReportRepositories(result.findings, target);
+    } catch {
+      // An excluded finding may have supplied the only native host or provider
+      // for this project. Keep findings still bound by their own evidence.
+      return normalize(true);
+    }
+  }
+  return result;
 }
 
 export async function readInspectorFindings(

@@ -932,6 +932,26 @@ test("Inspector publication keeps repository provenance and reuses the source oc
       ),
     ).rejects.toThrow("Expected retained Inspector");
   }
+  const unwrapped = structuredClone(retained);
+  unwrapped.findings[0]!.source_finding_id =
+    input.packageVulnerabilityDetails.vulnerabilityId;
+  unwrapped.findings[0]!.evidence.source_data = input;
+  await expect(
+    prepareNormalizedExternalPublication(
+      unwrapped,
+      inspectorOptions,
+      wrongDestination.deps,
+    ),
+  ).rejects.toThrow("Expected retained Inspector");
+  const partial = structuredClone(retained);
+  partial.findings[0]!.evidence.source_data = { finding: input };
+  await expect(
+    prepareNormalizedExternalPublication(
+      partial,
+      { ...inspectorOptions, provider: "wiz" },
+      wrongDestination.deps,
+    ),
+  ).rejects.toThrow("requires the inspector provider");
   const stripped = structuredClone(retained);
   delete stripped.findings[0]!.evidence.source_data;
   await expect(

@@ -25,7 +25,7 @@ export function inspectorPackageFinding() {
         region: "us-east-1",
         details: {
           codeRepository: {
-            projectName: "example/project",
+            projectName: inspectorRepositoryUrl,
             integrationArn: inspectorIntegrationArn,
             providerType: "GITHUB",
           },

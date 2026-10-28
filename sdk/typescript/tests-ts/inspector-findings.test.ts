@@ -259,6 +259,30 @@ test("projects exact package versions using the reported package ecosystem", () 
     { ...item, packageManager: "JAR", version: "1.+", fixedInVersion: "1.3" },
     {
       ...item,
+      packageManager: "POM",
+      version: "First.RELEASE",
+      fixedInVersion: "Next.RELEASE",
+    },
+    {
+      ...item,
+      packageManager: "POM",
+      version: "LATEST",
+      fixedInVersion: "RELEASE",
+    },
+    {
+      ...item,
+      packageManager: "JAR",
+      version: "latest.integration",
+      fixedInVersion: "[1.3,2.0)",
+    },
+    {
+      ...item,
+      packageManager: "PYTHONPKG",
+      version: "1.0+linux.x.1",
+      fixedInVersion: "1.1+linux.x.1",
+    },
+    {
+      ...item,
       packageManager: "OS",
       version: "1:2.3-4",
       fixedInVersion: "1:2.3-5",
@@ -268,6 +292,13 @@ test("projects exact package versions using the reported package ecosystem", () 
     { installed_version: null, fixed_versions: ["1.2.3-rc.x.1"] },
     { installed_version: "1.2.3+build.x.1", fixed_versions: [] },
     { installed_version: null, fixed_versions: ["1.3"] },
+    {
+      installed_version: "First.RELEASE",
+      fixed_versions: ["Next.RELEASE"],
+    },
+    { installed_version: null, fixed_versions: [] },
+    { installed_version: null, fixed_versions: [] },
+    { installed_version: "1.0+linux.x.1", fixed_versions: ["1.1+linux.x.1"] },
     { installed_version: "1:2.3-4", fixed_versions: ["1:2.3-5"] },
   ]);
 });
@@ -495,7 +526,7 @@ test("requires a complete explicit mapping; a bare name or opaque project ID can
   ).toHaveLength(1);
 });
 
-test("GitHub project slugs bind only on github.com; tenants and custom hosts require matching native URLs", () => {
+test("GitHub project slugs cannot identify a host; every destination requires matching native URL evidence", () => {
   const host = "https://git.example.test/Example/Project";
   const slug = projectFinding({ projectName: "EXAMPLE/PROJECT" });
   const nativeUrl = projectFinding({
@@ -507,8 +538,10 @@ test("GitHub project slugs bind only on github.com; tenants and custom hosts req
     projectName: "https://TENANT-A.GHE.COM/Example/Project.git",
   });
   for (const target of ["local", "cloud"] as const) {
-    const slugRow = normalize([slug], inspectorRepositoryUrl, target)
-      .findings[0]!;
+    const slugData = {
+      format: "aws-inspector2-list-findings/v1",
+      finding: slug,
+    };
     const tenantRow = normalize([tenantFinding], tenantA, target).findings[0]!;
     expect(
       inspectorEvidenceRepositoryUrls(
@@ -528,6 +561,7 @@ test("GitHub project slugs bind only on github.com; tenants and custom hosts req
       ),
     ).toThrow("does not match");
     for (const source of [
+      inspectorRepositoryUrl,
       tenantA,
       tenantB,
       host,
@@ -539,7 +573,7 @@ test("GitHub project slugs bind only on github.com; tenants and custom hosts req
       );
       expect(() =>
         inspectorEvidenceRepositoryUrls(
-          { ...slugRow.evidence.source_data, sourceRepositoryUrl: source },
+          { ...slugData, sourceRepositoryUrl: source },
           slug.findingArn,
           target,
         ),
@@ -566,7 +600,12 @@ test("GitHub project slugs bind only on github.com; tenants and custom hosts req
     ).toHaveLength(1);
     expect(() =>
       normalize(
-        [projectFinding({ providerType: undefined })],
+        [
+          projectFinding({
+            providerType: undefined,
+            projectName: "example/project",
+          }),
+        ],
         inspectorRepositoryUrl,
         target,
       ),
@@ -638,13 +677,10 @@ test("self-managed GitLab mappings require native host evidence and are local on
 
 test("uses the provider of the verified project regardless of finding order", () => {
   const enterprise = "https://git.example.test/example/project";
-  for (const [source, projectName] of [
-    [inspectorRepositoryUrl, "example/project"],
-    [enterprise, enterprise],
-  ] as const) {
-    const known = projectFinding({ projectName });
+  for (const source of [inspectorRepositoryUrl, enterprise]) {
+    const known = projectFinding({ projectName: source });
     const omitted = {
-      ...projectFinding({ projectName, providerType: undefined }),
+      ...projectFinding({ projectName: undefined, providerType: undefined }),
       findingArn: codeFinding().findingArn,
     };
     for (const target of ["local", "cloud"] as const) {
@@ -662,10 +698,39 @@ test("uses the provider of the verified project regardless of finding order", ()
   }
 });
 
+test("a cloud exclusion cannot leave a ready row without the project's repository proof", () => {
+  const source = "https://git.example.test/example/project";
+  const known = {
+    ...projectFinding({ projectName: source }),
+    title: "a".repeat(513),
+  };
+  const dependent = {
+    ...projectFinding({ projectName: undefined, providerType: undefined }),
+    findingArn: codeFinding().findingArn,
+  };
+  for (const rows of [
+    [known, dependent],
+    [dependent, known],
+  ]) {
+    const output = normalize(rows, source, "cloud");
+    expect(output.findings).toHaveLength(0);
+    expect(output.excluded.map((row) => row.source_finding_id).sort()).toEqual(
+      [known.findingArn, dependent.findingArn].sort(),
+    );
+    expect(
+      output.excluded.find(
+        (row) => row.source_finding_id === dependent.findingArn,
+      )?.reason,
+    ).toMatch(/provider|native repository URL/);
+    expect(inspectorReportRepositories(output.findings, "cloud").size).toBe(0);
+    expect(normalize(rows, source, "local").findings).toHaveLength(2);
+  }
+});
+
 test("compares exact native resource IDs and never treats opaque slash strings as namespace claims", () => {
   const opaqueId = "integrations/00001/projects/00002";
   const mapped = projectFinding(
-    { projectName: "example/project" },
+    { projectName: inspectorRepositoryUrl },
     { id: opaqueId },
   );
   const duplicateProject = { ...mapped, findingArn: codeFinding().findingArn };
@@ -838,7 +903,7 @@ test("retained Inspector evidence rechecks its own binding instead of trusting t
         native.findingArn,
         target,
       ),
-    ).toThrow("native repository URL");
+    ).toThrow("does not match");
   }
   expect(inspectorEvidenceRepositoryUrls(undefined)).toEqual([]);
   expect(inspectorEvidenceRepositoryUrls({ finding: "opaque" })).toEqual([]);

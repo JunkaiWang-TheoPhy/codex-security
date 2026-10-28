@@ -205,7 +205,8 @@ test("a normalized local selection cannot combine findings from different Inspec
       "22222222",
       "33333333",
     );
-    fork.resources[0]!.details.codeRepository.projectName = "fork/project";
+    fork.resources[0]!.details.codeRepository.projectName =
+      "https://github.com/fork/project";
     const findings = [
       ...normalizeInspectorFindings(
         { findings: [upstream] },

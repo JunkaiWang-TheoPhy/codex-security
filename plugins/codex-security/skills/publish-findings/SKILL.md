@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Amazon Inspector, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
 ---
 
 # Publish external findings
@@ -30,6 +30,10 @@ Show the repository, source namespace, normalized evidence, and exclusions. Afte
 Read the stored evidence with `codex-security findings imported /path/to/project --format json`; the repository defaults to the current directory. Report created, updated, unchanged, and excluded counts, including exclusion reasons when the command exits 1.
 
 Local records remain unassessed source evidence, separate from `findings list` and completed scans. Repeated imports use the same repository/provider/source-key/source-ID identity; omitted records remain stored. When a source repository URL and local Git remotes are available, the URL must match a remote. Local import does not publish to Cloud or automatically investigate or patch findings.
+
+## Amazon Inspector repository findings
+
+Use `--provider inspector` for a complete Inspector2 ListFindings JSON export from one Code Security repository. Supply `--source-repository-url` and verify that the native repository URL in the export identifies the same project. Preview repository package and code findings with a stable source key for the account, Region and repository. Self-managed GitLab imports use the local destination.
 
 ## Endor Labs findings
 
