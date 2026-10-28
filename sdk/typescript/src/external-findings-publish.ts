@@ -459,7 +459,9 @@ async function preparePublicationInput(
     legacyIdentity,
   } = input;
   const reportUrls =
-    options.provider === "trivy" ? trivyBatchSourceUrls(parsed, true) : [];
+    options.provider === "trivy"
+      ? trivyBatchSourceUrls(parsed, parsed.findings.length > 0)
+      : [];
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(

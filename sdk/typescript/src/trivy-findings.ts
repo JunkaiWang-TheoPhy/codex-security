@@ -199,8 +199,14 @@ export function trivyReportRemotes(report: unknown) {
     );
     if (escaped === repository) artifact = repository;
   }
-  // ArtifactName can come from the scanned checkout's etc/hostname.
-  if (repository && userlessSsh(repository)) return { urls: [repository] };
+  // A checkout-supplied label cannot restore an omitted SSH user. Keep any
+  // other difference visible when validating the report's repository claims.
+  if (
+    repository &&
+    userlessSsh(repository) &&
+    artifact?.replace(/^([^:]+:\/\/)[^/@]+@/u, "$1") === repository
+  )
+    return { urls: [repository] };
   return {
     urls: [repository, artifact].filter((url) => url !== null),
     uncorroboratedTarget: repository ? null : artifact,

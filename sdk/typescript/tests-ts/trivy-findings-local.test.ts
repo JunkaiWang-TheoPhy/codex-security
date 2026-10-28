@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import {
   listLocalExternalFindings,
+  normalizeTrivyFindings,
+  prepareLocalExternalImport,
   prepareNormalizedLocalImport,
-} from "../src/external-findings-local.js";
+} from "../src/index.js";
 import type { ExternalFindings } from "../src/external-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
-import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import { git } from "./git-fixture.js";
 import {
   trivyReport,
@@ -227,6 +227,17 @@ test.each([
     }
   },
 );
+
+test("a GitHub SSH hint cannot bind a Host alias to an HTTPS checkout", async () => {
+  const ssh = "git@work:team/project.git";
+  const report = { ...trivyReport(), Metadata: { RepoURL: ssh } };
+  await using checkout = await trivyCheckout("https://work/team/project", ssh);
+  await expect(checkout.fromNormalized(report, ".")).rejects.toThrow(mismatch);
+  git(checkout.repository, "remote", "set-url", "origin", ssh);
+  expect(
+    (await checkout.fromNormalized(report, ".")).preview.findings,
+  ).toHaveLength(1);
+});
 
 test("a reader's GitHub web hint cannot change the meaning of the raw Trivy transport", async () => {
   const web = "HTTPS://github.com/example/project";
@@ -480,6 +491,10 @@ test.each([
     ArtifactName: ".",
     Metadata: { RepoURL: "ssh://github.com/example/project" },
   },
+  repositoryClaims(
+    "ssh://alice@source.example/team/project",
+    "ssh://source.example/team/project",
+  ),
 ])(
   "unresolved Git transport can be retained in an unverified local import",
   async (source) => {
@@ -500,5 +515,30 @@ test.each([
     expect((await checkout.fromFile(report, ".")).preview.findings).toEqual(
       findings,
     );
+  },
+);
+
+test.each([
+  "ssh://alice@elsewhere.example/team/unrelated",
+  "ssh://alice@source.example/team/unrelated",
+])(
+  "an omitted SSH user cannot explain the conflicting Trivy target %s",
+  async (artifact) => {
+    await using checkout = await trivyCheckout();
+    const report = {
+      ...trivyReport(),
+      ...repositoryClaims(artifact, "ssh://source.example/team/project"),
+    };
+    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+    const { read, excluded, findings } = normalizeTrivyFindings(
+      report,
+      "local",
+      ".",
+    );
+    for (const prepare of [
+      () => checkout.fromFile(report, "."),
+      () => checkout.prepare({ read, excluded, findings }),
+    ])
+      await expect(prepare()).rejects.toThrow("different repositories");
   },
 );

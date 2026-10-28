@@ -3610,22 +3610,30 @@ async function expectTrivyReplay(
   input: ReturnType<typeof normalizeTrivyFindings>,
   error?: string | RegExp,
   remote = gitHubProject,
+  cloudError = error,
 ) {
   const local = await localFindingsFixture({ remote });
   cleanups.push(local.dispose);
   const cloud = await fixture();
-  for (const prepare of [
-    () =>
-      prepareNormalizedLocalImport(
-        input,
-        { ...trivyOptions, repository: local.repository },
-        { environment: local.environment },
-      ),
-    () => prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
-  ]) {
-    if (error === undefined)
+  for (const [prepare, expected] of [
+    [
+      () =>
+        prepareNormalizedLocalImport(
+          input,
+          { ...trivyOptions, repository: local.repository },
+          { environment: local.environment },
+        ),
+      error,
+    ],
+    [
+      () =>
+        prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+      cloudError,
+    ],
+  ] as const) {
+    if (expected === undefined)
       expect((await prepare()).preview.findings).toHaveLength(1);
-    else await expect(prepare()).rejects.toThrow(error);
+    else await expect(prepare()).rejects.toThrow(expected);
   }
 }
 
@@ -3648,6 +3656,7 @@ test.each([{}, { RepoURL: gitHubProject }])(
         normalizeTrivyFindings({ ...report, Results: [] }, "local", "."),
         "mixed-case HTTP target",
         report.ArtifactName,
+        "No supported findings are ready to publish",
       );
   },
 );
@@ -3805,27 +3814,40 @@ test.each([
 );
 
 test.each([
-  ["empty", []],
-  ["excluded-only", [{ Class: "os-pkgs" }]],
+  ["empty", [], "No supported findings are ready to publish"],
+  [
+    "excluded-only",
+    [{ Class: "os-pkgs" }],
+    "Unsupported Trivy result class: os-pkgs",
+  ],
 ] as const)(
   "an %s Trivy report stops before Cloud authentication or repository discovery",
-  async (_name, Results) => {
-    const cloud = await fixture({
+  async (_name, Results, error) => {
+    const report = {
       ...trivyReport(),
-      ArtifactName: "https://git.example.test/example/project",
-      Metadata: { RepoURL: "git@git.example.test:example/project.git" },
+      Metadata: { RepoURL: "ssh://git.example.test/example/project" },
       Results,
-    });
+    };
+    const cloud = await fixture(report);
     const unexpected = async () => {
       throw new Error("Unexpected Cloud access");
     };
+    const deps = {
+      environment: cloud.environment,
+      credentials: unexpected,
+      fetch: unexpected,
+    };
     await expect(
-      prepareExternalPublication(cloud.file, trivyOptions, {
-        environment: cloud.environment,
-        credentials: unexpected,
-        fetch: unexpected,
-      }),
-    ).rejects.toThrow("No supported findings are ready to publish");
+      prepareExternalPublication(cloud.file, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    const input = normalizeTrivyFindings(report, "cloud", ".");
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow(error);
+    input.report = trivyRepositoryHeader(credentialUrl);
+    await expect(
+      prepareNormalizedExternalPublication(input, trivyOptions, deps),
+    ).rejects.toThrow("without credentials");
   },
 );
 

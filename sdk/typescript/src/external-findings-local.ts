@@ -375,9 +375,12 @@ async function requireMatchingRepository(
   checkTrivyBinding?: () => void,
 ): Promise<void> {
   if (sources.length === 0 && provider !== "trivy") return;
+  const webUrl = /^https?:\/\//iu;
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
+      // An SSH Host alias cannot establish the Enterprise web hostname.
+      if (provider === "trivy" && !webUrl.test(source.url)) return [];
       const key = remoteRepositoryKey(source.url, "github");
       return key === undefined ? [] : [key];
     }),
@@ -389,9 +392,7 @@ async function requireMatchingRepository(
   const claims = sources.map(({ url, platform, typedTrivyUrl }) => {
     const githubSource = githubSourceFor(url);
     const readerWebUrl =
-      provider === "trivy" &&
-      platform === "github" &&
-      /^https?:\/\//iu.test(url);
+      provider === "trivy" && platform === "github" && webUrl.test(url);
     const key =
       typedTrivyUrl || readerWebUrl
         ? trivyWebUrlKey(url, githubSource)
