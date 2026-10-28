@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { resolvePluginPython } from "../src/runtime.js";
 import {
   dependencies as cliDependencies,
   FakeSignals,
@@ -240,21 +241,32 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   });
 
   if (process.platform === "linux") {
-    const output = execFileSync(
-      "sh",
-      [
-        "-c",
-        'cat | exec "$@"',
-        "sh",
-        process.execPath,
-        fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
-        ...command(map).map((value) =>
-          value === "selected.json" ? "/dev/stdin" : value,
-        ),
-      ],
-      { cwd: f.root, env: f.deps.environment, input: JSON.stringify(report) },
-    );
-    expect(JSON.parse(output.toString()).findings).toHaveLength(1);
+    const args = [
+      process.execPath,
+      fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+      ...command(map).map((value) =>
+        value === "selected.json" ? "/dev/stdin" : value,
+      ),
+    ];
+    const memfd = `
+import os, sys
+fd = os.memfd_create("scanner/../report")
+os.write(fd, sys.stdin.buffer.read())
+os.lseek(fd, 0, 0)
+os.dup2(fd, 0)
+os.execv(sys.argv[1], sys.argv[1:])
+`;
+    for (const [program, ...wrapper] of [
+      ["sh", "-c", 'cat | exec "$@"', "sh"],
+      [await resolvePluginPython(), "-c", memfd],
+    ] as const) {
+      const output = execFileSync(program, [...wrapper, ...args], {
+        cwd: f.root,
+        env: f.deps.environment,
+        input: JSON.stringify(report),
+      });
+      expect(JSON.parse(output.toString()).findings).toHaveLength(1);
+    }
   }
 
   const checkoutMap = join(f.repository, "projects.json");
@@ -314,6 +326,7 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
     directory: string,
     cwd = f.repository,
     reportFile = reportInSource,
+    environment = f.deps.environment,
   ) => {
     const cli = createCliTest(main);
     await cli.runCli(
@@ -335,7 +348,7 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
         join(directory, "projects.json"),
         "--dry-run",
       ],
-      { ...f.deps, currentDirectory: () => cwd },
+      { ...f.deps, environment, currentDirectory: () => cwd },
     );
     return cli.stderr.text();
   };
@@ -382,9 +395,36 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
   expect(
     await run(f.repository, f.root, join(alias, "selected.json")),
   ).toContain("outside all Git checkouts");
+  // Ordinary operator storage can contain these names with non-Git file types.
+  for (const name of ["HEAD", "objects", "refs"])
+    await writeFile(join(f.root, name), "");
+  await mkdir(join(f.root, "commondir"));
   expect(await run(f.root, f.root, f.file)).toContain(
     "CODEX_SECURITY_CLOUD_BASE_URL",
   );
+  const workTree = join(f.root, "markerless");
+  await mkdir(workTree);
+  await writeFile(join(workTree, "projects.json"), mapping);
+  const selected = {
+    ...f.deps.environment,
+    GIT_DIR: join(f.repository, ".git"),
+    GIT_WORK_TREE: ".",
+  };
+  execFileSync("git", ["add", "projects.json"], {
+    cwd: workTree,
+    env: selected,
+  });
+  for (const environment of [
+    selected,
+    { ...selected, GIT_WORK_TREE: undefined },
+  ]) {
+    expect(await run(workTree, workTree, f.file, environment)).toContain(
+      "outside all Git checkouts",
+    );
+    expect(await run(f.root, workTree, f.file, environment)).toContain(
+      "CODEX_SECURITY_CLOUD_BASE_URL",
+    );
+  }
   const bare = join(f.root, "bare");
   execFileSync("git", ["init", "--quiet", "--bare", bare]);
   await writeFile(join(bare, "projects.json"), mapping);

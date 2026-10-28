@@ -48,6 +48,9 @@ control outside all Git checkouts. The CLI checks the map path, including its
 directory links, for checkout markers and recognizable Git metadata. It
 recognizes headless common storage when a `config` file accompanies the
 `objects` and `refs` directories. Links in those positions also count.
+The CLI also checks `GIT_WORK_TREE`. When only `GIT_DIR` is set, it protects
+the invocation directory. Set `GIT_WORK_TREE` explicitly if Git configuration
+selects a markerless checkout elsewhere.
 
 ```json
 {
@@ -85,7 +88,9 @@ import. Other providers reject this option. Normalized imports retain their
 selected provider even when a source ID happens to match an Inspector ARN.
 For a normalized local import with a home-relative SSH repository path, the SDK
 compares explicit login names. If either URL omits the login, verify that both
-refer to the same account. The SDK does not resolve SSH configuration.
+refer to the same account. The SDK does not resolve SSH configuration. For an
+SCP path such as `host:D:/shared/repo`, verify that both logins reach the same
+repository. The SDK cannot infer the remote operating system.
 
 You can omit the map for exports that already contain a matching native
 repository URL. Rows in the same verified project can supply the native URL

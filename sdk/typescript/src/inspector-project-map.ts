@@ -1,6 +1,15 @@
 import { isUtf8 } from "node:buffer";
 import { lstat, readlink, realpath, stat } from "node:fs/promises";
-import { format, isAbsolute, join, parse, relative, sep } from "node:path";
+import {
+  format,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { environmentEntry } from "./auth.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import { parentDirectory } from "./windows-path.js";
@@ -63,7 +72,10 @@ async function directoriesAlongPath(input: string, signal: AbortSignal) {
         if (component === "..") {
           // Keep the traversed checkout before resolving its physical parent.
           paths.set(physical, entry);
-          physical = parentDirectory(await realpath(physical));
+          // An anonymous file descriptor can contain ".." in its display name.
+          physical = parentDirectory(
+            (await realpath(physical).catch(nullIfMissingPath)) ?? physical,
+          );
         } else {
           physical = join(physical, component);
         }
@@ -80,13 +92,30 @@ export async function readInspectorProjectMap(
   report: string,
   localRepository: string | undefined,
   signal: AbortSignal,
+  directory: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<ReadonlyMap<string, string>> {
   const metadata = await lstat(path, { bigint: true });
   const mapDirectories = await directoriesAlongPath(path, signal);
   if (localRepository === undefined) {
+    const selectedWorkTree =
+      environmentEntry(environment, "GIT_WORK_TREE") ??
+      (environmentEntry(environment, "GIT_DIR") ? directory : undefined);
+    // POSIX Git follows links before ".." and treats "~" literally.
+    const workTree = selectedWorkTree
+      ? await realpath(
+          sep === "\\"
+            ? resolve(directory, selectedWorkTree)
+            : isAbsolute(selectedWorkTree)
+              ? selectedWorkTree
+              : `${directory}/${selectedWorkTree}`,
+        ).catch(nullIfMissingPath)
+      : null;
     for (const directory of mapDirectories) {
       if (
-        (await gitMarkerRoot(directory, signal, "outermost")) !== null ||
+        (workTree !== null &&
+          !relativePathIsOutside(relative(workTree, directory))) ||
+        (await gitMarkerRoot(directory, signal, "nearest")) !== null ||
         (await bareMetadataRoots(directory, signal, true)).length > 0
       )
         throw new CodexSecurityError(

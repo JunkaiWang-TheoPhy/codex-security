@@ -181,7 +181,7 @@ function remoteRepository(
     ssh &&
     login &&
     (/^\/?~(?:\/|$)/u.test(literal(sshPath)) ||
-      (scpStyle && !/^[~/]/u.test(path)))
+      (scpStyle && !/^(?:[~/]|[a-z]:[\\/])/iu.test(path)))
       ? literal(login)
       : undefined;
   if (suffix === undefined) return { key: repository, account };
@@ -204,27 +204,33 @@ function remoteRepository(
 export async function bareMetadataRoots(
   repository: string,
   signal?: AbortSignal,
-  includeHeadless = false,
+  forCloudMap = false,
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
   for (;;) {
     signal?.throwIfAborted();
-    const present = async (name: string) =>
-      (await abortable(
+    const present = async (name: string, kind: "isFile" | "isDirectory") => {
+      const entry = await abortable(
         () => lstat(join(directory, name)).catch(nullIfMissingPath),
         signal,
-      )) !== null;
+      );
+      return (
+        entry !== null &&
+        (!forCloudMap || entry[kind]() || entry.isSymbolicLink())
+      );
+    };
     // Git also discovers bare repositories and linked metadata without .git.
     const head = await abortable(
       () => lstat(join(directory, "HEAD")).catch(nullIfMissingPath),
       signal,
     );
     if (
-      (includeHeadless && (await hasGitCommonDirectoryLayout(directory))) ||
+      (forCloudMap && (await hasGitCommonDirectoryLayout(directory))) ||
       ((head?.isFile() || head?.isSymbolicLink()) &&
-        ((await present("commondir")) ||
-          ((await present("objects")) && (await present("refs")))))
+        ((await present("commondir", "isFile")) ||
+          ((await present("objects", "isDirectory")) &&
+            (await present("refs", "isDirectory")))))
     )
       roots.push(directory);
     const parent = parentDirectory(directory);
