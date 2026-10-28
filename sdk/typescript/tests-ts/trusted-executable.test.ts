@@ -119,8 +119,7 @@ describe("trusted executable resolution", () => {
         PATH: [linked, invocation, worktree, trusted].join(delimiter),
         KEEP: "unchanged",
       },
-      worktree,
-      [invocation],
+      [worktree, invocation],
     );
     expect(resolved).toEqual({
       executable: join(trusted, executable),
