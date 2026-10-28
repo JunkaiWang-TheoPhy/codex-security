@@ -63,6 +63,8 @@ export interface NormalizedExternalPublicationOptions {
   repository: string;
   provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** File readers accept the vendor formats installed in this SDK. */
@@ -531,6 +533,22 @@ async function preparePublicationInput(
         : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
     );
   const destination = destinations[0]!;
+  function requireMatchingDestination(id: string, url: string) {
+    if (cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url))
+      throw new CodexSecurityError(
+        `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+      );
+  }
+  function checkScannerRepositories(findings: ExternalFindings["findings"]) {
+    for (const [id, repository] of boundScannerRepositories(
+      options.provider,
+      findings,
+      "cloud",
+      options.inspectorProjectMap,
+    ))
+      requireMatchingDestination(id, repository.url);
+  }
+  checkScannerRepositories(parsed.findings);
   const source = { provider: options.provider, source_key: options.sourceKey };
   const state = join(
     codexSecurityStateDirectory(environment),
@@ -580,6 +598,8 @@ async function preparePublicationInput(
       )
         throw new Error("Saved import destination does not match.");
     }
+    // A pending request can carry an older projection of the selected input.
+    checkScannerRepositories(savedFindings);
     return content;
   }
   const key = hash(
@@ -729,15 +749,9 @@ async function preparePublicationInput(
   }
   let requests = saved?.requests;
   if (!requests) {
-    const repositories = boundScannerRepositories(
-      options.provider,
-      parsed.findings,
-      "cloud",
-    );
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
-        repositories.get(finding.source_finding_id)?.url,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),
@@ -751,13 +765,10 @@ async function preparePublicationInput(
           : []),
       ];
       for (const sourceRepository of sourceRepositories)
-        if (
-          sourceRepository &&
-          cloudRepositoryUrlKey(sourceRepository) !==
-            cloudRepositoryUrlKey(destination.url)
-        )
-          throw new CodexSecurityError(
-            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        if (sourceRepository)
+          requireMatchingDestination(
+            finding.source_finding_id,
+            sourceRepository,
           );
     }
     let preparedCount = 0;
@@ -877,7 +888,10 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    // Inspector requests must keep the ARN and host binding validated above,
+    // including when an SDK caller edits the preview before publishing.
+    preview:
+      options.provider === "inspector" ? structuredClone(preview) : preview,
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (

@@ -22,8 +22,9 @@ function normalize(
   findings: unknown[],
   source = inspectorRepositoryUrl,
   target: ExternalImportTarget = "cloud",
+  projectMap?: ReadonlyMap<string, string>,
 ) {
-  return normalizeInspectorFindings({ findings }, source, target);
+  return normalizeInspectorFindings({ findings }, source, target, projectMap);
 }
 
 function codeFinding(
@@ -526,7 +527,108 @@ test("requires a complete explicit mapping; a bare name or opaque project ID can
   ).toHaveLength(1);
 });
 
-test("GitHub project slugs cannot identify a host; every destination requires matching native URL evidence", () => {
+test.each(["local", "cloud"] as const)(
+  "binds a project ARN to its trusted host during %s normalization and replay",
+  (target) => {
+    const arn = `${inspectorIntegrationArn}/${inspectorProjectId}`;
+    const urls = [
+      "https://one.example.test/example/project",
+      "https://two.example.test/example/project",
+    ] as const;
+    const slug = projectFinding({ projectName: "example/project" });
+    const projectMap = new Map([[arn, urls[0]]]);
+    const result = normalize([slug], urls[0], target, projectMap);
+    const [row] = result.findings;
+    expect(row!.evidence.source_data).toEqual({
+      format: "aws-inspector2-list-findings/v1",
+      sourceRepositoryUrl: urls[0],
+      finding: slug,
+    });
+    expect(
+      inspectorReportRepositories(result.findings, target, projectMap).get(
+        slug.findingArn,
+      )?.url,
+    ).toBe(urls[0]);
+    expect(() => normalize([slug], urls[1], target, projectMap)).toThrow(
+      "mapping does not match",
+    );
+    expect(() =>
+      normalize(
+        [projectFinding({ projectName: urls[1] })],
+        urls[1],
+        target,
+        projectMap,
+      ),
+    ).toThrow("mapping does not match");
+
+    // Retained evidence cannot supply its own trusted binding on replay.
+    const tampered = {
+      ...row!.evidence.source_data,
+      sourceRepositoryUrl: urls[1],
+      projectMap: { [arn]: urls[1] },
+    };
+    expect(() =>
+      inspectorEvidenceRepositoryUrls(tampered, slug.findingArn, target),
+    ).toThrow("native repository URL");
+    expect(() =>
+      inspectorEvidenceRepositoryUrls(
+        tampered,
+        slug.findingArn,
+        target,
+        projectMap,
+      ),
+    ).toThrow("mapping does not match");
+    expect(() =>
+      inspectorReportRepositories(
+        result.findings,
+        target,
+        new Map([[arn, urls[1]]]),
+      ),
+    ).toThrow("mapping does not match");
+  },
+);
+
+test("only the full Inspector project resource ARN can authorize a URL", () => {
+  const native = inspectorPackageFinding();
+  const canonical = native.resources[0]!.details.codeRepository.projectName;
+  const source = normalize([native], canonical, "local").findings;
+  expect(() => inspectorReportRepositories(source, "local", new Map())).toThrow(
+    "missing from the trusted mapping",
+  );
+  expect(() =>
+    inspectorReportRepositories(
+      [
+        {
+          source_finding_id: "opaque",
+          evidence: { ...source[0]!.evidence, source_data: {} },
+        },
+      ],
+      "local",
+      new Map(),
+    ),
+  ).toThrow("retained Inspector");
+  const slug = { projectName: "example/project" };
+  for (const key of [
+    inspectorProjectId,
+    inspectorIntegrationArn,
+    "example/project",
+  ]) {
+    const map = new Map([[key, inspectorRepositoryUrl]]);
+    expect(() => normalize([native], canonical, "local", map)).toThrow(
+      "missing from the trusted mapping",
+    );
+    expect(() =>
+      normalize(
+        [projectFinding(slug, { id: key })],
+        inspectorRepositoryUrl,
+        "local",
+        map,
+      ),
+    ).toThrow();
+  }
+});
+
+test("GitHub project slugs cannot identify a host; without a map, each destination needs native URL evidence", () => {
   const host = "https://git.example.test/Example/Project";
   const slug = projectFinding({ projectName: "EXAMPLE/PROJECT" });
   const nativeUrl = projectFinding({

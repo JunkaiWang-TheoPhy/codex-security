@@ -668,8 +668,9 @@ replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
 For Amazon Inspector Code Security, use `--provider inspector` with a complete
-ListFindings JSON export and `--source-repository-url`. The native repository
-identity must match the selected destination. See the
+ListFindings JSON export and `--source-repository-url`. When the export identifies
+the repository by an ARN and name, supply an operator-maintained
+`--inspector-project-map FILE` to verify the repository host. See the
 [Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
 
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit

@@ -114,6 +114,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { readInspectorProjectMap } from "./inspector-project-map.js";
 import {
   externalImportsDisabledMessage,
   externalImportsEnabled,
@@ -3572,6 +3573,11 @@ export async function main(
           .describe(
             "Required for Semgrep, OpenGrep, and Amazon Inspector: source repository URL, checked against the Cloud destination or configured local Git remotes.",
           ),
+        inspectorProjectMap: optionValue("--inspector-project-map")
+          .optional()
+          .describe(
+            "Inspector only: operator-controlled JSON file mapping full Inspector repository project ARNs to canonical repository URLs. Keep it outside the scanned checkout.",
+          ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
         ),
@@ -3672,24 +3678,40 @@ export async function main(
           try {
             if (!importsEnabled)
               throw new CodexSecurityError(externalImportsDisabledMessage);
+            if (
+              options.inspectorProjectMap !== undefined &&
+              options.provider !== "inspector"
+            )
+              throw new CodexSecurityError(
+                "--inspector-project-map requires --provider inspector.",
+              );
+            const directory = dependencies.currentDirectory();
+            const report = resolveCliPath(directory, args.file);
+            const repository =
+              options.to === "local"
+                ? resolveCliPath(directory, options.repository)
+                : options.repository;
+            const publicationOptions = {
+              ...options,
+              repository,
+              inspectorProjectMap:
+                options.inspectorProjectMap === undefined
+                  ? undefined
+                  : await readInspectorProjectMap(
+                      resolveCliPath(directory, options.inspectorProjectMap),
+                      report,
+                      options.to === "local" ? repository : undefined,
+                      controller.signal,
+                    ),
+            };
             if (options.to === "local") {
               const prepared = await (
                 dependencies.prepareLocalExternalImport ??
                 prepareLocalExternalImport
-              )(
-                resolveCliPath(dependencies.currentDirectory(), args.file),
-                {
-                  ...options,
-                  repository: resolveCliPath(
-                    dependencies.currentDirectory(),
-                    options.repository,
-                  ),
-                },
-                {
-                  environment: dependencies.environment,
-                  signal: controller.signal,
-                },
-              );
+              )(report, publicationOptions, {
+                environment: dependencies.environment,
+                signal: controller.signal,
+              });
               const { preview } = prepared;
               const showPreview = () => {
                 showScannerReport(preview);
@@ -3726,8 +3748,8 @@ export async function main(
               return { ...result };
             }
             const prepared = await prepareExternalPublication(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
-              options,
+              report,
+              publicationOptions,
               {
                 environment: dependencies.environment,
                 fetch: dependencies.cloudFetch,

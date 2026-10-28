@@ -14,9 +14,10 @@ export function boundScannerRepositories(
   provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
+  inspectorProjectMap?: ReadonlyMap<string, string>,
 ): Map<string, ExternalSourceRepository> {
   if (provider === "inspector")
-    return inspectorReportRepositories(findings, target);
+    return inspectorReportRepositories(findings, target, inspectorProjectMap);
   if (
     findings.some(({ evidence }) => hasInspectorEvidence(evidence.source_data))
   )
