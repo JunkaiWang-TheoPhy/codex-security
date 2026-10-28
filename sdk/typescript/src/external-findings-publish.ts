@@ -33,7 +33,11 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
-import { trivyRemoteKey, normalizedTrivySourceUrls } from "./trivy-findings.js";
+import {
+  trivyRemoteKey,
+  trivyBatchSourceUrls,
+  isTrivyReportHeader,
+} from "./trivy-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -357,7 +361,8 @@ export async function prepareExternalPublication(
     provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
   };
   return preparePublicationInput(
-    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    parsed.publication ??
+      normalizedPublicationInput(parsed.findings, normalizedOptions.provider),
     normalizedOptions,
     dependencies,
     parsed.reportRepositoryUrl,
@@ -373,7 +378,7 @@ export async function prepareNormalizedExternalPublication(
   requireExternalImports(dependencies.environment);
   dependencies.signal?.throwIfAborted();
   return preparePublicationInput(
-    normalizedPublicationInput(input),
+    normalizedPublicationInput(input, options.provider),
     options,
     dependencies,
   );
@@ -381,6 +386,7 @@ export async function prepareNormalizedExternalPublication(
 
 function normalizedPublicationInput(
   input: ExternalFindings,
+  provider: NormalizedExternalPublicationOptions["provider"],
 ): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
   const { report, ...parsed } = input;
@@ -411,7 +417,8 @@ function normalizedPublicationInput(
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
   const identity =
-    current.report === undefined
+    current.report === undefined ||
+    (provider === "trivy" && isTrivyReportHeader(current.report))
       ? current.findings
       : { findings: current.findings, report: reportForJson(current.report) };
   return {
@@ -451,7 +458,8 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
-  const reportUrls = normalizedTrivySourceUrls(parsed, options.provider);
+  const reportUrls =
+    options.provider === "trivy" ? trivyBatchSourceUrls(parsed, true) : [];
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(

@@ -22,7 +22,7 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
-import { trivyRemoteKey, normalizedTrivySourceUrls } from "./trivy-findings.js";
+import { trivyRemoteKey, trivyBatchSourceUrls } from "./trivy-findings.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -372,6 +372,7 @@ async function requireMatchingRepository(
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
+  checkTrivyBinding?: () => void,
 ): Promise<void> {
   if (sources.length === 0 && provider !== "trivy") return;
   const githubRepositories = new Set(
@@ -398,12 +399,15 @@ async function requireMatchingRepository(
           (provider === "trivy" ? url : undefined));
     return { url, githubSource, key };
   });
-  if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
-    throw new CodexSecurityError(
-      "Trivy source URLs identify different repositories.",
-    );
+  const requireConsistentClaims = () => {
+    if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
+      throw new CodexSecurityError(
+        "Trivy source URLs identify different repositories.",
+      );
+  };
 
-  if (!(await hasGitMetadata(repository, signal))) return;
+  if (!(await hasGitMetadata(repository, signal)))
+    return requireConsistentClaims();
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
@@ -454,7 +458,7 @@ async function requireMatchingRepository(
           error.stderr.trimEnd(),
         ))
     )
-      return;
+      return requireConsistentClaims();
     throw error;
   }
   const remotes: string[] = [];
@@ -462,6 +466,15 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
+  if (
+    checkTrivyBinding &&
+    remotes.some(
+      (remote) =>
+        remoteRepositoryKey(remote, provider, undefined, true) !== undefined,
+    )
+  )
+    checkTrivyBinding();
+  requireConsistentClaims();
   for (const { url, githubSource, key } of claims) {
     const remoteKeys = new Set(
       remotes.flatMap((remote) => {
@@ -555,7 +568,9 @@ export async function prepareNormalizedLocalImport(
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
   }
-  const sources = new Set(normalizedTrivySourceUrls(current, options.provider));
+  const sources = new Set(
+    options.provider === "trivy" ? trivyBatchSourceUrls(current, false) : [],
+  );
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
@@ -591,6 +606,9 @@ export async function prepareNormalizedLocalImport(
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
+    options.provider === "trivy"
+      ? () => trivyBatchSourceUrls(current, true)
+      : undefined,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {

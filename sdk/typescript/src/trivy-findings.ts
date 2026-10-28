@@ -5,7 +5,6 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { Provider } from "./external-import-models.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   isGitHubCloudHost,
@@ -122,42 +121,48 @@ function requireTrivySshUsers(urls: readonly string[]): void {
     );
 }
 
-/** Findings are stored and published individually, without the batch repository URLs. */
-export function normalizedTrivySourceUrls(
+/** Each selected finding must retain the repository asserted by a native batch header. */
+export function trivyBatchSourceUrls(
   input: ExternalFindings,
-  provider: Provider,
+  bind: boolean,
 ): string[] {
-  const reportUrls = input.sourceRepositoryUrls ?? [];
-  if (provider !== "trivy") {
-    if (reportUrls.length)
-      throw new Error("Only Trivy findings support sourceRepositoryUrls.");
-    return reportUrls;
-  }
-  for (const url of reportUrls) {
-    if (!networkRepository(url))
-      throw new Error(
-        "Trivy sourceRepositoryUrls must contain network repository URLs.",
-      );
-    // With no retained rows, the batch cannot distinguish a target label from Git metadata.
-    if (!input.findings.length) requireUnambiguousHttpTarget(url);
-  }
-  requireTrivySshUsers(reportUrls);
+  const batch = trivyReportRemotes(input.report);
+  if (bind) requireTrivyBinding(batch);
   for (const { evidence } of input.findings) {
-    const report = evidence.source_data?.["report"];
-    if (isRecord(report) && report["SchemaVersion"] === 2) {
-      const name = text(report["ArtifactName"]);
-      if (name && urlScheme.test(name)) networkRepository(name);
-    }
-    const { urls, uncorroboratedTarget } = trivyReportRemotes(report);
-    if (uncorroboratedTarget)
-      requireUnambiguousHttpTarget(uncorroboratedTarget);
-    requireTrivySshUsers(urls);
-    if (reportUrls.length && !evidence.details?.repository?.url && !urls.length)
+    const row = trivyReportRemotes(evidence.source_data?.["report"]);
+    if (bind) requireTrivyBinding(row);
+    if (
+      batch.urls.length &&
+      !evidence.details?.repository?.url &&
+      !row.urls.length
+    )
       throw new Error(
         "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
       );
   }
-  return reportUrls;
+  return batch.urls;
+}
+
+const headerFields = [
+  "SchemaVersion",
+  "ArtifactType",
+  "ArtifactID",
+  "ReportID",
+  "CreatedAt",
+];
+
+/** A native header supplies provenance for the selected rows, not independent run metadata. */
+export function isTrivyReportHeader(report: NativeRecord): boolean {
+  return (
+    report["SchemaVersion"] === 2 &&
+    (report["ArtifactType"] === "repository" ||
+      report["ArtifactType"] === "filesystem") &&
+    Object.keys(report).every(
+      (field) =>
+        headerFields.includes(field) ||
+        ["ArtifactName", "Trivy", "Metadata", "Results"].includes(field),
+    )
+  );
 }
 
 export function trivyReportRemotes(report: unknown) {
@@ -166,13 +171,12 @@ export function trivyReportRemotes(report: unknown) {
   const repository = networkRepository(
     isRecord(metadata) && metadata["RepoURL"],
   );
-  // Only an explicitly identified filesystem artifact uses its name as a display label.
-  const name =
-    report["ArtifactType"] !== "filesystem" && text(report["ArtifactName"]);
-  let artifact: string | null = null;
-  if (name && urlScheme.test(name)) {
-    artifact = networkRepository(name);
-  } else if (
+  const name = text(report["ArtifactName"]);
+  let artifact = name && urlScheme.test(name) ? networkRepository(name) : null;
+  // A filesystem display label is validated but never identifies the repository.
+  if (report["ArtifactType"] === "filesystem")
+    return { urls: repository ? [repository] : [] };
+  if (
     name &&
     /^[^./:\\][^/:\\]*\//u.test(name) &&
     repository === `https://${name}`
@@ -201,6 +205,14 @@ export function trivyReportRemotes(report: unknown) {
     urls: [repository, artifact].filter((url) => url !== null),
     uncorroboratedTarget: repository ? null : artifact,
   };
+}
+
+export function requireTrivyBinding({
+  urls,
+  uncorroboratedTarget,
+}: ReturnType<typeof trivyReportRemotes>): void {
+  requireTrivySshUsers(urls);
+  if (uncorroboratedTarget) requireUnambiguousHttpTarget(uncorroboratedTarget);
 }
 
 function matchingTrivyRemotes(
@@ -424,18 +436,11 @@ export function normalizeTrivyFindings(
   const metadata = record(document["Metadata"] ?? {}, "Trivy Metadata");
   const { urls } = trivyReportRemotes(document);
   const report = {
-    ...pick(document, [
-      "SchemaVersion",
-      "ArtifactType",
-      "ArtifactID",
-      "ReportID",
-      "CreatedAt",
-    ]),
+    ...pick(document, headerFields),
     ...(isRecord(document["Trivy"])
       ? { Trivy: pick(document["Trivy"], ["Version"]) }
       : {}),
-    ...(document["ArtifactType"] === "repository" &&
-    typeof document["ArtifactName"] === "string"
+    ...(typeof document["ArtifactName"] === "string"
       ? { ArtifactName: document["ArtifactName"] }
       : {}),
     Metadata: pick(metadata, ["RepoURL", "Branch", "Commit"]),
@@ -601,7 +606,7 @@ export function normalizeTrivyFindings(
     },
     target,
   );
-  if (urls.length) findings.sourceRepositoryUrls = [...new Set(urls)];
+  if (!findings.findings.length) findings.report = report;
   return findings;
 }
 

@@ -11,7 +11,10 @@ import type { ExternalFindings } from "../src/external-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import { git } from "./git-fixture.js";
-import { trivyReport } from "./support/trivy-import-fixtures.js";
+import {
+  trivyReport,
+  trivyRepositoryHeader,
+} from "./support/trivy-import-fixtures.js";
 
 const checkoutUrl = "https://github.com/example/project";
 const foreignUrl = "https://github.com/example/other";
@@ -59,40 +62,46 @@ async function trivyCheckout(remote?: string, githubSource?: string) {
   };
 }
 
-test.each([
-  ["https://scanner:fixture@github.com/example/other", "without credentials"],
-  [
-    "//scanner:fixture@github.com/example/other",
-    "sourceRepositoryUrls must contain network repository URLs",
-  ],
-])(
-  "normalized Trivy batch URLs reject %s before local or Cloud preparation",
-  async (url, error) => {
-    const input = normalizeTrivyFindings(trivyReport(), "cloud", ".");
-    input.sourceRepositoryUrls = [url];
-    await using local = await trivyCheckout(checkoutUrl);
-    await expect(local.prepare(input)).rejects.toThrow(error);
-    await expect(
-      prepareNormalizedExternalPublication(
-        input,
-        {
-          provider: "trivy",
-          repository: "repo-example",
-          sourceKey: "example/project/main",
+test("normalized Trivy headers reject credentials before local or Cloud preparation", async () => {
+  const input = normalizeTrivyFindings(trivyReport(), "cloud", ".");
+  input.report = trivyRepositoryHeader(
+    "https://scanner:fixture@github.com/example/other",
+  );
+  const error = "without credentials";
+  await using local = await trivyCheckout(checkoutUrl);
+  await expect(local.prepare(input)).rejects.toThrow(error);
+  await expect(
+    prepareNormalizedExternalPublication(
+      input,
+      {
+        provider: "trivy",
+        repository: "repo-example",
+        sourceKey: "example/project/main",
+      },
+      {
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        credentials: async () => {
+          throw new Error("Unexpected Cloud authentication");
         },
-        {
-          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-          credentials: async () => {
-            throw new Error("Unexpected Cloud authentication");
-          },
-        },
-      ),
-    ).rejects.toThrow(error);
-  },
-);
+      },
+    ),
+  ).rejects.toThrow(error);
+});
 
 test.each([
   ["foreign empty report", {}, foreignUrl, mismatch],
+  [
+    "empty report with a mixed-case Git helper recorded by Git",
+    { Metadata: { RepoURL: "HTTPS://github.com/example/project" } },
+    "HTTPS://github.com/example/project",
+    null,
+  ],
+  [
+    "empty report with only a mixed-case scanner target",
+    { Metadata: {}, ArtifactName: "HTTPS://github.com/example/project" },
+    "HTTPS://github.com/example/project",
+    "mixed-case HTTP target",
+  ],
   [
     "foreign excluded-only report",
     { Results: [{ Class: "os-pkgs" }] },
@@ -362,7 +371,7 @@ test.each([
       "local",
       ".",
     );
-    input.sourceRepositoryUrls = [reportUrl];
+    input.report = trivyRepositoryHeader(reportUrl);
     for (const repository of [checkout.repository, plainDirectory]) {
       const prepared = checkout.prepare(input, repository);
       if (matches) expect((await prepared).preview.findings).toHaveLength(1);
@@ -462,5 +471,34 @@ test.each([
     if (matches === true)
       expect((await pending).preview.findings).toHaveLength(1);
     else await expect(pending).rejects.toThrow(matches || mismatch);
+  },
+);
+
+test.each([
+  { ArtifactName: checkoutUrl.replace("https:", "HTTPS:"), Metadata: {} },
+  {
+    ArtifactName: ".",
+    Metadata: { RepoURL: "ssh://github.com/example/project" },
+  },
+])(
+  "unresolved Git transport can be retained in an unverified local import",
+  async (source) => {
+    await using checkout = await trivyCheckout("file:///local/fixture.git");
+    const unpacked = join(dirname(checkout.repository), "unpacked");
+    await mkdir(unpacked);
+    const report = { ...trivyReport(), ...source };
+    const { findings, read, excluded } = normalizeTrivyFindings(
+      report,
+      "local",
+      ".",
+    );
+    const stored = await checkout.prepare(
+      { findings, read, excluded },
+      unpacked,
+    );
+    expect(stored.preview.findings).toEqual(findings);
+    expect((await checkout.fromFile(report, ".")).preview.findings).toEqual(
+      findings,
+    );
   },
 );

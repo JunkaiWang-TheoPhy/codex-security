@@ -24,7 +24,6 @@ test("infers a whole checkout only when Git metadata corroborates the remote", (
   expect(() => normalizeTrivyFindings(ambiguousOrigin)).toThrow(
     "--trivy-scan-root",
   );
-  expect(normalizeAtRoot(ambiguousOrigin).sourceRepositoryUrls).toBeUndefined();
   const remote = { ...report, ArtifactName: report.Metadata.RepoURL };
   const labelOnly = { ...remote, Metadata: {} };
   expect(() => normalizeTrivyFindings(labelOnly)).toThrow("--trivy-scan-root");
@@ -78,7 +77,6 @@ test("corroborates Trivy's scheme-less repository target", () => {
   );
   const targetOnly = { ...report, Metadata: {} };
   const selected = normalizeAtRoot(targetOnly);
-  expect(selected.sourceRepositoryUrls).toBeUndefined();
   expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
     ArtifactName: report.ArtifactName,
   });
@@ -103,10 +101,6 @@ test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root 
   };
   expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
   const batch = normalizeTrivyFindings(report, "local", "apps/web");
-  expect(batch.sourceRepositoryUrls).toEqual([
-    report.Metadata.RepoURL,
-    report.ArtifactName,
-  ]);
   const retained = batch.findings[0]!.evidence.source_data!["report"];
   expect(retained).toMatchObject({
     ArtifactName: report.ArtifactName,
@@ -118,7 +112,6 @@ test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root 
   const targetOnly = { ...report, Metadata: {} };
   expect(() => normalizeTrivyFindings(targetOnly)).toThrow("--trivy-scan-root");
   const selected = normalizeAtRoot(targetOnly);
-  expect(selected.sourceRepositoryUrls).toEqual([report.ArtifactName]);
   expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
     ArtifactName: report.ArtifactName,
   });
@@ -169,12 +162,9 @@ test("identical SSH declarations can use an SSH-config host alias", () => {
     ArtifactName: url,
     Metadata: { RepoURL: url },
   };
-  expect(normalizeTrivyFindings(report).sourceRepositoryUrls).toEqual([url]);
+  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
   const native = { ...report, Metadata: { RepoURL: "git@git.1:org/project" } };
-  expect(normalizeAtRoot(native).sourceRepositoryUrls).toEqual([
-    native.Metadata.RepoURL,
-    url,
-  ]);
+  expect(() => normalizeTrivyFindings(native)).toThrow("--trivy-scan-root");
   expect(() => trivyRepositoryUrl(native)).toThrow("different repositories");
 });
 
@@ -185,10 +175,6 @@ test("requires a scan root for aliases on an unverified Git host", () => {
     Metadata: { RepoURL: "git@git.example.test:org/project.git" },
   };
   const scoped = normalizeTrivyFindings(report, "local", "apps/web");
-  expect(scoped.sourceRepositoryUrls).toEqual([
-    report.Metadata.RepoURL,
-    report.ArtifactName,
-  ]);
   expect(scoped.findings[0]!.evidence.packages![0]!.manifest_path).toBe(
     "apps/web/package-lock.json",
   );
@@ -220,9 +206,10 @@ test("a repository display label cannot supply an SSH account omitted from Git m
     Metadata: { RepoURL: "ssh://git.example.test:2222/org/project" },
   };
   expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
-  const batch = normalizeAtRoot(report);
-  expect(batch.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
-  expect(batch.findings[0]!.evidence.source_data!["report"]).toMatchObject({
+  const retained =
+    normalizeAtRoot(report).findings[0]!.evidence.source_data!["report"];
+  expect(trivyRepositoryUrl(retained)).toBe(report.Metadata.RepoURL);
+  expect(retained).toMatchObject({
     ArtifactName: report.ArtifactName,
     Metadata: report.Metadata,
   });
@@ -413,6 +400,7 @@ test("filesystem scans without inventory or Git metadata do not invent lines, ve
   const { evidence } = normalizeAtRoot(report).findings[0]!;
   expect(evidence).toMatchObject({
     severity: "unknown",
+    source_data: { report: { ArtifactName: report.ArtifactName } },
     branch: null,
     code_revision: null,
     source_scan_id: null,
@@ -698,7 +686,8 @@ test.each([
 
 test("clean native reports differ from unsupported, mixed and malformed findings", () => {
   const report = trivyReport();
-  const result = report.Results[0]!;
+  const { Results: groups, ...header } = report;
+  const result = groups[0]!;
   for (const Results of [
     undefined,
     [],
@@ -706,7 +695,7 @@ test("clean native reports differ from unsupported, mixed and malformed findings
   ])
     expect(normalizeAtRoot({ ...report, Results })).toEqual({
       read: 0,
-      sourceRepositoryUrls: [report.Metadata.RepoURL],
+      report: header,
       excluded: [],
       findings: [],
     });

@@ -51,7 +51,10 @@ import {
 import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import { semgrepJson } from "./support/semgrep-import-fixtures.js";
 import { normalizeTrivyFindings } from "../src/trivy-findings.js";
-import { trivyReport } from "./support/trivy-import-fixtures.js";
+import {
+  trivyReport,
+  trivyRepositoryHeader,
+} from "./support/trivy-import-fixtures.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -2953,41 +2956,6 @@ test("human previews stay compact while JSON previews retain complete evidence",
   expect(f.posts).toHaveLength(0);
 });
 
-test("only Trivy accepts report-level repository URLs, including on a Cloud retry", async () => {
-  const { root, file, deps, state, posts } = await fixture();
-  const input = await readVendorFindings(file);
-  const empty = { ...input, sourceRepositoryUrls: [] };
-  const claimed = { ...input, sourceRepositoryUrls: [gitHubProject] };
-  const error = "Only Trivy findings support sourceRepositoryUrls";
-  const repository = join(root, "checkout");
-  const local = (report: typeof input) =>
-    prepareNormalizedLocalImport(report, { ...options, repository }, deps);
-  await expect(local(claimed)).rejects.toThrow(error);
-  await mkdir(repository);
-  await local(empty);
-
-  const first = await prepareNormalizedExternalPublication(
-    empty,
-    options,
-    deps,
-  );
-  state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
-  const unexpected = () => Promise.reject(new Error("Unexpected Cloud access"));
-  const guarded = { ...deps, credentials: unexpected, fetch: unexpected };
-  await expect(
-    prepareNormalizedExternalPublication(claimed, options, guarded),
-  ).rejects.toThrow(error);
-  expect(posts).toHaveLength(1);
-  const retry = await prepareNormalizedExternalPublication(
-    input,
-    options,
-    deps,
-  );
-  expect(retry.preview.resumed).toBe(true);
-  expect(retry.preview.requests).toEqual(first.preview.requests);
-});
-
 test("normalized SDK publication preserves caller evidence and exclusion accounting", async () => {
   const f = await fixture();
   const input = {
@@ -3628,7 +3596,7 @@ test.each([
   },
 );
 
-// A selected row has no report-level source repository list.
+// A selected row can be imported without the original batch header.
 function selectedTrivyRows(report: unknown) {
   const { findings, read, excluded } = normalizeTrivyFindings(
     report,
@@ -3708,7 +3676,10 @@ test.each([
     };
     evidence.details = { kind: "sast", repository: { url: gitHubProject } };
     await expectTrivyReplay(
-      { ...input, sourceRepositoryUrls: [gitHubProject] },
+      {
+        ...input,
+        report: trivyRepositoryHeader(gitHubProject),
+      },
       accepts ? undefined : /Trivy omitted the SSH user/u,
       remote,
     );
@@ -3723,6 +3694,7 @@ test("each normalized Trivy finding must retain its report's repository", async 
   });
   const input = normalizeTrivyFindings(report, "cloud", ".");
   delete input.findings[1]!.evidence.source_data;
+  input.report = trivyRepositoryHeader(report.Metadata.RepoURL);
   await expectTrivyReplay(input, /retain/i);
 });
 
@@ -3818,16 +3790,16 @@ test.each([
           ),
         ).rejects.toThrow("does not match the selected Cloud repository");
       } else {
-        expect(JSON.stringify(reloaded)).not.toContain(ArtifactName);
+        expect(
+          reloaded.findings[0].evidence.source_data.report.ArtifactName,
+        ).toBe(ArtifactName);
       }
       await prepared.publish();
     }
     expect(f.posts.length > 0).toBe(accepts);
     for (const body of f.posts) {
       const report = JSON.parse(body).items[0].evidence.source_data.report;
-      expect(report.ArtifactName).toBe(
-        ArtifactType === "repository" ? ArtifactName : undefined,
-      );
+      expect(report.ArtifactName).toBe(ArtifactName);
     }
   },
 );
@@ -4643,7 +4615,7 @@ test.each([
 );
 
 const checkpointRepository = "https://github.com/example/project";
-test.each(["file", "selected rows", "empty source list"] as const)(
+test.each(["file", "selected rows"] as const)(
   "a Trivy %s publication resumes its original request across entrypoints and a repository rename",
   async (initialKind) => {
     const report = {
@@ -4655,16 +4627,13 @@ test.each(["file", "selected rows", "empty source list"] as const)(
     const rows = selectedTrivyRows(report);
     const file = () =>
       prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
-    const selected = (sourceRepositoryUrls?: string[]) =>
+    const selected = (header?: Record<string, unknown>) =>
       prepareNormalizedExternalPublication(
-        sourceRepositoryUrls ? { ...rows, sourceRepositoryUrls } : rows,
+        { ...rows, report: header },
         trivyOptions,
         cloud.deps,
       );
-    const first =
-      initialKind === "file"
-        ? await file()
-        : await selected(initialKind === "empty source list" ? [] : undefined);
+    const first = initialKind === "file" ? await file() : await selected();
     cloud.state.loseResponse = true;
     await expect(first.publish()).rejects.toThrow("resume the saved request");
     const body = cloud.posts[0]!;
@@ -4677,10 +4646,13 @@ test.each(["file", "selected rows", "empty source list"] as const)(
     await writeFile(cloud.file, JSON.stringify(report));
 
     cloud.state.repositoryUrl = "https://github.com/example/renamed";
-    await expect(selected([cloud.state.repositoryUrl])).rejects.toThrow(
-      "does not match",
-    );
+    await expect(
+      selected(trivyRepositoryHeader(cloud.state.repositoryUrl)),
+    ).rejects.toThrow("does not match");
     expect(cloud.posts).toEqual([body]);
+    expect(
+      (await selected(trivyRepositoryHeader(gitHubProject))).preview.resumed,
+    ).toBe(true);
     const retry = initialKind === "file" ? await selected() : await file();
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests).toEqual(first.preview.requests);
