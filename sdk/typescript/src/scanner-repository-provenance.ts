@@ -21,47 +21,53 @@ import {
   veracodeReportRepositories,
 } from "./veracode-findings.js";
 
-export const repositoryBoundScanners: Partial<
-  Record<Provider, typeof readInspectorFindings>
-> = {
-  inspector: readInspectorFindings,
-  blackduck: readBlackDuckFindings,
-  veracode: readVeracodeFindings,
-};
+interface BoundScanner {
+  label: string;
+  read: typeof readInspectorFindings;
+  hasEvidence(data: unknown, id: string): boolean;
+  repositories: typeof inspectorReportRepositories;
+}
+
+export const repositoryBoundScanners: Partial<Record<Provider, BoundScanner>> =
+  {
+    inspector: {
+      label: "Inspector",
+      read: readInspectorFindings,
+      hasEvidence: hasInspectorEvidence,
+      repositories: inspectorReportRepositories,
+    },
+    blackduck: {
+      label: "Black Duck",
+      read: readBlackDuckFindings,
+      hasEvidence: hasBlackDuckEvidence,
+      repositories: blackDuckReportRepositories,
+    },
+    veracode: {
+      label: "Veracode",
+      read: readVeracodeFindings,
+      hasEvidence: hasVeracodeEvidence,
+      repositories: veracodeReportRepositories,
+    },
+  };
 
 export function boundScannerRepositories(
   provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
 ): Map<string, ExternalSourceRepository> {
-  if (
-    provider !== "inspector" &&
-    findings.some(({ evidence }) => hasInspectorEvidence(evidence.source_data))
-  )
-    throw new CodexSecurityError(
-      "Retained Inspector evidence requires the inspector provider.",
-    );
-  if (
-    provider !== "blackduck" &&
-    findings.some(({ evidence }) => hasBlackDuckEvidence(evidence.source_data))
-  )
-    throw new CodexSecurityError(
-      "Retained Black Duck evidence requires the blackduck provider.",
-    );
-  if (
-    provider !== "veracode" &&
-    findings.some(({ evidence, source_finding_id }) =>
-      hasVeracodeEvidence(evidence.source_data, source_finding_id),
+  for (const [name, scanner] of Object.entries(repositoryBoundScanners)) {
+    if (
+      name !== provider &&
+      findings.some(({ evidence, source_finding_id }) =>
+        scanner.hasEvidence(evidence.source_data, source_finding_id),
+      )
     )
-  )
-    throw new CodexSecurityError(
-      "Retained Veracode evidence requires the veracode provider.",
-    );
-  if (provider === "veracode")
-    return veracodeReportRepositories(findings, target);
-  if (provider === "inspector")
-    return inspectorReportRepositories(findings, target);
-  if (provider === "blackduck")
-    return blackDuckReportRepositories(findings, target);
-  return new Map();
+      throw new CodexSecurityError(
+        `Retained ${scanner.label} evidence requires the ${name} provider.`,
+      );
+  }
+  return (
+    repositoryBoundScanners[provider]?.repositories(findings, target) ??
+    new Map()
+  );
 }

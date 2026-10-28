@@ -19,7 +19,6 @@ import {
   stableId,
   text,
 } from "./scanner-import.js";
-
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
 function integer(value: unknown, label: string, minimum = 0): number {
@@ -106,8 +105,8 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
   ]);
 }
 
-export function hasVeracodeEvidence(data: unknown, id?: string): boolean {
-  if (/^veracode-static-policy:[a-f0-9]{64}$/u.test(id ?? "")) return true;
+export function hasVeracodeEvidence(data: unknown, id: string): boolean {
+  if (/^veracode-static-policy:[a-f0-9]{64}$/u.test(id)) return true;
   if (!isRecord(data)) return false;
   const row = isRecord(data["row"]) ? data["row"] : data;
   return (
@@ -118,10 +117,10 @@ export function hasVeracodeEvidence(data: unknown, id?: string): boolean {
   );
 }
 
-export function veracodeEvidenceRepository(
+function retainedRepository(
   sourceData: unknown,
-  id?: string,
-  target: ExternalImportTarget = "cloud",
+  id: string,
+  target: ExternalImportTarget,
 ): { url: string; applicationUrl?: string } | undefined {
   const data = isRecord(sourceData) ? sourceData : {};
   const native = hasVeracodeEvidence(data, id);
@@ -139,7 +138,7 @@ export function veracodeEvidenceRepository(
     record(data["row"], "Veracode retained finding"),
     scope,
   );
-  if (id !== undefined && id !== actual)
+  if (id !== actual)
     throw new Error(
       "Veracode source finding ID contradicts the retained native occurrence.",
     );
@@ -154,11 +153,7 @@ export function veracodeReportRepositories(
   const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
   let scope: { applicationUrl: string; repositoryKey: string } | undefined;
   for (const { source_finding_id: id, evidence } of findings) {
-    const retained = veracodeEvidenceRepository(
-      evidence.source_data,
-      id,
-      target,
-    );
+    const retained = retainedRepository(evidence.source_data, id, target);
     if (!retained) continue;
     const repositoryKey = key(retained.url);
     const declared = evidence.details?.repository?.url;
@@ -311,7 +306,8 @@ function readPage(input: unknown) {
   }
   const exactSeverity = severitySelection(query, "severity");
   const minimumSeverity = severitySelection(query, "severity_gte");
-  for (const value of rows) {
+  const violates = query.get("violates_policy");
+  const findings = Array.from(rows, (value) => {
     const row = record(value, "Veracode finding");
     requireApplication(row, scope);
     if (exactSeverity !== null || minimumSeverity !== null) {
@@ -330,16 +326,13 @@ function readPage(input: unknown) {
       throw new Error(
         "Veracode finding contradicts the requested STATIC scan type.",
       );
-    const violates = query.get("violates_policy");
-    if (
-      violates !== null &&
-      row["violates_policy"] !== (violates.toLowerCase() === "true")
-    )
+    if (violates !== null && row["violates_policy"] !== (violates === "true"))
       throw new Error(
         "Veracode finding contradicts the violates_policy selection.",
       );
-  }
-  return { rows, scope, filter, number, size, total, pages };
+    return row;
+  });
+  return { findings, scope, filter, number, size, total, pages };
 }
 
 function severitySelection(query: URLSearchParams, key: string): number | null {
@@ -381,10 +374,9 @@ export function normalizeVeracodeFindings(
       "Supply every Veracode page exactly once with stable totals, selection, origin and application context.",
     );
   const { scope } = first;
-  const rows = pages.flatMap((page) => page.rows);
+  const rows = pages.flatMap((page) => page.findings);
   const seen = new Set<string>();
-  for (const value of rows) {
-    const row = record(value, "Veracode finding");
+  for (const row of rows) {
     const issue = row["issue_id"];
     if (
       typeof row["scan_type"] !== "string" ||
@@ -402,8 +394,7 @@ export function normalizeVeracodeFindings(
   }
   return normalizeRecords(
     rows,
-    (value, id) => {
-      const row = record(value, "Veracode finding");
+    (row, id) => {
       const details = record(
         row["finding_details"],
         "Veracode finding_details",
@@ -451,10 +442,7 @@ export function normalizeVeracodeFindings(
         ),
       };
     },
-    (value) => {
-      const row = record(value, "Veracode finding");
-      return occurrenceId(row, scope);
-    },
+    (row) => occurrenceId(row, scope),
     target,
     "reject",
   );

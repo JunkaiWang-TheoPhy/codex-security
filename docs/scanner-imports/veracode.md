@@ -9,12 +9,10 @@ summaries and the findings converter's SARIF output are not this format.
 
 ## Export unmodified Findings API pages
 
-With read access to the selected application and the Results API, configure
-your vendor-supported HMAC client and the API hostname for your region. The
-example uses HTTPie with the Veracode authentication plugin and `jq`. Choose
-the exact application GUID; a name search that picks the first match can select
-a different application. The command reads existing findings and never starts
-a scan. Treat the output as sensitive and keep it outside the checkout.
+Set `VERACODE_APPLICATION_GUID` to the application you intend to import. Use a
+client with read access to that application and the Results API. This example
+uses HTTPie with the Veracode HMAC plugin and `jq`. Set `api` to the hostname
+for your region. Store the exported pages outside the checkout.
 
 ```bash
 set -eu
@@ -44,12 +42,9 @@ done
 jq -s '.' "$out/pages.stream" > "$out/policy-findings.json"
 ```
 
-Do not substitute a single first page, follow credentialed links on an unknown
-host, or adjust the native total. Keep each page intact. Policy-violating-only,
-open-only, and sandbox selections are not the whole application backlog. When
-exporting a deliberate filter such as `violates_policy=true`, document its
-scope and keep it consistent across pages. Recollect if the backlog changes
-during pagination; arithmetic alone cannot prove a transactional snapshot.
+Collect every page from the configured API host and keep each page intact.
+Document any filter such as `violates_policy=true` and use it on every page.
+If the backlog changes during pagination, collect it again.
 
 ## Preview and import
 

@@ -116,11 +116,11 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  const boundReader = repositoryBoundScanners[options.provider];
-  if (boundReader) {
+  const scanner = repositoryBoundScanners[options.provider];
+  if (scanner) {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: await boundReader(path, url, target),
+      findings: await scanner.read(path, url, target),
       sourceRepositories: [{ url }],
     };
   }

@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import {
   normalizeVeracodeFindings,
   readVeracodeFindings,
-  veracodeEvidenceRepository,
+  veracodeReportRepositories,
 } from "../src/veracode-findings.js";
 import {
   veracodePolicyPage,
@@ -330,6 +330,11 @@ test("optional HAL query templates are not sandbox scope, and discovery links do
 });
 
 test("declared totals cannot hide duplicate issues; malformed IDs do not consume valid occurrences", () => {
+  const sparse = veracodePolicyPage();
+  delete sparse._embedded.findings[0];
+  expect(() => normalize(sparse)).toThrow(
+    "Veracode finding must be an object.",
+  );
   const valid = veracodePolicyRow(3);
   expect(() =>
     normalize(veracodePolicyPage([valid, veracodePolicyRow(2), valid])),
@@ -341,40 +346,39 @@ test("declared totals cannot hide duplicate issues; malformed IDs do not consume
   ]);
 });
 
-test("prepared provenance rejects cross-issue relabeling, even if normalized repository evidence was changed", () => {
+test("prepared provenance binds the repository and native occurrence", () => {
   const [first, second] = normalize(
     veracodePolicyPage([veracodePolicyRow(), veracodePolicyRow(2)]),
   ).findings;
   const data = first!.evidence.source_data;
-  first!.evidence.details!.repository!.url =
-    "https://vcs.example.test/another/repository";
-  expect(
-    veracodeEvidenceRepository(data, first!.source_finding_id)?.url,
-  ).toEqual(repository);
+  const retained = (source_data: typeof data, id = first!.source_finding_id) =>
+    veracodeReportRepositories(
+      [
+        {
+          source_finding_id: id,
+          evidence: { ...first!.evidence, source_data },
+        },
+      ],
+      "cloud",
+    ).get(id);
+  expect(retained(data)?.url).toBe(repository);
+  expect(() => retained(data, second!.source_finding_id)).toThrow(
+    /source finding ID/,
+  );
+  expect(() => retained({ ...data, row: null })).toThrow(/retained finding/);
   expect(() =>
-    veracodeEvidenceRepository(data, second!.source_finding_id),
-  ).toThrow(/source finding ID/);
-  expect(() =>
-    veracodeEvidenceRepository(
-      { ...data, row: null },
-      second!.source_finding_id,
-    ),
-  ).toThrow();
-  expect(() =>
-    veracodeEvidenceRepository({
+    retained({
       ...data,
       row: { ...veracodePolicyRow(), context_guid: otherApp },
     }),
   ).toThrow(/context/);
   expect(
-    veracodeEvidenceRepository(
+    retained(
       { applicationUrl: "https://scanner.example.test/dashboard" },
       "custom-issue-id",
     ),
   ).toBeUndefined();
-  expect(() =>
-    veracodeEvidenceRepository(undefined, second!.source_finding_id),
-  ).toThrow(/source-repository-url/);
+  expect(() => retained(undefined)).toThrow(/source-repository-url/);
   for (const source of [
     "",
     "https://vcs.example.test",
@@ -389,9 +393,9 @@ test("prepared provenance rejects cross-issue relabeling, even if normalized rep
     expect(() =>
       normalizeVeracodeFindings(veracodePolicyPage([]), source),
     ).toThrow(/source-repository-url/);
-    expect(() =>
-      veracodeEvidenceRepository({ ...data, sourceRepositoryUrl: source }),
-    ).toThrow(/source-repository-url/);
+    expect(() => retained({ ...data, sourceRepositoryUrl: source })).toThrow(
+      /source-repository-url/,
+    );
   }
 });
 
