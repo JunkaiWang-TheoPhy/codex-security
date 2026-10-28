@@ -14,6 +14,7 @@ import {
   fakeResult,
   fakeSecurity,
 } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
 import { throwing } from "./support/errors.js";
 
 import { createCliTest } from "./support/cli-run.js";
@@ -74,6 +75,7 @@ describe("CLI diagnostics", () => {
       const repository = join(directory, "repository");
       await mkdir(home, { mode: 0o700 });
       await mkdir(repository);
+      git(repository, "init", "-q");
       await writeFile(
         join(repository, "synthetic.ts"),
         "export const value = 1;\n",
