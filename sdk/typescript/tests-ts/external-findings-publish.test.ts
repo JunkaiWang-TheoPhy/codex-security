@@ -1033,7 +1033,11 @@ test("a pending Inspector request rechecks its project mapping and destination h
 });
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
-  const report = blackDuckBomReport([blackDuckBomRow()]);
+  const row = {
+    ...blackDuckBomRow(),
+    packageUrl: "pkg:composer/example/library@2.0",
+  };
+  const report = blackDuckBomReport([row]);
   const correct = await fixture(report);
   const selected = {
     ...options,
@@ -1047,6 +1051,13 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   expect(correct.posts).toHaveLength(0);
   expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
   expect((await first.publish()).counts.created).toBe(1);
+  expect([...correct.reports.values()][0]!.evidence.packages).toMatchObject([
+    {
+      name: "example/library",
+      ecosystem: "composer",
+      installed_version: "2.0",
+    },
+  ]);
   expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   const foreign = await fixture(report, "https://github.com/example/other");
   await expect(

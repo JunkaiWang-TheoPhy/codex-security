@@ -131,6 +131,28 @@ test("replay keeps native occurrence identity when package coordinates and advis
   expect(finding.evidence.source_data?.["row"]).toEqual(opaque);
 });
 
+test("uses the full generic package path and keeps the origin fallback for an invalid namespace", () => {
+  const row = blackDuckBomRow();
+  const packages = (packageUrl: string) =>
+    normalizeBlackDuckFindings([{ ...row, packageUrl }], repository)
+      .findings[0]!.evidence.packages;
+  expect(packages("pkg:generic/tools/example/library@2.0")).toMatchObject([
+    {
+      name: "tools/example/library",
+      ecosystem: "generic",
+      installed_version: "2.0",
+    },
+  ]);
+  for (const invalid of [
+    "pkg:npm/unscoped/library@2.0",
+    "pkg:maven/extra/group/library@2.0",
+    "pkg:pypi/extra/library@2.0",
+  ])
+    expect(packages(invalid)).toMatchObject([
+      { name: "example:library", ecosystem: "maven", installed_version: "1.0" },
+    ]);
+});
+
 test("adding or omitting an unrelated row and changing collection paging metadata do not version retained evidence", () => {
   const row = blackDuckBomRow();
   const other = blackDuckBomRow("BDSA-2099-0002");

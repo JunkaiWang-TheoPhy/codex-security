@@ -290,12 +290,15 @@ function blackDuckPackages(row: Record<string, unknown>) {
             { name: `${parts[0]}:${name}`, ecosystem, installed_version },
           ];
         if (
-          ecosystem === "npm" &&
-          parts.length === 1 &&
-          parts[0]!.startsWith("@")
+          (ecosystem === "npm" &&
+            parts.length === 1 &&
+            parts[0]!.startsWith("@")) ||
+          ecosystem === "golang" ||
+          ecosystem === "generic" ||
+          (ecosystem === "composer" && parts.length === 1)
         )
           return [
-            { name: `${parts[0]}/${name}`, ecosystem, installed_version },
+            { name: [...parts, name].join("/"), ecosystem, installed_version },
           ];
         if (parts.length === 0 && ecosystem !== "maven")
           return [{ name, ecosystem, installed_version }];
