@@ -953,12 +953,11 @@ export class CodexSecurity {
       reportProgress({ phase: "preparing" });
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
-        { ...scanOptions, outputDir: undefined },
+        scanOptions,
         signal,
+        undefined,
+        true,
       );
-      inputs.outputDir = await validateOutputDir(options.outputDir, true);
-      if (inputs.outputDir !== null)
-        requireOutputOutsideRepository(inputs.protectedRoot, inputs.outputDir);
       const temporaryRoot = await realpath(tmpdir());
       requireOutputOutsideRepository(
         inputs.protectedRoot,
@@ -1142,18 +1141,12 @@ export class CodexSecurity {
         const cost = result.model.costPending
           ? null
           : (result.model.cost ?? null);
-        if (options.maxCostUsd !== undefined) {
-          if (cost === null)
-            throw new CodexSecurityError(
-              "Cannot continue with a cost limit because earlier assessment usage is unavailable.",
-            );
-          if (cost.estimatedUsd > options.maxCostUsd)
-            throw new ScanCostLimitExceededError(
-              options.maxCostUsd,
-              cost,
-              outputDir,
-            );
-        }
+        requireContinuationBudget(
+          cost,
+          cost === null,
+          options.maxCostUsd,
+          outputDir,
+        );
         if (cost !== null) onCost(cost, options.maxCostUsd);
         notifyObserver(options, "onOutputDirReady")(outputDir);
         const currentSource = await sourceSnapshot();
@@ -1163,16 +1156,7 @@ export class CodexSecurity {
           );
         throwIfAborted(signal, outputDir);
         canSave = true;
-        result.diagnostics = result.diagnostics.map(
-          (message) => `Previous attempt: ${message}`,
-        );
-        if (cost === null) {
-          result.model.costUsd = null;
-          delete result.model.cost;
-          result.diagnostics.push(
-            "Earlier assessment usage is unavailable; cumulative estimated cost remains unavailable.",
-          );
-        }
+        recordPreviousAttempt(result, cost === null);
         result.status = "completed";
         reportProgress({ phase: "saving" });
         await saveDependencyScan(result);
@@ -1183,6 +1167,13 @@ export class CodexSecurity {
       try {
         reportProgress({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
+        const verifyAssessmentSource = async () => {
+          const currentSource = await sourceSnapshot();
+          if (currentSource.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
+            );
+        };
         if (!continuing) {
           const inventorySource = await sourceSnapshot();
           if (inventorySource.digest !== source.digest)
@@ -1310,31 +1301,14 @@ export class CodexSecurity {
             throw new CodexSecurityError(
               "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
             );
-          if (options.maxCostUsd !== undefined && previousUsageUnknown)
-            throw new CodexSecurityError(
-              "Cannot continue with a cost limit because earlier assessment usage is unavailable.",
-            );
-          if (
-            previousCost &&
-            options.maxCostUsd !== undefined &&
-            previousCost.estimatedUsd > options.maxCostUsd
-          )
-            throw new ScanCostLimitExceededError(
-              options.maxCostUsd,
-              previousCost,
-              outputDir,
-            );
-          canSave = true;
-          result.diagnostics = result.diagnostics.map(
-            (message) => `Previous attempt: ${message}`,
+          requireContinuationBudget(
+            previousCost,
+            previousUsageUnknown,
+            options.maxCostUsd,
+            outputDir,
           );
-          if (previousUsageUnknown) {
-            result.model.costUsd = null;
-            delete result.model.cost;
-            result.diagnostics.push(
-              "Earlier assessment usage is unavailable; cumulative estimated cost remains unavailable.",
-            );
-          }
+          canSave = true;
+          recordPreviousAttempt(result, previousUsageUnknown);
           for (const assessment of result.assessments)
             if (assessment.status !== "completed") {
               assessment.status = "not_started";
@@ -1598,11 +1572,7 @@ export class CodexSecurity {
                 error: message,
               };
             }
-            const currentSource = await sourceSnapshot();
-            if (currentSource.digest !== source.digest)
-              throw new CodexSecurityError(
-                `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
-              );
+            await verifyAssessmentSource();
             throwIfAborted(signal, outputDir);
             const threadId = result.assessments[index]!.threadId;
             if (threadId !== undefined) assessment.threadId = threadId;
@@ -1627,11 +1597,7 @@ export class CodexSecurity {
           verifyCost(snapshot.cost);
         }
         throwIfAborted(signal, outputDir);
-        const currentSource = await sourceSnapshot();
-        if (currentSource.digest !== source.digest)
-          throw new CodexSecurityError(
-            `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
-          );
+        await verifyAssessmentSource();
         throwIfAborted(signal, outputDir);
         if (
           result.coverage.status === "complete" &&
@@ -6275,6 +6241,34 @@ function validateScanCostLimit(
   if (estimateScanCost(model, { input_tokens: 0, output_tokens: 0 }) === null) {
     throw new CodexSecurityError(
       `A scan cost limit is not available for the configured model: ${model}.`,
+    );
+  }
+}
+
+function requireContinuationBudget(
+  cost: Readonly<ScanCost> | null,
+  usageUnknown: boolean,
+  maxCostUsd: number | undefined,
+  outputDir: string,
+): void {
+  if (maxCostUsd === undefined) return;
+  if (usageUnknown)
+    throw new CodexSecurityError(
+      "Cannot continue with a cost limit because earlier assessment usage is unavailable.",
+    );
+  if (cost !== null && cost.estimatedUsd > maxCostUsd)
+    throw new ScanCostLimitExceededError(maxCostUsd, cost, outputDir);
+}
+
+function recordPreviousAttempt(result: ScaResult, usageUnknown: boolean): void {
+  result.diagnostics = result.diagnostics.map(
+    (message) => `Previous attempt: ${message}`,
+  );
+  if (usageUnknown) {
+    result.model.costUsd = null;
+    delete result.model.cost;
+    result.diagnostics.push(
+      "Earlier assessment usage is unavailable; cumulative estimated cost remains unavailable.",
     );
   }
 }

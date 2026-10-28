@@ -595,19 +595,14 @@ evidence, all advisory matches, static assessments, and a Markdown report outsid
 the repository. Completed runs return `0`, including runs with advisory matches;
 partial or failed runs return `2`. Assessments never remove advisory matches.
 
-Interactive terminals list matched packages, advisory severity, and candidate
-fixed versions before assessment, then show the current package, work counts,
-elapsed time, and time since the last observed event. Final summaries distinguish
-confirmed, not actionable, inconclusive, failed, and unfinished assessments. Use
-`--verbose` for timestamped milestones in redirected logs, and `--show-cost`
-for estimated model cost. Progress goes to stderr; JSON stays on stdout.
+The terminal lists matched packages, advisory severity, and candidate fixes
+before assessment. Progress goes to stderr. Use `--verbose` to record milestones
+in redirected logs or `--show-cost` to display the estimated model cost.
 
-Continue an interrupted assessment by repeating the command with
-`--output-dir` set to its saved artifact directory. Source and assessment
-settings must be unchanged. Completed assessments are retained, matching is
-not repeated, and `--max-cost` includes earlier spend. Use a new directory for
-a fresh scan. The cost limit tracks the short-context estimate; the displayed
-cost range can be higher and is not a billing guarantee.
+To continue an interrupted assessment, run the same command with `--output-dir`
+set to the saved directory. With the same source and assessment settings, the
+scanner reuses the saved advisory matches and completed assessments. `--max-cost` includes the
+short-context estimate from earlier attempts. Use a new directory to start over.
 
 The SDK provides `scanDependencies()`. See the
 [dependency assessment guide](docs/cli.md#dependency-assessment-sca-mvp) for

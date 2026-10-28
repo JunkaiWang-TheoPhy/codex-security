@@ -7448,10 +7448,10 @@ async function runDependencyScan(
               : `${amount(range.min)}–${amount(range.max)}`;
     return diagnosticValue(
       [
-        ...(showCost ? [`est. ${estimate}`] : []),
-        ...(options.maxCostUsd === undefined
-          ? []
-          : [`budget ${amount(options.maxCostUsd)}`]),
+        showCost ? `est. ${estimate}` : undefined,
+        options.maxCostUsd === undefined
+          ? undefined
+          : `budget ${amount(options.maxCostUsd)}`,
         `last event ${seconds}s`,
         summary,
         detail,

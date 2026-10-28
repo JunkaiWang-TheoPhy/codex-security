@@ -126,28 +126,38 @@ export async function dependencyPackageContexts(
 ): Promise<ScaPackageContext[]> {
   const repository = result.repository.path;
   const matched = new Set(result.matches.map((match) => match.componentId));
-  const components = result.components.filter((component) =>
-    matched.has(component.id),
-  );
-  const contexts = components.map((component): ScaPackageContext => ({
-    componentId: component.id,
-    manifestPath: null,
-    projectName: null,
-    private: null,
-    installedPath: null,
-    dependencyChain: [],
-    dependencyGroups: [...component.dependencyGroups],
-    limitations: [],
-  }));
+  const contexts = result.components
+    .filter((component) => matched.has(component.id))
+    .map((component) => {
+      const context: ScaPackageContext = {
+        componentId: component.id,
+        manifestPath: null,
+        projectName: null,
+        private: null,
+        installedPath: null,
+        dependencyChain: [],
+        dependencyGroups: [...component.dependencyGroups],
+        limitations: [],
+      };
+      return { component, context };
+    });
+  function setProject(context: ScaPackageContext, project: Package): void {
+    context.manifestPath = relative(
+      repository,
+      join(project.path, "package.json"),
+    );
+    context.projectName =
+      typeof project.manifest["name"] === "string" ? project.name : null;
+    context.private = project.manifest["private"] === true;
+  }
   const files = new Set(
-    components
-      .filter((component) => component.ecosystem === "npm")
-      .map((component) => component.sourcePath),
+    contexts
+      .filter(({ component }) => component.ecosystem === "npm")
+      .map(({ component }) => component.sourcePath),
   );
   for (const file of files) {
     signal?.throwIfAborted();
     const projectDirectory = dirname(join(repository, file));
-    let project: Package | null = null;
     const projects: Package[] = [];
     const projectPaths = new Set([
       projectDirectory,
@@ -156,29 +166,14 @@ export async function dependencyPackageContexts(
     for (const path of projectPaths) {
       signal?.throwIfAborted();
       const candidate = await readPackage(path, repository, true);
-      if (candidate !== null) {
-        projects.push(candidate);
-        if (path === projectDirectory) project = candidate;
-      }
+      if (candidate !== null) projects.push(candidate);
     }
-    const selected = components.filter(
-      (component) =>
+    const selected = contexts.filter(
+      ({ component }) =>
         component.sourcePath === file && component.ecosystem === "npm",
     );
-    for (const component of selected) {
-      const context = contexts.find(
-        (item) => item.componentId === component.id,
-      )!;
-      if (project !== null && projectPaths.size === 1) {
-        context.manifestPath = relative(
-          repository,
-          join(project.path, "package.json"),
-        );
-        context.projectName =
-          typeof project.manifest["name"] === "string" ? project.name : null;
-        context.private = project.manifest["private"] === true;
-      }
-    }
+    if (projectPaths.size === 1 && projects[0])
+      for (const { context } of selected) setProject(context, projects[0]);
     const queue: {
       pkg: Package;
       project: Package;
@@ -206,10 +201,7 @@ export async function dependencyPackageContexts(
           path: relative(repository, pkg.path) || ".",
         },
       ];
-      for (const component of selected) {
-        const context = contexts.find(
-          (item) => item.componentId === component.id,
-        )!;
+      for (const { component, context } of selected) {
         if (
           chain.length > 0 &&
           context.installedPath === null &&
@@ -217,26 +209,14 @@ export async function dependencyPackageContexts(
           component.version === pkg.version
         ) {
           context.installedPath = relative(repository, pkg.path);
-          context.manifestPath = relative(
-            repository,
-            join(project.path, "package.json"),
-          );
-          context.projectName =
-            typeof project.manifest["name"] === "string" ? project.name : null;
-          context.private = project.manifest["private"] === true;
+          setProject(context, project);
           context.dependencyChain = current;
           context.dependencyGroups = [
             ...new Set([...context.dependencyGroups, ...groups]),
           ];
         }
       }
-      if (
-        selected.every(
-          (component) =>
-            contexts.find((context) => context.componentId === component.id)!
-              .installedPath !== null,
-        )
-      )
+      if (selected.every(({ context }) => context.installedPath !== null))
         break;
       const fields =
         chain.length === 0
@@ -272,10 +252,7 @@ export async function dependencyPackageContexts(
       }
     }
   }
-  for (const context of contexts) {
-    const component = components.find(
-      (item) => item.id === context.componentId,
-    )!;
+  for (const { component, context } of contexts) {
     context.limitations.push(
       context.installedPath === null
         ? "No matching installed source was resolved automatically; use the dependency file and inspect available source before concluding it is unavailable."
@@ -286,5 +263,5 @@ export async function dependencyPackageContexts(
         "Automatic installed-source resolution currently supports npm and pnpm projects.",
       );
   }
-  return contexts;
+  return contexts.map(({ context }) => context);
 }
