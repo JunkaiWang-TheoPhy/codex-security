@@ -378,13 +378,13 @@ test("Trivy distinguishes a differently cased checkout alias from a separate dir
 });
 
 test.each([
-  [foreignUrl, checkoutUrl, undefined],
-  [enterpriseUrl, enterpriseSsh, enterpriseUrl],
+  [foreignUrl, checkoutUrl, undefined, "."],
+  [enterpriseUrl, enterpriseSsh, enterpriseUrl, "."],
   [doubleSuffix, singleSuffix, doubleSuffix, doubleSuffix],
-  [singleSuffix, singleSuffix, doubleSuffix],
+  [singleSuffix, singleSuffix, doubleSuffix, "."],
 ] as const)(
   "normalized Trivy report %s, finding %s and reader hint %s must agree",
-  async (reportUrl, findingUrl, githubSource, artifact = ".") => {
+  async (reportUrl, findingUrl, githubSource, artifact) => {
     await using checkout = await trivyCheckout(undefined, githubSource);
     const plainDirectory = join(dirname(checkout.repository), "unpacked");
     await mkdir(plainDirectory);
