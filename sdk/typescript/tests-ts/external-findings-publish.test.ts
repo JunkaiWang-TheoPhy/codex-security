@@ -1050,7 +1050,19 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   const first = await prepare();
   expect(correct.posts).toHaveLength(0);
   expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
-  expect((await first.publish()).counts.created).toBe(1);
+  first.preview.requests[0]!.items[0]!.evidence.source_data![
+    "sourceRepositoryUrl"
+  ] = "https://git.example.test/example/project";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  expect([...correct.reports.values()][0]!.evidence.source_data).toMatchObject({
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+  });
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts).toHaveLength(2);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
   expect([...correct.reports.values()][0]!.evidence.packages).toMatchObject([
     {
       name: "example/library",
