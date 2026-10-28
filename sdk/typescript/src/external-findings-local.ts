@@ -35,6 +35,7 @@ import {
   expandHome,
   requireOutputOutsideRepositories,
   runWorkbench,
+  sameFile,
   workbenchEnvironment,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
@@ -412,7 +413,10 @@ async function requireMatchingRepository(
   try {
     if (provider === "trivy") {
       const root = resolve(await readGit(["rev-parse", "--show-toplevel"]));
-      if (root !== repository)
+      if (
+        root !== repository &&
+        !(await abortable(() => sameFile(root, repository), signal))
+      )
         throw new CodexSecurityError(
           `Trivy finding paths are checkout-relative. Use --repository ${JSON.stringify(root)} and set --trivy-scan-root to the scanned directory relative to that root.`,
         );

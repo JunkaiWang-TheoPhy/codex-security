@@ -745,14 +745,13 @@ async function preparePublicationInput(
   }
   let requests = saved?.requests;
   if (!requests) {
+    const destinationKey = cloudRepositoryUrlKey(destination.url);
+    const repositoryKey = (url: string) =>
+      options.provider === "trivy"
+        ? trivyRemoteKey(url, destination.url)
+        : cloudRepositoryUrlKey(url);
     for (const url of [reportRepositoryUrl, ...sourceRepositoryUrls]) {
-      if (
-        url &&
-        (options.provider === "trivy"
-          ? trivyRemoteKey(url, destination.url)
-          : cloudRepositoryUrlKey(url)) !==
-          cloudRepositoryUrlKey(destination.url)
-      )
+      if (url && repositoryKey(url) !== destinationKey)
         throw new CodexSecurityError(
           `Source report belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
         );
@@ -775,8 +774,7 @@ async function preparePublicationInput(
       for (const sourceRepository of sourceRepositories)
         if (
           sourceRepository &&
-          cloudRepositoryUrlKey(sourceRepository) !==
-            cloudRepositoryUrlKey(destination.url)
+          repositoryKey(sourceRepository) !== destinationKey
         )
           throw new CodexSecurityError(
             `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,

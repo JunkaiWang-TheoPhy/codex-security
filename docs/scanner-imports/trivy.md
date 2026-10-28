@@ -14,7 +14,7 @@ codex-security publish findings /path/to/reports/trivy.json --to local --reposit
 
 The importer infers `.` only when the report names a remote repository and its Git metadata confirms that repository. Otherwise, set `--trivy-scan-root` to the scanned directory relative to the Git root. Use `.` for the whole checkout or `apps/web` for a subtree on any platform. In this argument, a backslash is a path separator on Windows and a literal filename character on POSIX.
 
-A saved Git origin such as `r:org/repo.git` can name either a Windows drive-relative path or a one-letter SSH server. Supply the scan root if this is the only origin. For a one-letter SSH server, configure the remote as `git@r:org/repo.git` or `ssh://git@r/org/repo.git` so the report identifies a network source.
+A saved Git origin such as `r:org/repo.git` can name either a Windows drive-relative path or a one-letter SSH server. Supply the scan root if this is the only origin. For a one-letter SSH server, configure the remote as `git@r:org/repo.git`. Trivy preserves this spelling in the report.
 
 Use a stable source key per project and branch across commits and scans. Check the source, destination, package locations, and exclusions in the preview. Repeat without `--dry-run` to confirm. Read the stored evidence with `codex-security findings imported "$checkout" --format json`.
 

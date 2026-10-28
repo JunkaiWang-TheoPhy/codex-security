@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
@@ -282,6 +283,25 @@ test("local Trivy paths use the checkout root even without a report remote", asy
   ).toBe(join(nested, "package-lock.json"));
 });
 
+test("Trivy distinguishes a differently cased checkout alias from a separate directory", async () => {
+  await using checkout = await trivyCheckout();
+  const alternate = join(dirname(checkout.repository), "REPOSITORY");
+  const created = await mkdir(alternate, { recursive: true });
+  execFileSync("git", [
+    "-C",
+    checkout.repository,
+    "config",
+    "core.worktree",
+    alternate,
+  ]);
+  const prepared = checkout.fromNormalized(trivyReport(), ".");
+  if (created)
+    await expect(prepared).rejects.toThrow(
+      "Trivy finding paths are checkout-relative",
+    );
+  else expect((await prepared).preview.findings).toHaveLength(1);
+});
+
 const enterpriseUrl = "https://git.example.test/Example/Project";
 
 test.each([
@@ -370,6 +390,8 @@ test.each([
     false,
     false,
   ],
+  [checkoutUrl, "SSH://github.com/example/project", false, false],
+  [checkoutUrl, "HTTPS://github.com/example/project", false, false],
   [checkoutUrl, "git+ssh://git@github.com/example/project.git", false, true],
   [checkoutUrl, "ssh+git://git@github.com/example/project.git", false, true],
   [

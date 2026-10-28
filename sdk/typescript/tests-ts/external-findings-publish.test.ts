@@ -3541,6 +3541,16 @@ test.each([
 
 test.each([
   [
+    "HTTPS://github.com/example/project",
+    "https://github.com/example/project",
+    undefined,
+  ],
+  [
+    "Git+SSH://git@github.com/example/project",
+    "https://github.com/example/project",
+    undefined,
+  ],
+  [
     "http://git.example.test/example/project.git",
     "https://git.example.test/example/project",
     "http://git.example.test/Example/Project",
@@ -3584,9 +3594,10 @@ test.each([
         fixtureData.deps,
       ),
     ).rejects.toThrow("does not match the selected Cloud repository");
+    const { findings } = normalizeTrivyFindings(report, "cloud", ".");
     await expect(
       prepareNormalizedExternalPublication(
-        normalizeTrivyFindings(report, "cloud", "."),
+        { read: findings.length, findings, excluded: [] },
         trivyOptions,
         fixtureData.deps,
       ),

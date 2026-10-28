@@ -60,12 +60,15 @@ function comparableGitHubRemote(
   if (/[?#\t\r\n]/u.test(remote)) return undefined;
   const parsed = parseGitRemote(remote);
   if (!parsed) return undefined;
+  const prefix = `${parsed.url.protocol}//`;
+  // Git dispatches mixed-case schemes to distinct remote helpers.
+  if (!parsed.scpStyle && !remote.startsWith(prefix)) return undefined;
   const host = parsed.url.hostname.toLowerCase();
   const githubUrl =
     cloudRepositoryUrl ??
     (isGitHubCloudHost(host) ? `https://${host}` : undefined);
   if (!parsed.scpStyle && sshProtocols.has(parsed.url.protocol)) {
-    const authorityStart = remote.indexOf("://") + 3;
+    const authorityStart = prefix.length;
     const pathStart = remote.indexOf("/", authorityStart);
     if (pathStart < 0 || remote.slice(pathStart) !== parsed.url.pathname)
       return undefined;
