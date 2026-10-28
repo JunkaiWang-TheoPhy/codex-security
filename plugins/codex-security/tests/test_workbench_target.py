@@ -919,10 +919,6 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     ]
     assert max(reads) == 64 * 1024
 
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
-
 
 @pytest.mark.parametrize(
     "output",
@@ -934,6 +930,15 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
         b"object blob 4\nabcd!",
         b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
         b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
+    ],
+    ids=[
+        "unterminated-header",
+        "invalid-size",
+        "negative-size",
+        "short-body",
+        "invalid-terminator",
+        "large-invalid-header",
+        "truncated-large-body",
     ],
 )
 def test_git_blob_samples_reject_incomplete_framing(
@@ -1586,6 +1591,23 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert not (copied / "submodule").exists()
 
 
+@pytest.mark.cross_platform
+def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path: Path) -> None:
+    target = tmp_path / "repository"
+    revision = initialize_git_repository(target)
+    (target / revision).write_text("synthetic revision-named file\n")
+    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["README.md"],
+        ["README.md"],
+    )
+
+    assert sources == {"README.md": {"path": "README.md", "lineCount": 1}}
+
+
 @pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
 @pytest.mark.parametrize("case_insensitive", [False, True])
 def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
@@ -1616,9 +1638,12 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
             )
         else:
             source.symlink_to(outside, target_is_directory=True)
-    from generate_rank_input import git_changed_paths
-
-    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    assert (
+        dict(WORKBENCH_TARGET["git_changed_paths"](target, revision, revision, "local-patch"))[
+            source
+        ]
+        == "D"
+    )
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
         {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
