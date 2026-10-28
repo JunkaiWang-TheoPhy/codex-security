@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { artifactSourcePath } from "./artifact-io.js";
-import type { JsonObject } from "./types.js";
 import { dirname, join, posix, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   parsePersistedScanDraft,
   readAcceptedWorkerCheckpoints,
+  recordedScanReceiptRefs,
   reconcileAcceptedWorkerHistory,
   readArchivedWorkerCheckpoints,
   workerCoverageReceiptLocation,
@@ -14,6 +14,7 @@ import {
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -33,7 +34,9 @@ import {
 
 const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
 export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
-export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  reducerDefinitions.reductionSubmission,
+);
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
@@ -92,24 +95,17 @@ export async function readDeepReductionSources(
           workerContext,
           result,
         );
+        const history = [...current, ...archived];
         const receiptDigests = new Map<string, string>();
         const receiptSources = archived.length
-          ? [
-              result.coverage,
-              ...current.map(({ input }) => input.coverage),
-              ...archived.map(({ input }) => input.coverage),
-            ]
+          ? [result, ...history.map(({ input }) => input)]
           : [];
         for (const source of receiptSources) {
-          for (const surface of source.surfaces as JsonObject[]) {
+          for (const surface of source.reviewState.surfaces) {
             for (const value of (surface.receiptRefs as string[] | undefined) ??
               []) {
               const ref = posix.normalize(value);
-              const shared =
-                (
-                  (surface.provenance as JsonObject | undefined)
-                    ?.scanReceiptRefs as string[] | undefined
-                )?.includes(ref) ?? false;
+              const shared = recordedScanReceiptRefs(surface).includes(ref);
               const key = JSON.stringify([shared, ref]);
               if (receiptDigests.has(key)) continue;
               try {
@@ -135,18 +131,18 @@ export async function readDeepReductionSources(
             }
           }
         }
-        if (current.length || archived.length)
+        if (history.length)
           result = await reconcileAcceptedWorkerHistory(
             workerContext,
             result,
-            [...current, ...archived],
+            history,
             receiptDigests,
           );
         for (const [index, finding] of result.findings.entries()) {
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage, ...reduction } = result;
+        const { reviewState: coverage, ...reduction } = result;
         const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
         for (const [index, surface] of (
           coverage.surfaces as Record<string, unknown>[]
@@ -201,7 +197,7 @@ export async function readDeepReductionSources(
               const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
               return number === undefined
                 ? []
-                : [{ attempt: Number(number), coverage: input.coverage }];
+                : [{ attempt: Number(number), coverage: input.reviewState }];
             }),
             receiptDigests,
           ),
@@ -236,7 +232,9 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    let reduction = parseDeepReduction(input);
+    const { retainedFindingRefs = [], ...submission } =
+      deepReductionInputSchema.parse(input);
+    let reduction = parseDeepReduction(submission);
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
@@ -255,6 +253,7 @@ export async function recordCodexSecurityDeepReduction(
       reduction,
       inputs.discoveries,
       inputs.previous,
+      retainedFindingRefs,
     );
 
     const persisted = deepReductionForPersistence(reduction);

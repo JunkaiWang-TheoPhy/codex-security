@@ -41,8 +41,7 @@ for (const ref of [
         };
         const draft = workerDraft([], {
           complete: false,
-          coverage: {
-            completeness: "partial",
+          reviewState: {
             surfaces: [
               {
                 label: "Synthetic receipt review",
@@ -59,7 +58,7 @@ for (const ref of [
           await readFile(path.join(output, "result.json"), "utf8"),
         );
         assert.equal(
-          typeof saved.coverage.surfaces[0].id,
+          typeof saved.reviewState.surfaces[0].id,
           "string",
           "typed writer assigns implicit ID before retry snapshot",
         );
@@ -84,17 +83,17 @@ for (const ref of [
           await readFile(path.join(output, "result.json"), "utf8"),
         );
         assert.equal(
-          current.coverage.surfaces.length,
+          current.reviewState.surfaces.length,
           1,
           "supported resumed writer retains one matching normalized surface",
         );
         assert.equal(
-          current.coverage.surfaces[0].id,
-          saved.coverage.surfaces[0].id,
+          current.reviewState.surfaces[0].id,
+          saved.reviewState.surfaces[0].id,
         );
         assert.deepEqual(
-          current.coverage.surfaces[0].receiptRefs,
-          saved.coverage.surfaces[0].receiptRefs,
+          current.reviewState.surfaces[0].receiptRefs,
+          saved.reviewState.surfaces[0].receiptRefs,
         );
         const resultPath = path.join(output, "result.json");
         const resultBytes = await readFile(resultPath);

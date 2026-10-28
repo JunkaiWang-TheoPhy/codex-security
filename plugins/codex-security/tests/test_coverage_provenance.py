@@ -6,9 +6,24 @@ import uuid
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
+from test_deep_scan_successful_publication import add_worker, fail_scan, recover_scan_results
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import write_checkpoint
+from workbench_test_support import interrupt_publication, read_review_state, write_checkpoint
+
+
+def add_discovery_attempt(connection, scan, attempt, *, canonical_output=True):
+    result = add_worker(connection, scan)
+    worker_id = result.parent.name
+    if canonical_output:
+        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = ? WHERE id = ?",
+            (str(result.parent), str(result), attempt, worker_id),
+        )
+    return worker_id, result
 
 
 def publish_review_projection(
@@ -24,7 +39,7 @@ def publish_review_projection(
         "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
         "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
         "findings": {"findings": [] if findings is None else findings},
-        "coverage": coverage,
+        "reviewState": coverage,
     }
     if complete is not None:
         documents["manifest"]["scan"]["complete"] = complete
@@ -47,24 +62,15 @@ def publish_review_projection(
 
 def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, retry):
     saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     with monkeypatch.context() as interrupted:
         if retry:
-
-            def fail_publication(*args, **kwargs):
-                raise OSError("Synthetic publication interruption.")
-
-            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
-        saved.fail_scan(
-            context,
-            connection,
-            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
-        )
-    saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
-    published = (scan.scan_dir / "coverage.json").read_bytes()
-    saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
-    assert (scan.scan_dir / "coverage.json").read_bytes() == published
-    return json.loads(published)
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
+        fail_scan(workbench_api, connection, scan)
+    recover_scan_results(workbench_api, connection, scan)
+    published = read_review_state(connection, scan.scan_dir)
+    recover_scan_results(workbench_api, connection, scan)
+    assert read_review_state(connection, scan.scan_dir) == published
+    return published
 
 
 @pytest.mark.parametrize(
@@ -88,19 +94,7 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
     accepted_attempt,
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
-    worker_id = result.parent.name
-    if with_receipt:
-        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-        output.mkdir(parents=True)
-        result = output / "result.json"
-        with workbench_db:
-            workbench_db.execute(
-                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
-                (str(output), str(result), worker_id),
-            )
-    with workbench_db:
-        workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2, canonical_output=with_receipt)
     surface = {
         "id": "first-surface",
         "label": "First attempt evidence",
@@ -116,7 +110,7 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
         "scanId": scan.scan_id,
         "complete": True,
         "findings": [],
-        "coverage": {
+        "reviewState": {
             **scan.coverage,
             "completeness": "partial",
             "surfaces": [surface],
@@ -209,17 +203,9 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     workbench_api, workbench_db, publication_scan, monkeypatch, receipt_state, retry
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
-    worker_id = result.parent.name
     current_attempt = 3 if "nested" in receipt_state else 2
-    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-    output.mkdir(parents=True)
-    result = output / "result.json"
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = ? WHERE id = ?",
-            (str(output), str(result), current_attempt, worker_id),
-        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, current_attempt)
+    output = result.parent
     archived = output.parent / "attempts" / "attempt-01" / "result.json"
     archived.parent.mkdir(parents=True)
     surface = {
@@ -232,7 +218,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         "scanId": scan.scan_id,
         "complete": True,
         "findings": [],
-        "coverage": {
+        "reviewState": {
             **scan.coverage,
             "completeness": "partial",
             "surfaces": [surface],
@@ -252,7 +238,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     if receipt_state in {"missing-archive", "shared-archive-missing"}:
         (archived.parent / "artifacts/review.txt").unlink()
     if receipt_state.startswith("shared-archive"):
-        draft["coverage"]["surfaces"][0]["receiptRefs"] = [
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
             (archived.parent / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
         ]
         result.write_text(json.dumps(draft))
@@ -261,7 +247,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         current_receipt = output / "artifacts/archived-receipts/attempt-01/artifacts/review.txt"
         current_receipt.parent.mkdir(parents=True)
         current_receipt.write_bytes((archived.parent / "artifacts/review.txt").read_bytes())
-        draft["coverage"]["surfaces"][0]["receiptRefs"] = [
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
             current_receipt.relative_to(output).as_posix()
         ]
         result.write_text(json.dumps(draft))
@@ -280,7 +266,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         nested_receipt.parent.mkdir(parents=True)
         nested_receipt.write_bytes(current_receipt.read_bytes())
         current_receipt = nested_receipt
-        draft["coverage"]["surfaces"][0]["receiptRefs"] = [
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
             current_receipt.relative_to(output).as_posix()
         ]
         result.write_text(json.dumps(draft))
@@ -367,17 +353,9 @@ def test_recovery_preserves_non_surface_occurrence_origins(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
             (scan.scan_id,),
         )
-    result = add_worker(workbench_db, scan)
-    worker_id = result.parent.name
-    if archived:
-        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-        output.mkdir(parents=True)
-        result = output / "result.json"
-        with workbench_db:
-            workbench_db.execute(
-                "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
-                (str(output), str(result), worker_id),
-            )
+    worker_id, result = add_discovery_attempt(
+        workbench_db, scan, 2 if archived else 1, canonical_output=archived
+    )
     row = {
         "deferred": {"reason": "Synthetic repeated remaining review."},
         "explicitExclusions": {"pattern": "vendor/**", "reason": "Review separately."},
@@ -388,7 +366,7 @@ def test_recovery_preserves_non_surface_occurrence_origins(
         "scanId": scan.scan_id,
         "complete": True,
         "findings": [],
-        "coverage": {**scan.coverage, "completeness": "partial", field: [saved_row, saved_row]},
+        "reviewState": {**scan.coverage, "completeness": "partial", field: [saved_row, saved_row]},
     }
     result.write_text(json.dumps(draft))
     originals = {result: result.read_bytes()}
@@ -396,7 +374,7 @@ def test_recovery_preserves_non_surface_occurrence_origins(
         archive = result.parent.parent / "attempts/attempt-1/result.json"
         archive.parent.mkdir(parents=True)
         prior = copy.deepcopy(draft)
-        prior["coverage"][field] = prior["coverage"][field][:1]
+        prior["reviewState"][field] = prior["reviewState"][field][:1]
         archive.write_text(json.dumps(prior))
         originals[archive] = archive.read_bytes()
     projected = []
@@ -460,7 +438,11 @@ def test_selected_parent_projection_consumes_each_occurrence_once(
                 "scanId": scan.scan_id,
                 "complete": True,
                 "findings": [],
-                "coverage": {**scan.coverage, "completeness": "partial", "deferred": [task, task]},
+                "reviewState": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "deferred": [task, task],
+                },
             }
         )
     )
@@ -485,7 +467,7 @@ def test_selected_parent_projection_consumes_each_occurrence_once(
         },
         complete=complete,
     )
-    accepted = json.loads((scan.scan_dir / "coverage.json").read_text())
+    accepted = read_review_state(workbench_db, scan.scan_dir)
     assert accepted["deferred"] == projected
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     retained = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
@@ -530,7 +512,7 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
         "scanId": scan.scan_id,
         "complete": True,
         "findings": [],
-        "coverage": {
+        "reviewState": {
             **scan.coverage,
             "completeness": "partial",
             "surfaces": [surface],
@@ -561,9 +543,9 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
             }
         ]
     elif case == "raw_null":
-        raw["coverage"]["surfaces"] = None
+        raw["reviewState"]["surfaces"] = None
     elif case == "raw_many_null_rows":
-        raw["coverage"]["deferred"] = [None] * 30 + [deferred]
+        raw["reviewState"]["deferred"] = [None] * 30 + [deferred]
     else:
         projected_surface["provenance"]["attempt"] = [] if case.endswith("list") else {}
     result.write_text(json.dumps(raw))
@@ -584,16 +566,7 @@ def test_retained_surface_occurrences_match_each_receipt(
     workbench_api, workbench_db, publication_scan, monkeypatch, retry
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
-    worker_id = result.parent.name
-    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-    output.mkdir(parents=True)
-    result = output / "result.json"
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
-            (str(output), str(result), worker_id),
-        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 1)
     surfaces, projected = [], []
     for name in ("first", "second"):
         receipt = result.parent / "artifacts" / f"{name}.txt"
@@ -620,7 +593,7 @@ def test_retained_surface_occurrences_match_each_receipt(
                 "scanId": scan.scan_id,
                 "complete": True,
                 "findings": [],
-                "coverage": {**scan.coverage, "surfaces": surfaces},
+                "reviewState": {**scan.coverage, "surfaces": surfaces},
             }
         )
     )
@@ -647,16 +620,8 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
     workbench_api, workbench_db, publication_scan, monkeypatch, retry, tampered, local_collision
 ):
     scan = publication_scan()
-    initial = add_worker(workbench_db, scan)
-    worker_id = initial.parent.name
-    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-    output.mkdir(parents=True)
-    result = output / "result.json"
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = 2 WHERE id = ?",
-            (str(output), str(result), worker_id),
-        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    output = result.parent
     ref = "artifacts/01_context/synthetic-evidence.txt"
     shared, local = scan.scan_dir / ref, output / ref
     for receipt, contents in (
@@ -678,7 +643,7 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
         "scanId": scan.scan_id,
         "complete": True,
         "findings": [],
-        "coverage": {
+        "reviewState": {
             **scan.coverage,
             "completeness": "partial",
             "surfaces": [surface],
@@ -697,7 +662,7 @@ def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
     ]
     if tampered:
         # The surface still matches, but the complete payload no longer does.
-        draft["coverage"]["openQuestions"] = ["Additional synthetic review context."]
+        draft["reviewState"]["openQuestions"] = ["Additional synthetic review context."]
     result.write_text(json.dumps(draft))
     parent = {
         **surface,
@@ -751,16 +716,8 @@ def test_third_retry_receipt_repair_preserves_bound_canonical_identity(
     workbench_api, workbench_db, publication_scan, monkeypatch, retry, change
 ):
     scan = publication_scan()
-    initial = add_worker(workbench_db, scan)
-    worker_id = initial.parent.name
-    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
-    output.mkdir(parents=True)
-    result = output / "result.json"
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = 3 WHERE id = ?",
-            (str(output), str(result), worker_id),
-        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    output = result.parent
     original = "artifacts/original.md"
     replacement = "artifacts/replacement.md"
     first_copy = f"artifacts/archived-receipts/attempt-01/{original}"
@@ -821,11 +778,11 @@ def test_third_retry_receipt_repair_preserves_bound_canonical_identity(
                     "reason": "Synthetic new review outcome.",
                 }
             ]
-        draft = {"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": coverage}
+        draft = {"scanId": scan.scan_id, "complete": True, "findings": [], "reviewState": coverage}
         (directory / "result.json").write_text(json.dumps(draft))
         checkpoint = write_checkpoint(directory / "checkpoints", draft)
         (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
-    source = json.loads(result.read_text())["coverage"]["surfaces"][0]
+    source = json.loads(result.read_text())["reviewState"]["surfaces"][0]
     parent_owner = "other-worker" if change == "other-owner" else worker_id
     parent = {
         **source,
