@@ -135,7 +135,7 @@ function remoteRepository(
     ].includes(remote.url.protocol)
   )
     return undefined;
-  const { url, path, scpStyle, username } = remote;
+  const { url, path, scpStyle } = remote;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
@@ -174,7 +174,11 @@ function remoteRepository(
     bound &&
     ssh &&
     (/^~(?:\/|$)/u.test(literal(path)) || (scpStyle && !/^[~/]/u.test(path)));
-  const account = home ? literal(username) : undefined;
+  // Git passes the raw SSH login to the server, including a literal colon.
+  const login = scpStyle
+    ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
+    : /^[^:]+:\/\/([^/]*)@/u.exec(value)?.[1];
+  const account = home ? literal(login ?? url.username) : undefined;
   if (suffix === undefined) return { key: repository, account };
   if (["http:", "https:"].includes(url.protocol)) {
     // Git appends a slash to the URL and omits fragment text from HTTP requests.
