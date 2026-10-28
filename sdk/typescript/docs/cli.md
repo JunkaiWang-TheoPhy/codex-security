@@ -461,7 +461,10 @@ with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
 must be empty and outside the scanned directory and enclosing Git worktree. On
-macOS/Linux, existing directories must be private (`chmod 700`).
+macOS/Linux, existing directories must be private (`chmod 700`). For interactive
+scans, the CLI offers to apply these permissions to a directory you own before
+continuing. Declining exits without starting the scan or changing the directory.
+Non-interactive scans and `--dry-run` require you to set the permissions yourself.
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
 

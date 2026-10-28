@@ -64,6 +64,7 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputDirectoryPermissionsError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
@@ -2164,9 +2165,7 @@ export function requirePrivateOutputDirectory(
 ): void {
   if (process.platform === "win32") return;
   if ((metadata.mode & 0o077) !== 0) {
-    throw new OutputDirectoryError(
-      `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
-    );
+    throw new OutputDirectoryPermissionsError(path);
   }
   if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
     throw new OutputDirectoryError(

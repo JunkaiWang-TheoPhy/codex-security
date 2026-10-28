@@ -62,6 +62,7 @@ import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
 import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
+import { promptForPrivateScanOutput } from "./cli-output-directory.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -1230,6 +1231,7 @@ interface CliDependencies {
   environment: NodeJS.ProcessEnv;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  outputDirectoryPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
@@ -9393,6 +9395,24 @@ async function executeScan(
       resolve(directory, repository),
       directory,
     );
+    if (
+      interactive &&
+      !arguments_.dryRun &&
+      arguments_.resumeScanId === undefined &&
+      errorOutput.isTTY === true &&
+      dependencies.environment["CI"] === undefined &&
+      dependencies.environment["TERM"] !== "dumb"
+    ) {
+      await promptForPrivateScanOutput(
+        {
+          repository: resolveCliPath(directory, repository),
+          outputDir: arguments_.outputDir,
+          archiveExisting: arguments_.archiveExisting,
+          signal: preparationAbortController.signal,
+        },
+        dependencies.outputDirectoryPrompt ?? createTerminalPrompt(errorOutput),
+      );
+    }
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,

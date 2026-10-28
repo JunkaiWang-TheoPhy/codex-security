@@ -51,6 +51,13 @@ export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}
+export class OutputDirectoryPermissionsError extends OutputDirectoryError {
+  public constructor(public readonly directory: string) {
+    super(
+      `Scan output directory must not be accessible to other users (chmod 700): ${directory}`,
+    );
+  }
+}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
   public constructor(
     public readonly directory: string,
