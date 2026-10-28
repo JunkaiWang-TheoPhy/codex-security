@@ -50,6 +50,7 @@ import {
 } from "./support/inspector-import-fixtures.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
+import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
 import {
   veracodePolicyPage,
   veracodePolicyRow,
@@ -1061,8 +1062,15 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
   const prepare = () =>
     prepareExternalPublication(correct.file, selected, correct.deps);
   const first = await prepare();
-  expect(correct.posts).toHaveLength(0);
   expect(first.preview.requests[0]!.source.provider).toBe("veracode");
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalizeVeracodeFindings(page, selected.sourceRepositoryUrl),
+      { ...selected, provider: "wiz" },
+      correct.deps,
+    ),
+  ).rejects.toThrow(/requires the veracode provider/i);
+  expect(correct.posts).toHaveLength(0);
   expect((await first.publish()).counts.created).toBe(1);
   expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   const other = await fixture([page], "https://github.com/example/other");

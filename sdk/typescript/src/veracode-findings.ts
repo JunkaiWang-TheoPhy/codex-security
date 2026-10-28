@@ -1,8 +1,14 @@
 import {
   type ExternalImportTarget,
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -100,38 +106,80 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
   ]);
 }
 
-export function veracodeEvidenceRepositoryUrls(
+export function hasVeracodeEvidence(data: unknown, id?: string): boolean {
+  if (/^veracode-static-policy:[a-f0-9]{64}$/u.test(id ?? "")) return true;
+  if (!isRecord(data)) return false;
+  const row = isRecord(data["row"]) ? data["row"] : data;
+  return (
+    "context_guid" in row &&
+    "context_type" in row &&
+    "scan_type" in row &&
+    "issue_id" in row
+  );
+}
+
+export function veracodeEvidenceRepository(
   sourceData: unknown,
-  expectedSourceFindingId?: string,
-): string[] {
+  id?: string,
+  target: ExternalImportTarget = "cloud",
+): { url: string; applicationUrl?: string } | undefined {
   const data = isRecord(sourceData) ? sourceData : {};
-  const row = data["row"];
-  const recognized =
-    /^veracode-static-policy:[a-f0-9]{64}$/u.test(
-      expectedSourceFindingId ?? "",
-    ) ||
-    (isRecord(row) && "context_guid" in row) ||
-    ("context_guid" in data && "issue_id" in data);
-  if (!("sourceRepositoryUrl" in data) && !recognized) return [];
-  const repository = declaredScannerRepositoryUrl(
+  const native = hasVeracodeEvidence(data, id);
+  if (!native && !("sourceRepositoryUrl" in data)) return;
+  const url = declaredScannerRepositoryUrl(
     data["sourceRepositoryUrl"],
     "Veracode",
+    target,
   );
-  if (recognized) {
-    const scope = applicationScope(
-      halUrl({ href: data["applicationUrl"] }, "retained application"),
+  if (!native) return { url };
+  const scope = applicationScope(
+    halUrl({ href: data["applicationUrl"] }, "retained application"),
+  );
+  const actual = occurrenceId(
+    record(data["row"], "Veracode retained finding"),
+    scope,
+  );
+  if (id !== undefined && id !== actual)
+    throw new Error(
+      "Veracode source finding ID contradicts the retained native occurrence.",
     );
-    const finding = record(row, "Veracode retained finding");
-    const actual = occurrenceId(finding, scope);
-    if (
-      expectedSourceFindingId !== undefined &&
-      expectedSourceFindingId !== actual
-    )
+  return { url, applicationUrl: scope.applicationUrl };
+}
+
+export function veracodeReportRepositories(
+  findings: readonly ExternalFinding[],
+  target: ExternalImportTarget,
+): Map<string, ExternalSourceRepository> {
+  const repositories = new Map<string, ExternalSourceRepository>();
+  const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  let scope: { applicationUrl: string; repositoryKey: string } | undefined;
+  for (const { source_finding_id: id, evidence } of findings) {
+    const retained = veracodeEvidenceRepository(
+      evidence.source_data,
+      id,
+      target,
+    );
+    if (!retained) continue;
+    const repositoryKey = key(retained.url);
+    const declared = evidence.details?.repository?.url;
+    if (declared && key(declared) !== repositoryKey)
       throw new Error(
-        "Veracode source finding ID contradicts the retained native occurrence.",
+        "Retained scanner repository does not match the normalized evidence repository.",
       );
+    if (retained.applicationUrl) {
+      if (
+        scope &&
+        (scope.applicationUrl !== retained.applicationUrl ||
+          scope.repositoryKey !== repositoryKey)
+      )
+        throw new Error(
+          "Veracode occurrences must belong to the same application and source repository.",
+        );
+      scope = { applicationUrl: retained.applicationUrl, repositoryKey };
+    }
+    repositories.set(id, { url: retained.url });
   }
-  return [repository];
+  return repositories;
 }
 
 function selection(
@@ -310,6 +358,7 @@ export function normalizeVeracodeFindings(
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Veracode",
+    target,
   );
   const pages = (Array.isArray(input) ? input : [input])
     .map(readPage)

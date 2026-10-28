@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import {
   normalizeVeracodeFindings,
   readVeracodeFindings,
-  veracodeEvidenceRepositoryUrls,
+  veracodeEvidenceRepository,
 } from "../src/veracode-findings.js";
 import {
   veracodePolicyPage,
@@ -349,31 +349,31 @@ test("prepared provenance rejects cross-issue relabeling, even if normalized rep
   first!.evidence.details!.repository!.url =
     "https://vcs.example.test/another/repository";
   expect(
-    veracodeEvidenceRepositoryUrls(data, first!.source_finding_id),
-  ).toEqual([repository]);
+    veracodeEvidenceRepository(data, first!.source_finding_id)?.url,
+  ).toEqual(repository);
   expect(() =>
-    veracodeEvidenceRepositoryUrls(data, second!.source_finding_id),
+    veracodeEvidenceRepository(data, second!.source_finding_id),
   ).toThrow(/source finding ID/);
   expect(() =>
-    veracodeEvidenceRepositoryUrls(
+    veracodeEvidenceRepository(
       { ...data, row: null },
       second!.source_finding_id,
     ),
   ).toThrow();
   expect(() =>
-    veracodeEvidenceRepositoryUrls({
+    veracodeEvidenceRepository({
       ...data,
       row: { ...veracodePolicyRow(), context_guid: otherApp },
     }),
   ).toThrow(/context/);
   expect(
-    veracodeEvidenceRepositoryUrls(
+    veracodeEvidenceRepository(
       { applicationUrl: "https://scanner.example.test/dashboard" },
       "custom-issue-id",
     ),
-  ).toEqual([]);
+  ).toBeUndefined();
   expect(() =>
-    veracodeEvidenceRepositoryUrls(undefined, second!.source_finding_id),
+    veracodeEvidenceRepository(undefined, second!.source_finding_id),
   ).toThrow(/source-repository-url/);
   for (const source of [
     "",
@@ -390,7 +390,7 @@ test("prepared provenance rejects cross-issue relabeling, even if normalized rep
       normalizeVeracodeFindings(veracodePolicyPage([]), source),
     ).toThrow(/source-repository-url/);
     expect(() =>
-      veracodeEvidenceRepositoryUrls({ ...data, sourceRepositoryUrl: source }),
+      veracodeEvidenceRepository({ ...data, sourceRepositoryUrl: source }),
     ).toThrow(/source-repository-url/);
   }
 });

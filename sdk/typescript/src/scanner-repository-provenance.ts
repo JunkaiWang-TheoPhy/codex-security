@@ -1,5 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
-import { cloudRepositoryUrlKey, repositoryUrlKey, type ExternalImportTarget } from "./external-import-contract.js";
+import { type ExternalImportTarget } from "./external-import-contract.js";
 import type {
   ExternalFinding,
   ExternalSourceRepository,
@@ -15,8 +15,11 @@ import {
   hasBlackDuckEvidence,
   readBlackDuckFindings,
 } from "./blackduck-findings.js";
-
-import { readVeracodeFindings, veracodeEvidenceRepositoryUrls } from "./veracode-findings.js";
+import {
+  hasVeracodeEvidence,
+  readVeracodeFindings,
+  veracodeReportRepositories,
+} from "./veracode-findings.js";
 
 export const repositoryBoundScanners: Partial<
   Record<Provider, typeof readInspectorFindings>
@@ -45,21 +48,20 @@ export function boundScannerRepositories(
     throw new CodexSecurityError(
       "Retained Black Duck evidence requires the blackduck provider.",
     );
+  if (
+    provider !== "veracode" &&
+    findings.some(({ evidence, source_finding_id }) =>
+      hasVeracodeEvidence(evidence.source_data, source_finding_id),
+    )
+  )
+    throw new CodexSecurityError(
+      "Retained Veracode evidence requires the veracode provider.",
+    );
+  if (provider === "veracode")
+    return veracodeReportRepositories(findings, target);
   if (provider === "inspector")
     return inspectorReportRepositories(findings, target);
   if (provider === "blackduck")
     return blackDuckReportRepositories(findings, target);
-  const repositories = new Map<string, ExternalSourceRepository>();
-  if (provider === "veracode") {
-    const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-    for (const { source_finding_id: id, evidence } of findings) {
-      const [url] = veracodeEvidenceRepositoryUrls(evidence.source_data, id);
-      if (!url) continue;
-      const declared = evidence.details?.repository?.url;
-      if (declared && key(declared) !== key(url))
-        throw new CodexSecurityError("Retained scanner repository does not match the normalized evidence repository.");
-      repositories.set(id, { url });
-    }
-  }
-  return repositories;
+  return new Map();
 }

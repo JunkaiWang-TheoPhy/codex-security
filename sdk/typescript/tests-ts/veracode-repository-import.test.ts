@@ -76,6 +76,19 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
     await expect(
       prepareNormalizedLocalImport(relabeled, options, dependencies),
     ).rejects.toThrow(/source finding ID|occurrence/i);
+    const otherApplication = JSON.stringify(
+      veracodePolicyPage([row]),
+    ).replaceAll(row.context_guid, "00000000-0000-4000-8000-000000000002");
+    await writeFile(path, gzipSync(otherApplication));
+    const other = await prepareLocalExternalImport(path, options, dependencies);
+    const findings = [...first.preview.findings, ...other.preview.findings];
+    await expect(
+      prepareNormalizedLocalImport(
+        { ...first.preview, findings, read: findings.length },
+        options,
+        dependencies,
+      ),
+    ).rejects.toThrow(/same application/i);
   } finally {
     await fixture.dispose();
   }
