@@ -28,7 +28,6 @@ import {
 import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import { canonicalJson } from "../src/record.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -947,62 +946,42 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   expect(f.posts).toHaveLength(2);
 });
 
-test("an immutable pre-Inspector Wiz request can recover its receipt with upstream Inspector evidence", async () => {
-  const f = await fixture();
-  const deps = {
-    ...f.deps,
-    environment: { ...f.environment, CODEX_SECURITY_CLOUD_BASE_URL: undefined },
+test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
+  const record = {
+    id: "wiz-vulnerability-1",
+    name: "CVE-2099-1234",
+    detailedName: "example-package",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: { id: "example-asset" },
+    finding: inspectorPackageFinding(),
   };
-  const { preview } = await prepareExternalPublication(f.file, options, deps);
-  const request = preview.requests[0]!;
-  const { source_finding_id, evidence } = request.items[0]!;
-  evidence.source_data = { finding: inspectorPackageFinding() };
-  const findings = [{ source_finding_id, evidence }];
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      { read: 1, excluded: [], findings },
-      options,
-      deps,
-    );
-  await expect(prepare()).rejects.toThrow("requires the inspector provider");
+  const f = await fixture([record]);
+  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const first = await prepare();
+  f.state.loseResponse = true;
+  const error = await first.publish().catch((error: unknown) => error);
+  if (!(error instanceof ExternalPublicationError)) throw error;
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 
-  // The old client posted this request but never persisted its receipt.
-  const key = hash(
-    "sha256",
-    canonicalJson([
-      preview.accountId,
-      preview.destination.id,
-      preview.destination.repo_connector_id,
-      preview.source,
-      findings,
-    ]),
-  );
-  const directory = join(
-    f.environment.CODEX_SECURITY_STATE_DIR,
-    "external-finding-publications",
-  );
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(directory, key + ".pending.json"),
-    JSON.stringify({
-      accountId: preview.accountId,
-      requests: [request],
-    }),
-  );
-  const body = JSON.stringify(request);
-  await f.deps.fetch(preview.cloudApiUrl + "/finding_imports", {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer synthetic-token",
-      "ChatGPT-Account-ID": preview.accountId,
-    },
-    body,
-  });
-  expect(f.reports.has(source_finding_id)).toBe(true);
+  // A pre-Inspector checkpoint can contain the original requests without their input projection.
+  const path = error.result.savedSubmission!;
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  delete saved.inputProjection;
+  await writeFile(path, JSON.stringify(saved));
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([body, body]);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+  record.vendorSeverity = "MEDIUM";
+  await writeFile(f.file, JSON.stringify([record]));
+  const updated = await prepareNormalizedExternalPublication(
+    await readVendorFindings(f.file),
+    options,
+    f.deps,
+  );
+  expect((await updated.publish()).counts.updated).toBe(1);
+  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 });
 
 test.each(["example/project", inspectorRepositoryUrl])(

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
@@ -90,6 +91,16 @@ function typedRow(url: string): ExternalFinding {
 const home = "host.test/~/project";
 const ssh = "ssh://git@github.com/example/project";
 const bindings: [string, string, string?][] = [
+  [
+    "https://trusted.test\\@other.test/../team/repo",
+    "https://trusted.test/team/repo",
+  ],
+  ["https://host.test/x/%2e%2e/team/repo", "https://host.test/team/repo"],
+  [
+    "https://host.test/previous/../team/./repo",
+    "https://host.test/team/other",
+    "https://host.test/team/repo",
+  ],
   [" ssh://host.test/team/repo", "https://host.test/team/repo"],
   ["ssh://bad@host.test:invalid/team/repo", "https://host.test/team/repo"],
   ["ssh://other.test%2Fx@github.com/team/repo", "https://github.com/team/repo"],
@@ -289,13 +300,25 @@ test("normalized imports bind mixed projects, native evidence and maps to their 
     ),
   ).rejects.toThrow("more than one repository project");
 
-  await expect(
-    prepareNormalizedLocalImport(
-      normalized([row, typedRow("https://github.com/fork/project")]),
-      f.options,
-      f.deps,
-    ),
-  ).rejects.toThrow("does not match a configured remote");
+  const forkUrl = project.details.codeRepository.projectName;
+  execFileSync("git", [
+    "-C",
+    f.options.repository,
+    "remote",
+    "add",
+    "fork",
+    forkUrl,
+  ]);
+  const plain = await mkdtemp(join(dirname(f.path), "plain-"));
+  for (const repository of [plain, f.options.repository]) {
+    await expect(
+      prepareNormalizedLocalImport(
+        normalized([row, typedRow(forkUrl)]),
+        { ...f.options, repository },
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the retained Inspector repository");
+  }
   row.evidence.source_data = {
     ...native,
     resources: [{ type: "AWS_EC2_INSTANCE", id: "i-example" }],

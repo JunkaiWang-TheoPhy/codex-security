@@ -127,6 +127,7 @@ function remoteRepository(
     ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
     : null;
   const authority = transport?.[1];
+  const http = bound && /^https?:\/\//iu.test(value.trimStart());
   // Git decodes the authority before locating its path. An encoded delimiter
   // cannot prove a match to another spelling through WHATWG URL's hostname.
   if (
@@ -139,7 +140,7 @@ function remoteRepository(
   try {
     remote = parseGitRemote(value);
   } catch {
-    return transport ? { key: value } : undefined;
+    return transport || http ? { key: "\0" + value } : undefined;
   }
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
@@ -162,6 +163,14 @@ function remoteRepository(
   if (!bound) return { key: key(origin + path) };
 
   if (!ssh && url.protocol !== "git:") {
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      // libcurl and WHATWG differ on backslashes and encoded dot segments.
+      const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
+        value,
+      );
+      if (!raw || /\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+        return { key: "\0" + value };
+    }
     const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
     // HTTP sends the query and omits fragment text from repository requests.
     if (suffix && !["http:", "https:"].includes(url.protocol))
@@ -606,6 +615,16 @@ export async function prepareLocalImport(
     "local",
     options.inspectorProjectMap,
   );
+  if (inspector) {
+    const platform = inspector.platform ?? options.provider;
+    const native = remoteRepository(inspector.url, platform, true);
+    for (const url of sources.keys()) {
+      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
+        );
+    }
+  }
   for (const source of [
     ...(inspector ? [inspector] : []),
     ...(dependencies.sourceRepositories ?? []),

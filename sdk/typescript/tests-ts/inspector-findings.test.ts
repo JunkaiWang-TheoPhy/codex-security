@@ -149,6 +149,24 @@ test.each([
   },
 );
 
+test("retains separate package version components without projecting a partial installed version", () => {
+  const finding = inspectorPackageFinding();
+  const item = finding.packageVulnerabilityDetails.vulnerablePackages[0]!;
+  const fixed = "1:1.2.3-5.el9";
+  Object.assign(item, {
+    packageManager: "OS",
+    epoch: 1,
+    version: "1.2.3",
+    release: "4.el9",
+    fixedInVersion: fixed,
+  });
+  const { evidence } = normalize([finding]).findings[0]!;
+  expect(evidence.packages).toMatchObject([
+    { installed_version: null, fixed_versions: [fixed] },
+  ]);
+  expect(evidence.source_data?.["finding"]).toEqual(finding);
+});
+
 test("distinguishes dependency manifests from source files and unsafe paths", () => {
   const finding = inspectorPackageFinding();
   const pkg = { name: "synthetic", version: "1.2.x" };
@@ -657,6 +675,29 @@ test.each(["cloud", "local"] as const)(
     ).toThrow();
   },
 );
+
+test("distinguishes a Wiz occurrence containing Inspector evidence from the Inspector occurrence itself", () => {
+  const native = inspectorPackageFinding();
+  const row = normalize([native]).findings[0]!;
+  const wiz = (id: string, data: Record<string, unknown>) =>
+    inspectorReportRepository(
+      "wiz",
+      [
+        {
+          source_finding_id: id,
+          evidence: { ...row.evidence, source_data: data },
+        },
+      ],
+      "cloud",
+    );
+
+  expect(wiz("wiz-issue", { finding: native })).toBeUndefined();
+  expect(wiz(codeFinding().findingArn, { finding: native })).toBeUndefined();
+  expect(wiz(native.findingArn, {})).toBeUndefined();
+  expect(() => wiz("wiz-issue", row.evidence.source_data!)).toThrow();
+  for (const data of [native, { finding: native }])
+    expect(() => wiz(native.findingArn, data)).toThrow();
+});
 
 test("reads plain and gzip JSON with a snapshot of the supplied map", async () => {
   const directory = await mkdtemp(join(tmpdir(), "synthetic-inspector-"));

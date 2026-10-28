@@ -294,6 +294,8 @@ const vulnerablePackage = z.object({
   name: nonempty,
   version: nonempty,
   packageManager: optionalValue,
+  epoch: optionalValue,
+  release: optionalValue,
   fixedInVersion: optionalValue,
   filePath: optionalValue,
   sourceLayerHash: absent,
@@ -355,21 +357,25 @@ function selectedFinding(value: unknown) {
   return { native, pkg, code };
 }
 
-function isInspectorFinding(value: unknown): boolean {
+function isInspectorFinding(value: unknown, occurrenceId?: string): boolean {
   return (
     isRecord(value) &&
     typeof value["findingArn"] === "string" &&
     findingArn.test(value["findingArn"]) &&
+    (occurrenceId === undefined || value["findingArn"] === occurrenceId) &&
     Array.isArray(value["resources"])
   );
 }
 
-function hasInspectorEvidence(sourceData: unknown): boolean {
+function hasInspectorEvidence(
+  sourceData: unknown,
+  occurrenceId?: string,
+): boolean {
   return (
     isRecord(sourceData) &&
     (sourceData["format"] === format ||
-      isInspectorFinding(sourceData["finding"]) ||
-      isInspectorFinding(sourceData))
+      isInspectorFinding(sourceData["finding"], occurrenceId) ||
+      isInspectorFinding(sourceData, occurrenceId))
   );
 }
 
@@ -381,8 +387,8 @@ export function inspectorReportRepository(
 ): (ExternalSourceRepository & { findingId: string }) | undefined {
   if (provider !== "inspector") {
     if (
-      findings.some(({ evidence }) =>
-        hasInspectorEvidence(evidence.source_data),
+      findings.some(({ evidence, source_finding_id }) =>
+        hasInspectorEvidence(evidence.source_data, source_finding_id),
       )
     )
       throw new CodexSecurityError(
@@ -587,10 +593,13 @@ function evidence(
     const version = (value: unknown) =>
       concreteVersion(value, ecosystem, item.packageManager === "OS");
     const fixed = version(item.fixedInVersion);
+    const splitVersion =
+      item.packageManager === "OS" &&
+      (item.epoch != null || item.release != null);
     return {
       name: item.name,
       ecosystem,
-      installed_version: version(item.version),
+      installed_version: splitVersion ? null : version(item.version),
       manifest_path: manifestPath(path),
       fixed_versions: fixed ? [fixed] : [],
     };

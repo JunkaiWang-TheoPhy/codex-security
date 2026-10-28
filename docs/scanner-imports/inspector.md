@@ -57,9 +57,10 @@ Omitted findings and empty exports leave earlier occurrences in place.
 For Cloud, use `--to cloud --repository CLOUD_REPOSITORY_ID` on a deployment
 that accepts the Inspector provider. Cloud checks the authorized GitHub
 destination. Custom GitHub hosts need a native GitHub provider hint.
-Self-managed GitLab is supported locally. Use the verified Git URL’s path
-casing on custom hosts. For home-relative SSH paths, verify the account when
-a URL omits the login.
+Self-managed GitLab is supported locally. If the GitLab web URL includes an
+installation prefix that the SSH clone URL omits, use the verified HTTPS clone
+URL as a checkout remote. Use the verified URL’s path casing on custom hosts.
+For home-relative SSH paths, verify the account when a URL omits the login.
 
 Supply the same verified ARN and URL when resuming a Cloud submission prepared
 with that binding. SDK callers can pass verified ARN-to-URL pairs through the
