@@ -181,7 +181,7 @@ function remoteRepository(
     ssh &&
     login &&
     (/^\/?~(?:\/|$)/u.test(literal(sshPath)) ||
-      (scpStyle && !/^(?:[~/]|[A-Za-z]:[\\/])/u.test(path)))
+      (scpStyle && !/^[~/]/u.test(path)))
       ? literal(login)
       : undefined;
   if (suffix === undefined) return { key: repository, account };

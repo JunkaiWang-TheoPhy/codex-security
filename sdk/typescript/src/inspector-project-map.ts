@@ -126,6 +126,11 @@ export async function readInspectorProjectMap(
       workTree,
     ]) {
       if (!value) continue;
+      // POSIX environment bytes can decode to a different existing directory.
+      if (sep === "/" && value.includes("\uFFFD"))
+        throw new CodexSecurityError(
+          "Cloud Inspector Git roots require an unambiguous UTF-8 path.",
+        );
       let root = resolve(directory, value);
       if (sep === "/" && value.split("/").includes("..")) {
         // Git follows symlinks and cancels a regular file before "..".

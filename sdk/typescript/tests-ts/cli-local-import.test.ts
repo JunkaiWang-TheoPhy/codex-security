@@ -384,6 +384,13 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
     const rawAlias = join(f.root, "byte-alias");
     await symlink(Buffer.concat([rawName, Buffer.from("/maps")]), rawAlias);
     expect(await run(rawAlias)).toContain("UTF-8 symlink targets");
+    const environment = {
+      ...f.deps.environment,
+      GIT_WORK_TREE: rawName.toString(),
+    };
+    expect(await run(f.root, f.root, f.file, environment)).toContain(
+      "unambiguous UTF-8",
+    );
   }
   expect(await run(config)).toContain("outside all Git checkouts");
   expect(await run(config, config, f.file)).toContain(
