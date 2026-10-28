@@ -453,3 +453,7 @@ export function snykPluginFindings(bundle: unknown): ExternalFindings {
 export function reviewNativeEvents(input: SecurityEventInput) {
   return reviewSecurityEvents(input);
 }
+
+export function reviewCefRecords(records: string[]) {
+  return reviewSecurityEvents(records);
+}
