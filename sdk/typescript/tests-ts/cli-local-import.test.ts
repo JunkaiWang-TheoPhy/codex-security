@@ -409,13 +409,17 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
     ...f.deps.environment,
     GIT_DIR: join(f.repository, ".git"),
     GIT_WORK_TREE: ".",
+    GIT_IMPLICIT_WORK_TREE: "1",
   };
   execFileSync("git", ["add", "projects.json"], {
     cwd: workTree,
-    env: selected,
+    env: { ...selected, GIT_INDEX_FILE: join(f.root, "markerless.index") },
   });
   for (const environment of [
     selected,
+    ...(process.platform === "win32"
+      ? []
+      : [{ ...selected, GIT_WORK_TREE: "projects.json/.." }]),
     { ...selected, GIT_WORK_TREE: undefined },
   ]) {
     expect(await run(workTree, workTree, f.file, environment)).toContain(
@@ -425,6 +429,21 @@ test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async (
       "CODEX_SECURITY_CLOUD_BASE_URL",
     );
   }
+  const noWorkTree = {
+    ...selected,
+    GIT_WORK_TREE: undefined,
+    GIT_IMPLICIT_WORK_TREE: "0",
+  };
+  expect(await run(workTree, workTree, f.file, noWorkTree)).toContain(
+    "CODEX_SECURITY_CLOUD_BASE_URL",
+  );
+  const admin = join(f.root, "admin");
+  await mkdir(admin);
+  await writeFile(join(admin, "projects.json"), mapping);
+  for (const name of ["GIT_DIR", "GIT_COMMON_DIR"])
+    expect(
+      await run(admin, workTree, f.file, { ...selected, [name]: admin }),
+    ).toContain("outside all Git checkouts");
   const bare = join(f.root, "bare");
   execFileSync("git", ["init", "--quiet", "--bare", bare]);
   await writeFile(join(bare, "projects.json"), mapping);

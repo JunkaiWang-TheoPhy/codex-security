@@ -73,6 +73,7 @@ const repositoryBindings: [string, string, string?][] = [
     "ssh://bob@git.example.test/~/project",
   ],
   ["alice@git.example.test:team/project", "bob@git.example.test:team/project"],
+  ["alice@host.test:K:/shared/project", "bob@host.test:K:/shared/project"],
   [
     "alice@host.test:D:/shared/project",
     "bob@host.test:D:/shared/other",

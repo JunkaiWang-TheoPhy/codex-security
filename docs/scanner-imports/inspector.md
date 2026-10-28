@@ -48,9 +48,11 @@ control outside all Git checkouts. The CLI checks the map path, including its
 directory links, for checkout markers and recognizable Git metadata. It
 recognizes headless common storage when a `config` file accompanies the
 `objects` and `refs` directories. Links in those positions also count.
-The CLI also checks `GIT_WORK_TREE`. When only `GIT_DIR` is set, it protects
-the invocation directory. Set `GIT_WORK_TREE` explicitly if Git configuration
-selects a markerless checkout elsewhere.
+The CLI also checks `GIT_DIR`, `GIT_COMMON_DIR`, and `GIT_WORK_TREE`.
+With `GIT_DIR` alone it protects the invocation directory unless
+`GIT_IMPLICIT_WORK_TREE=0`. Set `GIT_WORK_TREE` explicitly for a markerless
+checkout configured elsewhere. Keep the map off bind mounts of checkout
+subdirectories, whose parent checkout may be invisible at the mount point.
 
 ```json
 {

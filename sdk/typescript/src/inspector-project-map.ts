@@ -1,3 +1,4 @@
+import type { BigIntStats } from "node:fs";
 import { isUtf8 } from "node:buffer";
 import { lstat, readlink, realpath, stat } from "node:fs/promises";
 import {
@@ -18,13 +19,21 @@ import { readRegularInputBytes } from "./prompt-files.js";
 import { isRecord } from "./record.js";
 import {
   gitMarkerRoot,
+  nullIfMissingFile,
   nullIfMissingPath,
   relativePathIsOutside,
 } from "./targets.js";
 
+const CLOUD_MAP_LOCATION =
+  "--inspector-project-map for Cloud must be outside all Git checkouts and recognizable Git metadata directories.";
+
 // A directory link can enter a checkout below its root, and a second link can
 // leave it before the final report or map is reached.
-async function directoriesAlongPath(input: string, signal: AbortSignal) {
+async function directoriesAlongPath(
+  input: string,
+  signal: AbortSignal,
+  gitRoots: readonly BigIntStats[] = [],
+) {
   const paths = new Map([[input, input]]);
   const directories = new Set<string>();
   const visited = new Set<string>();
@@ -48,7 +57,12 @@ async function directoriesAlongPath(input: string, signal: AbortSignal) {
       // A trailing separator makes lstat follow the link. Keep ".." intact.
       const entry = format(parse(ancestor));
       signal.throwIfAborted();
-      if (!(await lstat(entry)).isSymbolicLink()) continue;
+      const node = await lstat(entry, { bigint: true });
+      if (
+        gitRoots.some((root) => root.dev === node.dev && root.ino === node.ino)
+      )
+        throw new CodexSecurityError(CLOUD_MAP_LOCATION);
+      if (!node.isSymbolicLink()) continue;
       const parent = await realpath(parentDirectory(entry));
       directories.add(parent);
       const bytes = await readlink(entry, { encoding: "buffer" });
@@ -96,31 +110,46 @@ export async function readInspectorProjectMap(
   environment: NodeJS.ProcessEnv,
 ): Promise<ReadonlyMap<string, string>> {
   const metadata = await lstat(path, { bigint: true });
-  const mapDirectories = await directoriesAlongPath(path, signal);
+  const gitRoots: BigIntStats[] = [];
   if (localRepository === undefined) {
-    const selectedWorkTree =
+    const gitDir = environmentEntry(environment, "GIT_DIR");
+    const implicit = !["", "0", "false", "no", "off"].includes(
+      environmentEntry(environment, "GIT_IMPLICIT_WORK_TREE")?.toLowerCase() ??
+        "true",
+    );
+    const workTree =
       environmentEntry(environment, "GIT_WORK_TREE") ??
-      (environmentEntry(environment, "GIT_DIR") ? directory : undefined);
-    // POSIX Git follows links before ".." and treats "~" literally.
-    const workTree = selectedWorkTree
-      ? await realpath(
-          sep === "\\"
-            ? resolve(directory, selectedWorkTree)
-            : isAbsolute(selectedWorkTree)
-              ? selectedWorkTree
-              : `${directory}/${selectedWorkTree}`,
-        ).catch(nullIfMissingPath)
-      : null;
+      (gitDir && implicit ? directory : undefined);
+    for (const value of [
+      gitDir,
+      environmentEntry(environment, "GIT_COMMON_DIR"),
+      workTree,
+    ]) {
+      if (!value) continue;
+      let root = resolve(directory, value);
+      if (sep === "/" && value.split("/").includes("..")) {
+        // Git follows symlinks and cancels a regular file before "..".
+        root = isAbsolute(value) ? "/" : directory;
+        for (const component of value.split("/"))
+          root =
+            component === ".."
+              ? parentDirectory(await realpath(root))
+              : join(root, component);
+      }
+      const explicit = await stat(root, { bigint: true }).catch(
+        nullIfMissingFile,
+      );
+      if (explicit) gitRoots.push(explicit);
+    }
+  }
+  const mapDirectories = await directoriesAlongPath(path, signal, gitRoots);
+  if (localRepository === undefined) {
     for (const directory of mapDirectories) {
       if (
-        (workTree !== null &&
-          !relativePathIsOutside(relative(workTree, directory))) ||
         (await gitMarkerRoot(directory, signal, "nearest")) !== null ||
         (await bareMetadataRoots(directory, signal, true)).length > 0
       )
-        throw new CodexSecurityError(
-          "--inspector-project-map for Cloud must be outside all Git checkouts and recognizable Git metadata directories.",
-        );
+        throw new CodexSecurityError(CLOUD_MAP_LOCATION);
     }
   }
   const protectedRoots = new Set<string>();
