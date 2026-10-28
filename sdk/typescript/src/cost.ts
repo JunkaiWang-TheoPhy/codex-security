@@ -169,6 +169,16 @@ interface InventoryEvidence extends OrderedProgress {
   afterLive?: StreamedProgressItem;
 }
 
+function savedProgress(source: SessionProgress) {
+  return {
+    progress: source.update,
+    position: source.position,
+    markerIndex: source.markerIndex,
+    order: source.order ?? 0,
+    source,
+  };
+}
+
 // A live parent keeps authority over an unresolved saved prefix. Once an exact
 // anchor bounds that prefix, source order also governs admission and display.
 // Independent workers and legacy projections still use observation order.
@@ -548,13 +558,8 @@ export class ScanCostTracker {
       undefined,
       live,
     );
-    if (live.position !== null) {
-      if (this.#afterParentFrontier(live.position, marker.index))
-        this.#parentFrontier = {
-          position: live.position,
-          markerIndex: marker.index,
-        };
-    }
+    if (live.position !== null)
+      this.#advanceParentFrontier(live.position, marker.index);
   }
 
   #rememberParentFact(candidate: OrderedProgress): void {
@@ -1006,16 +1011,14 @@ export class ScanCostTracker {
         index++
       ) {
         const marker = live.markers[index]!;
-        marker.scopeFilesTotal = scopeAt(
-          {
-            progress: marker.progress,
-            position: completion.position,
-            markerIndex: marker.index,
-            order: marker.order,
-            live,
-          },
-          completion,
-        );
+        const candidate = {
+          progress: marker.progress,
+          position: completion.position,
+          markerIndex: marker.index,
+          order: marker.order,
+          live,
+        };
+        marker.scopeFilesTotal = scopeAt(candidate, completion);
         if (isInventoryProgress(marker.progress)) {
           if (
             this.#inventoryPrecedesReview(
@@ -1024,13 +1027,7 @@ export class ScanCostTracker {
               live,
             )
           )
-            recordInventory({
-              progress: marker.progress,
-              position: completion.position,
-              markerIndex: marker.index,
-              order: marker.order,
-              live,
-            });
+            recordInventory(candidate);
         } else
           this.#recordParentBoundary(
             marker.progress,
@@ -1055,15 +1052,10 @@ export class ScanCostTracker {
           : undefined;
       const projected = saved.projection?.markers[saved.markerIndex];
       if (saved.duplicate) continue;
-      const progress = saved.update;
+      const candidate = savedProgress(saved);
+      const progress = candidate.progress;
       saved.scopeFilesTotal = scopeAt(
-        {
-          progress,
-          position: saved.position,
-          markerIndex: saved.markerIndex,
-          order: saved.order ?? 0,
-          source: saved,
-        },
+        candidate,
         completion?.position === saved.position ? completion : undefined,
       );
       const exact = completion?.projection?.position === saved.position;
@@ -1089,24 +1081,11 @@ export class ScanCostTracker {
           )
         ) {
           if (exact || nativeOccurrence || !this.#unboundParentCopy(saved))
-            recordInventory({
-              progress,
-              position: saved.position,
-              markerIndex: saved.markerIndex,
-              order: saved.order ?? 0,
-              source: saved,
-            });
+            recordInventory(candidate);
           else if (
             authority !== undefined &&
             progressKey(progress) === progressKey(authority.progress) &&
-            (compareSourceOrder(
-              {
-                position: saved.position,
-                markerIndex: saved.markerIndex,
-                order: saved.order ?? 0,
-              },
-              authority,
-            ) ?? 0) >= 0
+            (compareSourceOrder(candidate, authority) ?? 0) >= 0
           ) {
             // A duplicate can restate the admitted legacy scope without proving
             // an occurrence or becoming eligible for another notification.
@@ -1229,6 +1208,11 @@ export class ScanCostTracker {
       (position === this.#parentFrontier.position &&
         index > this.#parentFrontier.markerIndex)
     );
+  }
+
+  #advanceParentFrontier(position: number, markerIndex: number): void {
+    if (this.#afterParentFrontier(position, markerIndex))
+      this.#parentFrontier = { position, markerIndex };
   }
 
   #unresolvedParentCommand(): UnresolvedParentCommand | undefined {
@@ -2019,8 +2003,7 @@ export class ScanCostTracker {
       ) {
         corrected = candidate;
       }
-      if (this.#afterParentFrontier(position, marker.index))
-        this.#parentFrontier = { position, markerIndex: marker.index };
+      this.#advanceParentFrontier(position, marker.index);
     }
     if (witnessParent !== this.#acceptedParent)
       inventoryWitness = this.#parentInventoryWitness();
@@ -2068,11 +2051,7 @@ export class ScanCostTracker {
     }
     if (eligible !== null) {
       this.#parentProgress = eligible;
-      if (this.#afterParentFrontier(eligible.position!, eligible.markerIndex!))
-        this.#parentFrontier = {
-          position: eligible.position!,
-          markerIndex: eligible.markerIndex!,
-        };
+      this.#advanceParentFrontier(eligible.position!, eligible.markerIndex!);
       this.#recordParentBoundary(
         eligible.progress,
         eligible.position!,
@@ -2419,13 +2398,7 @@ export class ScanCostTracker {
         this.#parentSession = session;
         for (const saved of session.progress)
           if (saved.order !== undefined && !saved.duplicate)
-            this.#rememberParentFact({
-              progress: saved.update,
-              order: saved.order,
-              position: saved.position,
-              markerIndex: saved.markerIndex,
-              source: saved,
-            });
+            this.#rememberParentFact(savedProgress(saved));
         this.#matchParentCompletions();
         inventoryWitness = this.#reconcileParentProgress();
         unresolvedCommand = this.#unresolvedParentCommand();
@@ -2560,13 +2533,7 @@ export class ScanCostTracker {
     )
       return "retained";
     const authority = this.#acceptedInventory();
-    const source = {
-      progress: saved.update,
-      position: saved.position,
-      markerIndex: saved.markerIndex,
-      order: saved.order ?? 0,
-      source: saved,
-    };
+    const source = savedProgress(saved);
     // A matched review can order an inventory after a compatible truncated
     // prefix without identifying the live command's occurrence. That proof
     // applies to its own inventory, not a newer independent live authority.
@@ -2646,14 +2613,10 @@ export class ScanCostTracker {
         !saved.duplicate &&
         !inventoryMarker &&
         !this.#unboundParentCopy(saved)
-      )
-        this.#rememberParentFact({
-          progress,
-          order: (saved.order ??= ++this.#progressOrder),
-          position: saved.position,
-          markerIndex: saved.markerIndex,
-          source: saved,
-        });
+      ) {
+        saved.order ??= ++this.#progressOrder;
+        this.#rememberParentFact(savedProgress(saved));
+      }
       if (
         unresolvedCommandState &&
         saved.position < (command?.after ?? Infinity) &&
@@ -2673,15 +2636,8 @@ export class ScanCostTracker {
       )
         continue;
       if (saved.duplicate) {
-        if (
-          parent &&
-          saved.completion &&
-          this.#afterParentFrontier(saved.position, saved.markerIndex)
-        )
-          this.#parentFrontier = {
-            position: saved.position,
-            markerIndex: saved.markerIndex,
-          };
+        if (parent && saved.completion)
+          this.#advanceParentFrontier(saved.position, saved.markerIndex);
         continue;
       }
       const expectedFilesTotal = this.#expectedFilesTotal;
@@ -2741,18 +2697,8 @@ export class ScanCostTracker {
           )
             this.#parentProgress = candidate;
         }
-        const position = {
-          position: saved.position,
-          markerIndex: saved.markerIndex,
-        };
-        if (this.#afterParentFrontier(saved.position, saved.markerIndex))
-          this.#parentFrontier = position;
-        this.#inventoryFrontier = {
-          ...position,
-          order,
-          progress,
-          source: saved,
-        };
+        this.#advanceParentFrontier(saved.position, saved.markerIndex);
+        this.#inventoryFrontier = savedProgress(saved);
         this.#projectParentInventory();
         continue;
       }
@@ -2826,20 +2772,10 @@ export class ScanCostTracker {
         // An original multipart response can expose progress absent from its
         // concatenated native projection. Its admitted source position still
         // prevents an older live completion from replaying over that progress.
-        if (this.#afterParentFrontier(saved.position, saved.markerIndex))
-          this.#parentFrontier = {
-            position: saved.position,
-            markerIndex: saved.markerIndex,
-          };
+        this.#advanceParentFrontier(saved.position, saved.markerIndex);
         if (parentInventory) {
           if (newerProgress === null) saved.inventoryAdmitted = true;
-          this.#inventoryFrontier = {
-            position: saved.position,
-            markerIndex: saved.markerIndex,
-            order,
-            progress,
-            source: saved,
-          };
+          this.#inventoryFrontier = savedProgress(saved);
         }
       }
       this.#highestFilesCompleted = update.filesCompleted;
@@ -2849,14 +2785,7 @@ export class ScanCostTracker {
           : {
               update,
               owner: parent ? "parent" : "worker",
-              order,
-              ...(parent
-                ? {
-                    position: saved.position,
-                    markerIndex: saved.markerIndex,
-                    source: saved,
-                  }
-                : {}),
+              ...(parent ? provenance : { order }),
             };
       // Distinct equal-valued receipts still advance source ownership/order.
       if (displayed !== null && progressKey(displayed.update) === key) continue;
