@@ -42,6 +42,12 @@ A scan or triage request does not request a code change. Ask to fix a specific
 finding when you want a patch. Standalone fix verification is a separate request
 and reports `fixed`, `still_vulnerable`, or `inconclusive` with evidence.
 
+For an existing dependency alert, supply the report and the checkout or image
+evidence directly; assessment does not require importing the report. See
+[dependency alert assessment](dependency-alerts.md) for container-image and
+Trivy Operator examples, including how to distinguish an older report from
+the currently running image.
+
 Policy generation is optional. Existing root and component `SECURITY.md` files
 already guide scans. Use [policy generation](../README.md#generate-securitymd)
 when that guidance needs to be drafted or updated.

@@ -17,6 +17,10 @@ being embedded in its source tree or shipped npm runtime.
 - [Workflow routing](workflow-routing/README.md): checks whether repository-installed
   production skills route natural-language requests to the appropriate workflow,
   stopping before workflow execution.
+- [Dependency alerts](dependency-alert/README.md): manual behavioral scenarios for
+  container package copies, distribution backports, and Operator report identity
+  after an image rollout. These use synthetic exported evidence without a scanner
+  or cluster connection.
 
 Model runs are opt-in. CI runs the deterministic triage, secret-discovery,
 time-budget, and workflow-routing helper checks and the real-IPC reducer

@@ -1,0 +1,7 @@
+{
+  "id": "SYNTH-NPM-001",
+  "synthetic": true,
+  "package": "demo-parser",
+  "affectedRange": ">=2.0.0 <2.1.0",
+  "fixedVersion": "2.1.0"
+}

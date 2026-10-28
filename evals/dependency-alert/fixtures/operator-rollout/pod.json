@@ -1,0 +1,42 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "app-new-pod",
+    "namespace": "sample",
+    "uid": "synthetic-new-pod-uid",
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "kind": "ReplicaSet",
+        "name": "app-new",
+        "uid": "synthetic-new-rs-uid",
+        "controller": true
+      }
+    ]
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "registry.example.invalid/demo/app:stable"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": true,
+        "image": "registry.example.invalid/demo/app:stable",
+        "imageID": "docker-pullable://registry.example.invalid/demo/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state": {
+          "running": {
+            "startedAt": "2026-10-28T11:00:00Z"
+          }
+        }
+      }
+    ]
+  }
+}

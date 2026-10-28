@@ -1,0 +1,24 @@
+[
+  {
+    "id": "SYNTH-OS-001",
+    "synthetic": true,
+    "package": "demo-crypto",
+    "ecosystem": "apk",
+    "distribution": "alpine:3.20",
+    "affectedVersions": ["1.0.0-r0"],
+    "fixedVersions": ["1.0.0-r1"],
+    "upstreamFixedVersion": "1.1.0",
+    "vendorBackport": {
+      "packageVersion": "1.0.0-r1",
+      "fixes": "SYNTH-OS-001"
+    }
+  },
+  {
+    "id": "SYNTH-NPM-001",
+    "synthetic": true,
+    "package": "demo-parser",
+    "ecosystem": "npm",
+    "affectedRange": ">=2.0.0 <2.1.0",
+    "fixedVersions": ["2.1.0"]
+  }
+]

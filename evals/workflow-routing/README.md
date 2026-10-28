@@ -13,9 +13,11 @@ particular, testing a fix does not automatically request the standalone
 
 ## Run
 
-Use the repository's normal SDK and MCP dependency setup, then:
+Use the repository's normal SDK and MCP dependency setup. `build:evals` also
+compiles the triage eval, which has its own package dependencies:
 
 ```sh
+pnpm --dir evals/triage-finding install --frozen-lockfile
 pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types evals/workflow-routing/run.mts
 ```

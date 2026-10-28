@@ -27,6 +27,18 @@ export const cases = [
     skill: "resolve-dependency-alert",
   },
   {
+    id: "container-dependency-alert",
+    request:
+      "Trivy found vulnerable OS and npm packages in this container image. Using the exported report and image inventory, explain what introduces each copy and which upgrades would fix them. Do not change anything.",
+    skill: "resolve-dependency-alert",
+  },
+  {
+    id: "operator-dependency-alert",
+    request:
+      "Assess this Trivy Operator dependency alert against the supplied current pod export after our image rollout. Does the evidence justify closing it, or what is still needed? Do not contact the cluster or dismiss the alert.",
+    skill: "resolve-dependency-alert",
+  },
+  {
     id: "explicit-security-fix",
     request:
       "Fix and test this security finding: GET /invoices/:id exposes another user's invoice without checking ownership. Preserve legitimate owner access.",
