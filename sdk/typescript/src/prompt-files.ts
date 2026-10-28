@@ -2,6 +2,7 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { CodexSecurityError } from "./errors.js";
+import { parentDirectory } from "./windows-path.js";
 import { expandHome } from "./runtime.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
@@ -83,7 +84,7 @@ export async function readRegularInputBytes(
   for (const repository of repositories) {
     const canonicalRepository = await realpath(repository);
     if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-      for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+      for (let ancestor = dirname(path); ;) {
         if (
           !isOutsidePath(
             relative(canonicalRepository, await realpath(ancestor)),
@@ -93,7 +94,9 @@ export async function readRegularInputBytes(
             "Input files must not follow repository directory links outside the selected repository.",
           );
         }
-        if (dirname(ancestor) === ancestor) break;
+        const parent = parentDirectory(ancestor);
+        if (parent === ancestor) break;
+        ancestor = parent;
       }
     }
   }

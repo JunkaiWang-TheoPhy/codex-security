@@ -1,9 +1,15 @@
 import { z } from "zod";
 import {
   type ExternalImportTarget,
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -15,10 +21,7 @@ import {
   text,
 } from "./scanner-import.js";
 import { FailureSeveritySchema } from "./scan-settings.js";
-import {
-  declaredScannerRepositoryUrl,
-  repositoryScopeValidator,
-} from "./scanner-repository-url.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
 const format = "blackduck-bom-6";
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
@@ -39,7 +42,7 @@ function retainedRepository(
   data: unknown,
   id: string,
   target: ExternalImportTarget,
-): { url: string; scope?: string } | undefined {
+): { url: string; projectVersion?: string } | undefined {
   const native = hasBlackDuckEvidence(data) || nativeId.test(id);
   if (native && (!isRecord(data) || !isRecord(data["row"])))
     throw new Error("Expected retained Black Duck BOM occurrence evidence.");
@@ -68,13 +71,44 @@ function retainedRepository(
     throw new Error(
       "Black Duck source finding ID contradicts the retained native occurrence.",
     );
-  return { url, scope: projectVersion };
+  return { url, projectVersion };
 }
 
-export const blackDuckReportRepositories = repositoryScopeValidator(
-  retainedRepository,
-  "Black Duck occurrences must belong to the same project version and source repository.",
-);
+export function blackDuckReportRepositories(
+  findings: readonly ExternalFinding[],
+  target: ExternalImportTarget,
+): Map<string, ExternalSourceRepository> {
+  const repositories = new Map<string, ExternalSourceRepository>();
+  const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  let scope: string | undefined;
+  let repository: string | undefined;
+  for (const { source_finding_id: id, evidence } of findings) {
+    const retained = retainedRepository(evidence.source_data, id, target);
+    const declared = evidence.details?.repository?.url;
+    if (!retained) {
+      if (target === "cloud" && declared)
+        repositories.set(id, { url: declared });
+      continue;
+    }
+    if (retained.projectVersion) {
+      if (
+        scope &&
+        (scope !== retained.projectVersion || repository !== key(retained.url))
+      )
+        throw new Error(
+          "Black Duck occurrences must belong to the same project version and source repository.",
+        );
+      scope = retained.projectVersion;
+      repository = key(retained.url);
+    }
+    if (declared && key(declared) !== key(retained.url))
+      throw new Error(
+        "Retained scanner repository does not match the normalized evidence repository.",
+      );
+    repositories.set(id, { url: retained.url });
+  }
+  return repositories;
+}
 
 function apiResource(href: unknown, label: string) {
   const url = URL.parse(requiredText(href, label));

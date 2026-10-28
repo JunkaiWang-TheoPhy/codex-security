@@ -58,6 +58,113 @@ test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", a
   }
 });
 
+const sshProject = "ssh://git@github.com/example/project";
+const homeProject = "github.com/~/example/project?other";
+const scpProject = "github.com:example/project#other";
+const repositoryBindings: [string, string, string?][] = [
+  [`${inspectorRepositoryUrl}?repo=other`, inspectorRepositoryUrl],
+  [`${inspectorRepositoryUrl}?`, inspectorRepositoryUrl],
+  [`${inspectorRepositoryUrl}#`, inspectorRepositoryUrl],
+  [`${sshProject}?other`, `${sshProject}?Other`],
+  [`ssh://alice@${homeProject}`, `ssh://bob@${homeProject}`],
+  [`alice@${scpProject}`, `bob@${scpProject}`],
+  [
+    "ssh://alice@git.example.test/~/project",
+    "ssh://bob@git.example.test/~/project",
+  ],
+  ["alice@git.example.test:team/project", "bob@git.example.test:team/project"],
+  ["alice@host.test:D:/shared/project", "bob@host.test:D:/shared/project"],
+  [
+    "café@host.test:~/repo",
+    "caf%C3%A9@host.test:~/repo",
+    "ssh://caf%C3%A9@host.test/~/repo",
+  ],
+  [
+    "DOMAIN\\alice@host.test:~/repo",
+    "DOMAIN%5Calice@host.test:~/repo",
+    "ssh://DOMAIN%5Calice@host.test/~/repo",
+  ],
+  [
+    "ssh://team:one@host.test/~/repo",
+    "ssh://team:two@host.test/~/repo",
+    "ssh://team%3Aone@host.test/~/repo",
+  ],
+  [
+    "ssh://u%00%23v@host.test/~/repo#x",
+    "ssh://u@host.test/~/repo#v%00%23x",
+    "ssh://u%2500%23v@host.test/~/repo#x",
+  ],
+  [
+    "ssh://host.test/~/repo#blue",
+    "ssh://alice@host.test/~/other#blue",
+    "ssh://alice@host.test/~/repo#blue",
+  ],
+  [
+    "ssh://alice@host.test/~/repo",
+    "ssh://bob@host.test/~/repo",
+    "ssh://host.test/~/repo",
+  ],
+  [
+    "ssh://alice@host.test/./~/repo",
+    "ssh://bob@host.test/./~/other",
+    "ssh://bob@host.test/./~/repo",
+  ],
+  ["alice@host.test:/~/repo", "bob@host.test:/~/repo"],
+  ["ssh://alice@host.test/~/../repo", "ssh://bob@host.test/~/../repo"],
+  ["ssh://alice@host.test/%7E%2F../repo", "ssh://bob@host.test/%7E%2F../repo"],
+  [`${sshProject}#blue`, `${sshProject}.git#blue`, `${sshProject}#blue.git`],
+  ["git://github.com/example/project?other", inspectorRepositoryUrl],
+];
+test.each(
+  repositoryBindings.map(
+    ([remote, other, equivalent = remote.replace(/^ssh:/u, "git+ssh:")]) =>
+      [remote, other, equivalent] as const,
+  ),
+)(
+  "native and typed Inspector findings bind to the matching checkout: %s",
+  async (remote, other, equivalent) => {
+    const fixture = await localFindingsFixture({ remote });
+    try {
+      const data = normalizeInspectorFindings(
+        { findings: [inspectorPackageFinding()] },
+        inspectorRepositoryUrl,
+        "local",
+      );
+      const options = {
+        provider: "inspector" as const,
+        sourceKey: "inspector/example/project",
+        repository: fixture.repository,
+      };
+      const deps = { environment: fixture.environment };
+      const native = data.findings[0]!;
+      const typed = (url: string): typeof native => ({
+        source_finding_id: "sdk-id",
+        evidence: {
+          title: "Imported alert",
+          severity: "unknown",
+          details: { kind: "sast", repository: { url } },
+        },
+      });
+      const store = async (row: typeof native) =>
+        (
+          await prepareNormalizedLocalImport(
+            { ...data, findings: [row] },
+            options,
+            deps,
+          )
+        ).import();
+      for (const row of [native, typed(other)])
+        await expect(store(row)).rejects.toThrow(
+          "does not match a configured remote",
+        );
+      expect(await listLocalExternalFindings(options, deps)).toHaveLength(0);
+      expect((await store(typed(equivalent))).counts.created).toBe(1);
+    } finally {
+      await fixture.dispose();
+    }
+  },
+);
+
 test("SQLite replay checks the Inspector project mapping independently of retained evidence", async () => {
   const otherUrl = "https://git.example.test/example/project";
   const fixture = await localFindingsFixture({
@@ -103,6 +210,63 @@ test("SQLite replay checks the Inspector project mapping independently of retain
     ).rejects.toThrow(/project|repository/i);
   } finally {
     await Promise.all([fixture.dispose(), other.dispose()]);
+  }
+});
+
+test("an Inspector provider claim cannot loosen an operator's custom host mapping", async () => {
+  const trusted = "https://scm.example.test/Team/Project";
+  const other = "https://scm.example.test/team/project";
+  const fixture = await localFindingsFixture({ remote: other });
+  try {
+    const input = inspectorPackageFinding();
+    const project = input.resources[0]!;
+    project.details.codeRepository.projectName = "team/project";
+    const report = { findings: [input] };
+    const map = new Map([[project.id, trusted]]);
+    const options = {
+      provider: "inspector" as const,
+      sourceKey: "inspector/example/project",
+      repository: fixture.repository,
+      sourceRepositoryUrl: trusted,
+      inspectorProjectMap: map as typeof map | undefined,
+    };
+    const deps = { environment: fixture.environment };
+    expect(() =>
+      normalizeInspectorFindings(report, other, "local", map),
+    ).toThrow("mapping does not match");
+    const prepared = normalizeInspectorFindings(report, trusted, "local", map);
+    for (const readerUrl of [undefined, trusted, other]) {
+      await expect(
+        prepareNormalizedLocalImport(prepared, options, {
+          ...deps,
+          sourceRepositories: readerUrl
+            ? [{ url: readerUrl, platform: "github" }]
+            : [],
+        }),
+      ).rejects.toThrow("does not match");
+    }
+    project.details.codeRepository.projectName = trusted;
+    const path = join(fixture.root, "mapped.json");
+    await writeFile(path, JSON.stringify(report));
+    const native = normalizeInspectorFindings(report, trusted, "local", map);
+    for (const start of [
+      () => prepareNormalizedLocalImport(native, options, deps),
+      () => prepareLocalExternalImport(path, options, deps),
+    ]) {
+      options.inspectorProjectMap = new Map(map);
+      const pending = start();
+      options.inspectorProjectMap.clear();
+      options.inspectorProjectMap = undefined;
+      await expect(pending).rejects.toThrow(
+        "does not match a configured remote",
+      );
+    }
+    project.details.codeRepository.projectName = other;
+    expect(() =>
+      normalizeInspectorFindings(report, trusted, "local", map),
+    ).toThrow("native repository does not match");
+  } finally {
+    await fixture.dispose();
   }
 });
 
@@ -278,6 +442,62 @@ test("a normalized local selection cannot combine findings from different Inspec
         { environment: fixture.environment },
       ),
     ).rejects.toThrow("more than one repository project");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("normalized imports bind native Inspector evidence and maps to their provider", async () => {
+  const fixture = await localFindingsFixture({
+    remote: inspectorRepositoryUrl,
+  });
+  try {
+    const native = inspectorPackageFinding();
+    const normalized = normalizeInspectorFindings(
+      { findings: [native] },
+      inspectorRepositoryUrl,
+      "local",
+    );
+    const row = normalized.findings[0]!;
+    const prepare = (
+      finding: typeof row,
+      provider: "inspector" | "wiz",
+      inspectorProjectMap?: ReadonlyMap<string, string>,
+    ) =>
+      prepareNormalizedLocalImport(
+        { ...normalized, findings: [finding] },
+        {
+          provider,
+          sourceKey: "scanner/project",
+          repository: fixture.repository,
+          inspectorProjectMap,
+        },
+        { environment: fixture.environment },
+      );
+    const workload = {
+      ...native,
+      resources: [{ type: "AWS_EC2_INSTANCE", id: "i-example" }],
+    };
+    await expect(
+      prepare(
+        {
+          source_finding_id: "CVE-2099-1234",
+          evidence: { ...row.evidence, source_data: workload },
+        },
+        "inspector",
+      ),
+    ).rejects.toThrow("retained Inspector");
+
+    const opaque = { ...row, evidence: { ...row.evidence, source_data: {} } };
+    const map = new Map([[native.resources[0]!.id, inspectorRepositoryUrl]]);
+    await expect(prepare(opaque, "wiz", map)).rejects.toThrow(
+      "map requires the inspector provider",
+    );
+    // A source ID alone does not identify the provider of normalized evidence.
+    const prepared = await prepare(opaque, "wiz");
+    expect(prepared.preview.findings[0]!.source_finding_id).toBe(
+      native.findingArn,
+    );
   } finally {
     await fixture.dispose();
   }

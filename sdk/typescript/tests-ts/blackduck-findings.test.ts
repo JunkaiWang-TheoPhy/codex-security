@@ -42,7 +42,8 @@ test("retains the complete BOM row, project version and caller's repository, not
       remediationStatus: "REMEDIATION_COMPLETE",
       description: "Vendor description",
       cweId: "CWE-79",
-      relatedVulnerability: "CVE-2099-1000",
+      relatedVulnerability:
+        "https://scanner.example.test/api/vulnerabilities/CVE%2D2099-1000",
       vulnerabilityUpdatedDate: "2026-01-01T00:00:00Z",
       extension: { values: [42] },
     },
@@ -63,7 +64,10 @@ test("retains the complete BOM row, project version and caller's repository, not
     title: "BDSA-2099-0001 in Example Library",
     severity: "high",
     description: "Vendor description",
-    advisory_ids: ["BDSA-2099-0001", "CVE-2099-1000"],
+    advisory_ids: [
+      "BDSA-2099-0001",
+      row.vulnerabilityWithRemediation.relatedVulnerability,
+    ],
     packages: [
       {
         name: "example:library",

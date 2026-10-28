@@ -34,7 +34,10 @@ import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import { boundScannerRepositories } from "./scanner-repository-provenance.js";
+import {
+  boundScannerRepositories,
+  snapshotImportOptions,
+} from "./scanner-repository-provenance.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -131,6 +134,7 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
+  inspectorProjectMapRequired?: true;
 }
 
 export interface ExternalPublicationPreview extends ExternalFindings {
@@ -173,6 +177,7 @@ function sameSubmission(
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -350,22 +355,16 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
-  const parsed = await readExternalFindings(path, options);
-  const normalizedOptions = {
-    ...options,
-    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+  const settings = {
+    ...snapshotImportOptions(options),
+    sourceRepositoryUrl: options.sourceRepositoryUrl,
   };
-  return parsed.publication
-    ? preparePublicationInput(
-        parsed.publication,
-        normalizedOptions,
-        dependencies,
-      )
-    : prepareNormalizedExternalPublication(
-        parsed.findings,
-        normalizedOptions,
-        dependencies,
-      );
+  const parsed = await readExternalFindings(path, settings);
+  return preparePublicationInput(
+    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
+    dependencies,
+  );
 }
 
 /** Prepare normalized provider evidence without reading a vendor export. */
@@ -375,6 +374,17 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
+  return preparePublicationInput(
+    normalizedPublicationInput(input),
+    settings,
+    dependencies,
+  );
+}
+
+function normalizedPublicationInput(
+  input: ExternalFindings,
+): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
   const { report, ...parsed } = input;
   const current: ExternalFindings = structuredClone(parsed);
@@ -407,16 +417,12 @@ export async function prepareNormalizedExternalPublication(
     current.report === undefined
       ? current.findings
       : { findings: current.findings, report: reportForJson(current.report) };
-  return preparePublicationInput(
-    {
-      current,
-      legacy: current,
-      currentIdentity: identity,
-      legacyIdentity: identity,
-    },
-    options,
-    dependencies,
-  );
+  return {
+    current,
+    legacy: current,
+    currentIdentity: identity,
+    legacyIdentity: identity,
+  };
 }
 
 async function preparePublicationInput(
@@ -424,6 +430,7 @@ async function preparePublicationInput(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
+  const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void => {
     try {
       dependencies.onProgress?.(event);
@@ -544,7 +551,7 @@ async function preparePublicationInput(
       options.provider,
       findings,
       "cloud",
-      options.inspectorProjectMap,
+      inspectorProjectMap,
     ))
       requireMatchingDestination(id, repository.url);
   }
@@ -598,8 +605,27 @@ async function preparePublicationInput(
       )
         throw new Error("Saved import destination does not match.");
     }
+    // The identity checks above still bind a reset submission to this input.
+    // Its obsolete requests will be retired under the publication lock.
+    if (
+      content.requests.some(
+        (request) =>
+          request.repository.reset_marker !== destination.reset_marker,
+      )
+    )
+      return content;
+    if (content.inspectorProjectMapRequired && !inspectorProjectMap)
+      throw new CodexSecurityError(
+        "This pending Inspector submission was prepared with a project map. Supply the trusted mapping again to resume.",
+      );
     // A pending request can carry an older projection of the selected input.
     checkScannerRepositories(savedFindings);
+    if (options.provider === "inspector") {
+      for (const { source_finding_id, evidence } of savedFindings) {
+        const url = evidence.details?.repository?.url;
+        if (url) requireMatchingDestination(source_finding_id, url);
+      }
+    }
     return content;
   }
   const key = hash(
@@ -873,6 +899,8 @@ async function preparePublicationInput(
       ),
     },
   };
+  if (saved?.inspectorProjectMapRequired || inspectorProjectMap)
+    submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
     ...parsed,
     findings: submissionFindings(requests),
@@ -941,6 +969,10 @@ async function preparePublicationInput(
           pending === undefined
             ? submission
             : (JSON.parse(pending) as SavedSubmission);
+        const adoptProjectMap =
+          submission.inspectorProjectMapRequired &&
+          current.inspectorProjectMapRequired === undefined;
+        if (adoptProjectMap) current.inspectorProjectMapRequired = true;
         if (!sameSubmission(current, submission))
           throw new CodexSecurityError(
             "Another publication prepared this input. Run the command again to review and resume that saved request.",
@@ -954,8 +986,8 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
-          if (pending === undefined) {
-            await writeAtomicJson(pendingPath, submission);
+          if (pending === undefined || adoptProjectMap) {
+            await writeAtomicJson(pendingPath, current);
             persisted = true;
           }
           progress({

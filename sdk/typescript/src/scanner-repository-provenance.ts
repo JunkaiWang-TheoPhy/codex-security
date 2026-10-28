@@ -5,25 +5,26 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
+import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
   hasInspectorEvidence,
   inspectorReportRepositories,
-  readInspectorFindings,
+  normalizeInspectorFindings,
 } from "./inspector-findings.js";
 import {
   blackDuckReportRepositories,
   hasBlackDuckEvidence,
-  readBlackDuckFindings,
+  normalizeBlackDuckFindings,
 } from "./blackduck-findings.js";
 import {
   hasVeracodeEvidence,
-  readVeracodeFindings,
+  normalizeVeracodeFindings,
   veracodeReportRepositories,
 } from "./veracode-findings.js";
 
 interface BoundScanner {
   label: string;
-  read: typeof readInspectorFindings;
+  normalize: typeof normalizeInspectorFindings;
   hasEvidence(data: unknown, id: string): boolean;
   repositories: typeof inspectorReportRepositories;
 }
@@ -32,23 +33,44 @@ export const repositoryBoundScanners: Partial<Record<Provider, BoundScanner>> =
   {
     inspector: {
       label: "Inspector",
-      read: readInspectorFindings,
+      normalize: normalizeInspectorFindings,
       hasEvidence: hasInspectorEvidence,
       repositories: inspectorReportRepositories,
     },
     blackduck: {
       label: "Black Duck",
-      read: readBlackDuckFindings,
+      normalize: normalizeBlackDuckFindings,
       hasEvidence: hasBlackDuckEvidence,
       repositories: blackDuckReportRepositories,
     },
     veracode: {
       label: "Veracode",
-      read: readVeracodeFindings,
+      normalize: normalizeVeracodeFindings,
       hasEvidence: hasVeracodeEvidence,
       repositories: veracodeReportRepositories,
     },
   };
+
+/** Capture the caller's import settings before reading an export or resolving its destination. */
+export function snapshotImportOptions<
+  P extends ExternalPublicationOptions["provider"],
+>({
+  repository,
+  provider,
+  sourceKey,
+  inspectorProjectMap,
+}: ExternalPublicationOptions & { provider: P }) {
+  if (inspectorProjectMap !== undefined && provider !== "inspector")
+    throw new CodexSecurityError(
+      "An Inspector project map requires the inspector provider.",
+    );
+  return {
+    repository,
+    provider,
+    sourceKey,
+    inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
+  };
+}
 
 export function boundScannerRepositories(
   provider: Provider,

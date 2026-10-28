@@ -20,8 +20,13 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
+import { hasBlackDuckEvidence } from "./blackduck-findings.js";
 import { parseGitRemote } from "./git-remote.js";
-import { boundScannerRepositories } from "./scanner-repository-provenance.js";
+import {
+  boundScannerRepositories,
+  snapshotImportOptions,
+} from "./scanner-repository-provenance.js";
+import { parentDirectory } from "./windows-path.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -38,6 +43,7 @@ import {
   gitMarkerRoot,
   gitOutput,
   gitProtectionRoots,
+  hasGitCommonDirectoryLayout,
   normalizeRepository,
   nullIfMissingPath,
 } from "./targets.js";
@@ -105,10 +111,11 @@ function requireIdentity(
 }
 
 /** Compare transport forms without changing retained scanner evidence. */
-function remoteRepositoryKey(
+function remoteRepository(
   value: string,
   provider: Provider,
-): string | undefined {
+  bound: boolean,
+): { key: string; account?: string } | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   let remote;
   try {
@@ -130,7 +137,7 @@ function remoteRepositoryKey(
     ].includes(remote.url.protocol)
   )
     return undefined;
-  const url = remote.url;
+  const { url, path, scpStyle } = remote;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
@@ -149,36 +156,85 @@ function remoteRepositoryKey(
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
   const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  return key(
-    `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
-  );
+  const address = `${protocol}//${hostname}${port ? `:${port}` : ""}/${path}`;
+  const suffix = bound ? /[?#].*$/su.exec(value)?.[0] : undefined;
+  // A Git URI's query and fragment are part of its upload-pack path.
+  const repository =
+    suffix && !scpStyle && (ssh || url.protocol === "git:")
+      ? key(address + suffix).split(/[?#]/u, 1)[0]!
+      : key(address);
+  // Git unescapes non-NUL URI bytes before upload-pack; SCP paths are literal.
+  const literal = (raw: string) => {
+    const bytes = Buffer.from(raw).toString("latin1");
+    return scpStyle
+      ? bytes
+      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
+          String.fromCharCode(parseInt(hex, 16)),
+        );
+  };
+  // Git passes SSH paths to upload-pack before URL dot-segment normalization.
+  const sshPath = scpStyle ? path : value.replace(/^[^:]+:\/\/[^/]*/u, "");
+  const login = scpStyle
+    ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
+    : /^[^:]+:\/\/([^/]*)@/u.exec(value)?.[1];
+  const account =
+    bound &&
+    ssh &&
+    login &&
+    (/^\/?~(?:\/|$)/u.test(literal(sshPath)) ||
+      (scpStyle && !/^[~/]/u.test(path)))
+      ? literal(login)
+      : undefined;
+  if (suffix === undefined) return { key: repository, account };
+  if (["http:", "https:"].includes(url.protocol)) {
+    // Git appends a slash to the URL and omits fragment text from HTTP requests.
+    return {
+      key: repository + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
+    };
+  }
+  if (!ssh && url.protocol !== "git:") return { key: `${repository}\0` };
+  return {
+    account,
+    key: `${repository}\0${literal(suffix)
+      .replace(/\/$/u, "")
+      .replace(/\.git$/u, "")}`,
+  };
 }
 
-async function bareMetadataRoots(
+/** @internal */
+export async function bareMetadataRoots(
   repository: string,
   signal?: AbortSignal,
+  forCloudMap = false,
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
   for (;;) {
     signal?.throwIfAborted();
-    const present = async (name: string) =>
-      (await abortable(
+    const present = async (name: string, kind: "isFile" | "isDirectory") => {
+      const entry = await abortable(
         () => lstat(join(directory, name)).catch(nullIfMissingPath),
         signal,
-      )) !== null;
+      );
+      return (
+        entry !== null &&
+        (!forCloudMap || entry[kind]() || entry.isSymbolicLink())
+      );
+    };
     // Git also discovers bare repositories and linked metadata without .git.
     const head = await abortable(
       () => lstat(join(directory, "HEAD")).catch(nullIfMissingPath),
       signal,
     );
     if (
-      (head?.isFile() || head?.isSymbolicLink()) &&
-      ((await present("commondir")) ||
-        ((await present("objects")) && (await present("refs"))))
+      (forCloudMap && (await hasGitCommonDirectoryLayout(directory))) ||
+      ((head?.isFile() || head?.isSymbolicLink()) &&
+        ((await present("commondir", "isFile")) ||
+          ((await present("objects", "isDirectory")) &&
+            (await present("refs", "isDirectory")))))
     )
       roots.push(directory);
-    const parent = dirname(directory);
+    const parent = parentDirectory(directory);
     if (parent === directory) return roots;
     directory = parent;
   }
@@ -320,7 +376,7 @@ async function localGitProtectionRoots(
           ))
             roots.add(associated);
       }
-      const parent = dirname(directory);
+      const parent = parentDirectory(directory);
       if (parent === directory) break;
       directory = parent;
     }
@@ -346,6 +402,7 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  nativeSources: ReadonlySet<string>,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -399,29 +456,45 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
+  const identity = (
+    source: ExternalSourceRepository,
+    platform: Provider,
+    url = source.url,
+  ) =>
+    remoteRepository(
+      url,
+      platform,
+      provider === "inspector" || nativeSources.has(source.url),
+    );
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
-      const key = remoteRepositoryKey(source.url, "github");
+      const key = identity(source, "github")?.key;
       return key === undefined ? [] : [key];
     }),
   );
   for (const source of sources) {
-    const githubKey = remoteRepositoryKey(source.url, "github");
+    const githubKey = identity(source, "github")?.key;
     const sourceProvider =
       source.platform === "github" ||
       (githubKey !== undefined && githubRepositories.has(githubKey))
         ? "github"
         : provider;
-    const remoteKeys = new Set(
-      remotes.flatMap((remote) => {
-        const key = remoteRepositoryKey(remote, sourceProvider);
-        return key === undefined ? [] : [key];
-      }),
+    const targets = remotes.flatMap(
+      (remote) => identity(source, sourceProvider, remote) ?? [],
     );
-    if (remoteKeys.size === 0) continue;
-    const key = remoteRepositoryKey(source.url, sourceProvider);
-    if (key === undefined || !remoteKeys.has(key))
+    if (!targets.length) continue;
+    const target = identity(source, sourceProvider);
+    if (
+      !target ||
+      !targets.some(
+        ({ key, account }) =>
+          key === target.key &&
+          (account === undefined ||
+            target.account === undefined ||
+            account === target.account),
+      )
+    )
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
@@ -492,6 +565,19 @@ export async function prepareNormalizedLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
+  return prepareLocalImport(
+    input,
+    snapshotImportOptions(options),
+    dependencies,
+  );
+}
+
+/** @internal Prepare evidence using settings captured by either local import entrypoint. */
+export async function prepareLocalImport(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies,
+): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   validateExternalReport(current.report);
@@ -511,27 +597,36 @@ export async function prepareNormalizedLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  for (const finding of current.findings) {
-    const url = finding.evidence.details?.repository?.url;
+  const bound = boundScannerRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    options.inspectorProjectMap,
+  );
+  const nativeSources = new Set<string>();
+  for (const { source_finding_id: id, evidence } of current.findings) {
+    const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    const source = bound.get(id);
+    if (source && hasBlackDuckEvidence(evidence.source_data))
+      nativeSources.add(source.url);
   }
   for (const source of [
-    ...boundScannerRepositories(
-      options.provider,
-      current.findings,
-      "local",
-      options.inspectorProjectMap,
-    ).values(),
+    ...bound.values(),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
-    // A reader's explicit platform also applies to the same URL in typed evidence.
+    // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
-      sources.set(source.url, source);
+      sources.set(
+        source.url,
+        options.inspectorProjectMap ? { url: source.url } : source,
+      );
   }
   await requireMatchingRepository(
     repository,
     options.provider,
     [...sources.values()],
+    nativeSources,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
