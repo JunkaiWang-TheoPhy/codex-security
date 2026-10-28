@@ -112,12 +112,13 @@ project and version. For Cloud, select an authorized GitHub repository with
 `--to cloud` on a deployment that accepts `blackduck`. Reading a saved report
 requires no Black Duck login. Local imports also require no Cloud login.
 
-If an interrupted Cloud upload reports `result.savedSubmission`, retry with the
-same build and input. Repeat the CLI command with the original raw export, or
-pass the original normalized `ExternalFindings` input to
-`prepareNormalizedExternalPublication`. Leave the checkpoint in place for the SDK
-to find. When `preview.resumed` is false, review and approve the fresh preview.
-A different payload prepares a new upload.
+If an interrupted Cloud upload reports `result.savedSubmission`, keep its
+checkpoint and use the same build, state directory, account and import settings.
+Preview the original export with `--dry-run --format json`. Check `accountId`
+and `destination`. When `resumed` is false, review the new upload before approving it.
+For `prepareNormalizedExternalPublication`, pass your original normalized
+`ExternalFindings` and check `preview.resumed` before calling `publish()`.
+Different normalized findings prepare a new upload.
 
 Cloud checks retained and declared source repository URLs against the selected
 repository. Local imports compare them when the checkout has a comparable Git
