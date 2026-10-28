@@ -30,8 +30,9 @@ import {
   readExternalFindings,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
+import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { githubFindingRepositoryUrl } from "./github-findings.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -42,6 +43,7 @@ import {
   cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
+  validateExternalReport,
   validateImportReceipt,
   validateRepositories,
   validateSourceReports,
@@ -99,6 +101,7 @@ export interface ExternalPublicationResult {
   cloudUrl?: string;
   status: "complete" | "partial" | "interrupted";
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   receipts: FindingImportReceipt[];
@@ -162,23 +165,6 @@ async function readInBatches<T, U>(
   return output;
 }
 
-function canonicalJson(
-  value: unknown,
-  compareKeys?: (left: string, right: string) => number,
-): string {
-  return JSON.stringify(value, (_key, child: unknown) => {
-    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
-      const record = child as Record<string, unknown>;
-      return Object.fromEntries(
-        Object.keys(record)
-          .sort(compareKeys)
-          .map((key) => [key, record[key]]),
-      );
-    }
-    return child;
-  });
-}
-
 function sameSubmission(
   left: SavedSubmission,
   right: SavedSubmission,
@@ -218,6 +204,15 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
     if (error.code === "ENOENT") return undefined;
     throw error;
   });
+}
+
+function reportForJson(report: ExternalFindings["report"]) {
+  const errors = report?.["errors"];
+  if (!Array.isArray(errors)) return report;
+  const json = JSON.stringify(errors, (_key, entry: unknown) =>
+    entry instanceof Error ? { message: entry.message } : entry,
+  );
+  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 async function writeAtomicJson(path: string, value: unknown): Promise<void> {
@@ -379,7 +374,12 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const current = structuredClone(input);
+  const { report, ...parsed } = input;
+  const current: ExternalFindings = structuredClone(parsed);
+  if (report !== undefined) {
+    current.report = structuredClone(report);
+    validateExternalReport(current.report);
+  }
   // structuredClone preserves aliases. Detach every raw record before adding
   // typed defaults, including aliases shared with another finding's evidence.
   for (const finding of current.findings)
@@ -401,12 +401,16 @@ export async function prepareNormalizedExternalPublication(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
+  const identity =
+    current.report === undefined
+      ? current.findings
+      : { findings: current.findings, report: reportForJson(current.report) };
   return preparePublicationInput(
     {
       current,
       legacy: current,
-      currentIdentity: current.findings,
-      legacyIdentity: current.findings,
+      currentIdentity: identity,
+      legacyIdentity: identity,
     },
     options,
     dependencies,
@@ -442,8 +446,9 @@ async function preparePublicationInput(
     legacyIdentity,
   } = input;
   if (parsed.findings.length === 0) {
+    const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
+      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
   progress({ phase: "discovering", completed: 0 });
@@ -726,9 +731,7 @@ async function preparePublicationInput(
   if (!requests) {
     for (const finding of parsed.findings) {
       const sourceRepositories = [
-        options.provider === "github"
-          ? githubFindingRepositoryUrl(finding.evidence)
-          : finding.evidence.details?.repository?.url,
+        finding.evidence.details?.repository?.url,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),
@@ -740,6 +743,9 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
+        options.provider === "github"
+          ? dependabotRepository(finding)
+          : undefined,
       ];
       for (const sourceRepository of sourceRepositories)
         if (
@@ -795,6 +801,7 @@ async function preparePublicationInput(
     );
     requests = [];
     let current: FindingImportRequest | undefined;
+    let currentBytes = 0;
     for (const [index, finding] of parsed.findings.entries()) {
       const previous = previousReports[index];
       const environmentId =
@@ -803,31 +810,40 @@ async function preparePublicationInput(
         throw new CodexSecurityError(
           "Configure an authorized Cloud environment for this repository before importing findings.",
         );
-      const repository = {
-        id: destination.id,
-        repo_connector_id: destination.repo_connector_id,
-        environment_id: environmentId,
-        reset_marker: destination.reset_marker,
-      };
       const item = {
         client_id: `item-${index + 1}`,
         source_finding_id: finding.source_finding_id,
         expected_version: previous?.version ?? 0,
         evidence: finding.evidence,
       };
+      const itemBytes = Buffer.byteLength(JSON.stringify(item));
       if (
         current &&
         (current.repository.environment_id !== environmentId ||
           current.items.length === 100 ||
-          Buffer.byteLength(
-            JSON.stringify({ ...current, items: [...current.items, item] }),
-          ) > MAX_REQUEST_BYTES)
+          currentBytes + 1 + itemBytes > MAX_REQUEST_BYTES)
       ) {
         requests.push(validateImportRequest(current));
         current = undefined;
       }
-      current ??= { request_id: randomUUID(), repository, source, items: [] };
+      if (!current) {
+        current = {
+          request_id: randomUUID(),
+          repository: {
+            id: destination.id,
+            repo_connector_id: destination.repo_connector_id,
+            environment_id: environmentId,
+            reset_marker: destination.reset_marker,
+          },
+          source,
+          items: [],
+        };
+        currentBytes = Buffer.byteLength(JSON.stringify(current));
+      } else {
+        currentBytes++;
+      }
       current.items.push(item);
+      currentBytes += itemBytes;
     }
     if (current) requests.push(validateImportRequest(current));
   }
@@ -855,7 +871,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
@@ -886,6 +902,9 @@ async function preparePublicationInput(
           status:
             parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
+          ...(parsed.report === undefined
+            ? {}
+            : { report: structuredClone(parsed.report) }),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,
@@ -1004,7 +1023,10 @@ async function preparePublicationInput(
             });
           });
           const completed = result(acknowledged, verified);
-          await writeAtomicJson(join(state, `${key}.result.json`), completed);
+          await writeAtomicJson(join(state, `${key}.result.json`), {
+            ...completed,
+            report: reportForJson(completed.report),
+          });
           await rm(pendingPath, { force: true });
           return completed;
         } catch (error) {

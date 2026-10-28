@@ -2,7 +2,6 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import { githubFindingRepositoryUrl } from "./github-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -15,6 +14,7 @@ import type {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -22,6 +22,7 @@ import type {
 } from "./external-import-models.js";
 import { parseGitRemote } from "./git-remote.js";
 import { isRecord } from "./record.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -79,6 +80,7 @@ export interface LocalExternalImportPreview extends ExternalFindings {
 export interface LocalExternalImportResult {
   repository: string;
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   findings: StoredExternalFinding[];
@@ -490,6 +492,8 @@ export async function prepareNormalizedLocalImport(
   requireExternalImports(dependencies.environment);
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
+  validateExternalReport(current.report);
+  let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -500,6 +504,22 @@ export async function prepareNormalizedLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    if (options.provider !== "github") continue;
+    const native = dependabotRepository(finding);
+    if (!native) continue;
+    const claimed = finding.evidence.details?.repository?.url;
+    if (
+      claimed &&
+      cloudRepositoryUrlKey(claimed) !== cloudRepositoryUrlKey(native)
+    )
+      throw new CodexSecurityError(
+        "The normalized repository does not match the original Dependabot alert.",
+      );
+    if (dependabotSource && dependabotSource !== native)
+      throw new CodexSecurityError(
+        "Select Dependabot alerts from only one GitHub host and repository.",
+      );
+    dependabotSource = native;
   }
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
@@ -507,10 +527,7 @@ export async function prepareNormalizedLocalImport(
   );
   const sources = new Map<string, ExternalSourceRepository>();
   for (const { evidence } of current.findings) {
-    const url =
-      options.provider === "github"
-        ? githubFindingRepositoryUrl(evidence)
-        : evidence.details?.repository?.url;
+    const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
   }
   for (const source of dependencies.sourceRepositories ?? []) {
@@ -518,6 +535,11 @@ export async function prepareNormalizedLocalImport(
     if (sources.get(source.url)?.platform !== "github")
       sources.set(source.url, source);
   }
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
   await requireMatchingRepository(
     repository,
     options.provider,
@@ -588,8 +610,11 @@ export async function prepareNormalizedLocalImport(
       return {
         repository,
         read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : { report: structuredClone(current.report) }),
         ready: current.findings.length,
-        excluded: current.excluded,
+        excluded: structuredClone(current.excluded),
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };

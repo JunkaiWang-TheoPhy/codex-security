@@ -667,15 +667,25 @@ options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
+For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
+`--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
+evidence through the existing Semgrep source-provider contract. See the
+[OpenGrep guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md) for preview commands,
+coverage diagnostics, stable source identities, and local SDK assessment.
+
 For Wiz, prefer supported native JSON acquired through an authorized MCP or API
 connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
 repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
 complete code-to-cloud coverage. Both formats support gzip. The acquisition path
 still needs validation with an authorized Wiz tenant.
 
-Use `--provider github` for saved code-scanning alerts, GHSA advisories, or
-native Dependabot vulnerability alerts. Give each source a separate key.
-See [GitHub imports](docs/cli.md#import-github-findings-locally-or-to-cloud) for acquisition and preview commands.
+For GitHub code scanning and GHSA advisories, save complete JSON from
+`import github` or `import github-advisories`, respectively. **GHSA import
+does not establish an installed dependency or applicability to the repository.**
+For Dependabot, save the native REST alert records from one repository using the
+[Dependabot export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md).
+The GitHub file reader accepts all three families. Secret-scanning alerts and
+writeback to GitHub are outside its scope.
 
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite
@@ -690,6 +700,10 @@ target; switching formats creates separate source identities. See
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
 accepted as a lossy compatibility format. See
 [Endor imports](docs/cli.md#import-endor-labs-findings).
+
+For saved GitHub code-scanning alerts, GHSA advisories, or Dependabot alerts, use
+`--provider github` with a separate stable source key for each finding family.
+See [local imports](docs/cli.md#import-vendor-findings-locally).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,

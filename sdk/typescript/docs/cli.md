@@ -1268,6 +1268,8 @@ Supply the validation prompt again when rerunning.
 
 ## Import vendor findings locally
 
+Use the [scanner file import schema and capability guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md) to compare provider identities, mapped evidence and destination behavior before selecting a report.
+
 External finding imports are disabled by default. Opt in for the current shell:
 
 ```bash
@@ -1303,7 +1305,9 @@ repository path instead of a Cloud repository ID or URL. Supported inputs includ
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
-and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
+[OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
+[GitHub Dependabot repository alerts](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md),
+and [saved GitHub code-scanning alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
 
 ```bash
 codex-security publish findings selected-wiz.json \
@@ -1335,8 +1339,18 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. The same
-supported vendor formats and evidence requirements apply locally and in Cloud.
+are reported, and an import with exclusions exits with status 1. Both destinations
+read the same vendor formats; Cloud's field, size and nesting limits do not apply
+to local file imports.
+
+For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
+The reader supports native JSON and gzip for both destinations. It uses the
+existing `semgrep` source-provider contract while retaining `OpenGrep` as the
+scanner origin; keep a stable OpenGrep-specific source key. Review report
+diagnostics as well as findings: import completion does not establish scan
+coverage. The [OpenGrep guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md)
+covers evidence identity, empty reports, and assessing an imported finding with
+the existing SDK validator.
 
 `scan import --json` and `scan import --csv` remain separate commands for importing
 Codex Security's findings schema as a saved scan; they do not accept vendor
@@ -2268,6 +2282,33 @@ be unchanged since the scan. `--source-root` is supported only for SARIF.
 If export fails, it exits with `2`. Fix the reported error and rerun the export;
 the saved scan remains available, so you don't need to run another scan.
 
+### Export findings for ServiceNow
+
+Use `servicenow-avit` to prepare a CSV for ServiceNow Application Vulnerability
+Response. In ServiceNow, open **All > Manual AVIT Ingestion > Upload File UI**
+and download the CSV template. Keep the headers and a single row per template
+file. Fill in the exact ServiceNow application name, requester, assignee, and
+assignment group. Supply the application team, purpose, sensitive data types,
+compliance programs, technology stack, and URLs to test. Leave the finding
+columns blank and reuse this file for future exports of the same application. See the
+[example template](https://github.com/openai/codex-security/blob/main/examples/servicenow-avit-template.csv).
+
+```bash
+codex-security export --scan latest --export-format servicenow-avit \
+  --avit-template invoice-desk.csv --output findings-avit.csv
+```
+
+The command writes one row per saved finding. It fills the risk rating and uses
+the first CWE when available, otherwise the Codex finding ID. Technical details
+include that ID, the primary file and line, the summary, and remediation. For
+**Steps to reproduce**, review any recorded attack-path steps and complete blank
+cells before uploading. Both text fields have a 1,000-character limit. An ellipsis
+marks shortened text. Other template columns keep their original values.
+
+The output defaults to `servicenow-avit.csv`. Upload the completed file in the
+same ServiceNow screen. Each upload creates a new penetration-test form for the
+application. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
+
 ### Export a threat model
 
 To save a scan's threat model as Markdown, run:
@@ -2310,6 +2351,8 @@ console.log(exported.path, exported.provenance);
 ```
 
 Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
+For ServiceNow, use `format: "servicenow-avit"` and set `avitTemplate` to the
+path of the application's populated CSV template.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`
 selects an interpreter; `signal` cancels.
 
@@ -2392,7 +2435,13 @@ Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
-server; pass that selection to the collector. Preview the saved code-scanning alerts locally:
+server. Pass that selection to the collector. For Dependabot, use a token with
+**Dependabot alerts: read** and follow
+the [repository alert export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md)
+to save the native REST records from one repository and preview them with
+`--provider github`. For GHSA disclosures, use the
+[advisory collector](#import-ghsa-advisories-separately).
+The following example previews local storage of a code-scanning export.
 
 ```bash
 codex-security import github example/project --format json > /path/outside/repository/alerts.json
@@ -2413,8 +2462,8 @@ The importer fetches every page, retrieves alert details, and retains the select
 ref's instance. It writes the saved input for publication; no website download or
 hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
 selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
-the default branch. For code scanning, `--provider github` accepts the collector's
-complete output.
+the default branch. MCP list calls are paginated separately. Code-scanning
+imports require the saved collector output, which includes the selected instance.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
 the plugin's connection does not sign in `gh`. Reading code-scanning alerts requires
@@ -2473,23 +2522,6 @@ For local storage, pass the same normalized evidence to
 `prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
 its preview, and call `import()`. `prepareLocalExternalImport()` accepts the saved
 import file directly. Read records with `listLocalExternalFindings({ repository })`.
-
-### Import Dependabot vulnerability alerts
-
-Export the open vulnerability alerts and preview the import. Fine-grained tokens
-need the [Dependabot alerts: read permission](https://docs.github.com/en/rest/dependabot/alerts#fine-grained-access-tokens-for-list-dependabot-alerts-for-a-repository).
-
-```bash
-gh api --hostname github.com --paginate \
-  'repos/example/project/dependabot/alerts?classification=general&state=open&per_page=100' \
-  --jq '.[] | @json' > /path/outside/repository/dependabot.jsonl &&
-  codex-security publish findings /path/outside/repository/dependabot.jsonl \
-    --to local --repository ./project --provider github \
-    --source-key github.com/example/project/dependabot --dry-run --format json
-```
-
-The reader also accepts a single native alert or a JSON array. The alert records
-the affected range. Check the lockfile to establish which version is installed.
 
 ### Import GHSA advisories separately
 

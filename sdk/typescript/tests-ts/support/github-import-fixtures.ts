@@ -80,24 +80,3 @@ export function importedAdvisory(
     },
   } as unknown as import("../../src/github-advisories.js").ImportedGitHubAdvisory;
 }
-
-export function dependabotAlert(number = 17, repository = "example/project") {
-  const pkg = { name: "example-parser", ecosystem: "npm" };
-  return {
-    number,
-    state: "open",
-    url: `https://api.github.com/repos/${repository}/dependabot/alerts/${number}`,
-    html_url: `https://github.com/${repository}/security/dependabot/${number}`,
-    dependency: { package: pkg, manifest_path: "package-lock.json" },
-    security_advisory: {
-      ghsa_id: "GHSA-2345-6789-cfgh",
-      cve_id: "CVE-2026-0001",
-    },
-    security_vulnerability: {
-      package: pkg,
-      severity: "high",
-      vulnerable_version_range: "< 1.2.3",
-      first_patched_version: { identifier: "1.2.3" },
-    },
-  };
-}

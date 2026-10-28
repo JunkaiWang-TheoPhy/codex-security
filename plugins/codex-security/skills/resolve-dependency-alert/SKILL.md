@@ -1,32 +1,18 @@
 ---
 name: resolve-dependency-alert
-description: Investigate vulnerable packages from scanner reports, advisories or SBOM matches. Trace affected versions and prepare an upgrade or a dismissal for human review.
+description: Investigate a vulnerable dependency from a scanner alert, advisory, or SBOM match. Trace what pulls it in and determine whether it can be upgraded.
 ---
 
 # Resolve a dependency alert
 
-## Get the alert
+Start with the supplied report and the checkout or image the user wants assessed. Read the report as evidence even if there is no importer.
 
-For an import, start with [$publish-findings](../publish-findings/SKILL.md) before fetching. It checks opt-in and previews supported formats for approval. Read existing local imports with `codex-security findings imported <repo> --format json`.
+For an explicit import request, use [$publish-findings](../publish-findings/SKILL.md). If the user asks to discover alerts, query only the selected scanner and target, follow pagination, and report incomplete reads. For Dependabot, follow the [GitHub intake workflow](../triage-finding/references/github-rest-intake.md#dependabot-vulnerabilities). Refer reported malware to incident response.
 
-For assessment, read the supplied report even if its format has no importer. Route reported malware to incident response. To discover alerts, query the named scanner for the selected repository or image, follow pagination and report incomplete reads. Keep each scanner's alert ID or the export digest and record position. For Dependabot, use the [vulnerability alerts endpoint](../triage-finding/references/github-rest-intake.md#dependabot-vulnerabilities).
+1. Trace each affected copy to its manifest and parent dependency. Use the lockfile, image inventory, or project's package manager to establish its origin, resolved version, and where it runs, including build, optional, and platform-specific dependencies. In static mode, inspect existing evidence without executing project tooling.
+2. Check the advisory's affected ranges and any distribution backport against each copy and proposed replacement. Look for an existing fix. Explain whether a lockfile refresh, direct upgrade, or parent upgrade suffices, and flag any compatibility blocker. Apply the repository's cooldowns and exclusions where they govern that update. If release age blocks a merge, give the eligible date or identify the missing publication date.
+3. Edit only when the user requests an upgrade. Hand the evidence and proposed change to [$fix-finding](../fix-finding/SKILL.md) in the selected verification mode. Compare the resolved copies before and after.
 
-## Trace and fix
+Report the alert IDs or source records, the checkout revision or image digest, and the evidence for each outcome. Distinguish a verified fix in the checkout from a deployed fix. A verified backport can establish that a package is unaffected. A mitigation leaves residual exposure, and risk acceptance requires a recorded human decision.
 
-1. Find each copy, its origin (registry, local path or fork) and its parent path. Record the checkout revision and any lockfile digests, or the image digest. Check where the vulnerable behavior runs, including build and CI jobs.
-2. Read the lockfile directly in static mode. Otherwise use the project's pinned resolver in isolation and check the lockfile for omitted scopes or platforms. For npm use `npm ls --package-lock-only --all --include=dev --include=optional --include=peer --json`. For pnpm use `pnpm list --recursive --include-workspace-root --depth Infinity --lockfile-only --json`.
-3. Match the package origin and any backport to the advisory. Check the installed version and each candidate against every affected range. Look for an existing fix PR. If the user asks whether an upgrade is possible, explain whether it takes a lockfile refresh, a direct or parent bump, or a migration. Name any blocker.
-4. Match cooldowns and exclusions to the package, directory and update type for every covered release, including transitive dependencies. Dependabot's cooldown governs version updates. Repository instructions, package-manager settings or CI may also gate security or manual merges. Give the earliest eligible merge time in UTC using registry publication dates or CI. Missing required dates hold the merge. Testing can proceed.
-5. Edit dependencies only when the user requests an upgrade. Give [$fix-finding](../fix-finding/SKILL.md) the affected version, advisory revision and planned change. State any uncertainty about application reachability. Compare the graph before and after. In standard mode verify a clean install, the affected behavior and a legitimate caller.
-
-## Report the outcome
-
-Group alerts that share a fix and keep their IDs. State the outcome for the checkout, build or deployment examined.
-
-- **Fixed.** Verify replacement or removal. For a deployment, confirm the replacement actually rolled out.
-- **Not affected.** Cite proof, such as a backport in the scanned package. A missing call site or passing tests alone leave the alert open.
-- **Mitigated.** Identify the deployed control, remaining exposure, owner and review date.
-- **Risk accepted.** Cite the authorized human decision, scope, owner and expiry.
-- **Unresolved.** Name the affected copy or missing evidence and who can act on it.
-
-For a proposed dismissal, give the reviewer the alert, provider reason, evidence and when to recheck it. Only an authorized human approves and executes the dismissal in the scanner.
+When evidence is missing, leave the alert open and say what would resolve it. For a proposed dismissal, give the provider reason, evidence, and when to recheck. Only an authorized human approves and executes the dismissal.

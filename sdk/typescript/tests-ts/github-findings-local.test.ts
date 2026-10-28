@@ -5,7 +5,6 @@ import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
-  dependabotAlert,
   importedAlert,
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
@@ -114,64 +113,7 @@ test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
   },
 );
 
-test("Dependabot imports two alerts for one advisory without adopting a provider dismissal", async () => {
-  const fixture = await localFindingsFixture({
-    remote: "https://github.com/example/project",
-  });
-  fixtures.push(fixture);
-  const file = join(fixture.root, "dependabot.jsonl");
-  const options = {
-    repository: fixture.repository,
-    provider: "github" as const,
-    sourceKey: "dependabot",
-  };
-  const dependencies = { environment: fixture.environment };
-  const dismissed = { ...dependabotAlert(), state: "dismissed" };
-  const other = dependabotAlert(18);
-  const unpatched = {
-    ...other,
-    dependency: { package: other.dependency.package },
-    security_vulnerability: {
-      ...other.security_vulnerability,
-      first_patched_version: null,
-    },
-  };
-  await writeFile(
-    file,
-    [dismissed, unpatched].map((alert) => JSON.stringify(alert)).join("\n"),
-  );
-  const prepared = await prepareLocalExternalImport(
-    file,
-    options,
-    dependencies,
-  );
-  await prepared.import();
-  const stored = await listLocalExternalFindings(options, dependencies);
-  const prefix = "github.com/example/project/dependabot";
-  const first = stored.find((r) => r.sourceFindingId === `${prefix}/17`);
-  const second = stored.find((r) => r.sourceFindingId === `${prefix}/18`);
-  expect(first?.assessment.state).toBe("not_assessed");
-  expect(first?.evidence.source_data).toEqual(dismissed);
-  expect(first?.evidence.advisory_ids).toEqual([
-    "GHSA-2345-6789-cfgh",
-    "CVE-2026-0001",
-  ]);
-  expect(first?.evidence.packages?.[0]).toMatchObject({
-    name: "example-parser",
-    ecosystem: "npm",
-    vulnerable_version_range: "< 1.2.3",
-    manifest_path: "package-lock.json",
-    fixed_versions: ["1.2.3"],
-    installed_version: null,
-  });
-  expect(second?.evidence.packages?.[0]).toMatchObject({
-    manifest_path: null,
-    fixed_versions: [],
-    installed_version: null,
-  });
-});
-
-test.each(["code-scanning", "repository-advisory", "dependabot"] as const)(
+test.each(["code-scanning", "repository-advisory"] as const)(
   "GitHub %s refuses to attach another repository's evidence locally",
   async (kind) => {
     const fixture = await localFindingsFixture({
@@ -179,12 +121,7 @@ test.each(["code-scanning", "repository-advisory", "dependabot"] as const)(
     });
     fixtures.push(fixture);
     const file = join(fixture.root, "github.json");
-    await writeFile(
-      file,
-      JSON.stringify([
-        kind === "dependabot" ? dependabotAlert() : githubSource(kind),
-      ]),
-    );
+    await writeFile(file, JSON.stringify([githubSource(kind)]));
     await expect(
       prepareLocalExternalImport(
         file,

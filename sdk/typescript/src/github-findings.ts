@@ -1,23 +1,16 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import {
-  cloudRepositoryUrlKey,
-  validateExternalEvidence,
-} from "./external-import-contract.js";
+import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
-import type { ExternalFindingEvidence } from "./external-import-models.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
-import { isGitHubCloudHost } from "./git-remote.js";
 import {
-  parseJsonOrJsonl,
-  readScannerText,
-  record,
-  requiredText,
-  strings,
-  text,
-} from "./scanner-import.js";
+  isGitHubDependabotAlert,
+  normalizeGitHubDependabotAlerts,
+} from "./github-dependabot-findings.js";
+import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -27,10 +20,9 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
-  const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository ?? "");
-  if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
+  if (!repository || !githubRepositoryParts(repository))
     throw new Error("GitHub repository must be OWNER/REPO.");
-  return repository!;
+  return repository;
 }
 
 function sourceUrl(value: string): {
@@ -161,14 +153,6 @@ function codeScanningFinding(
   };
 }
 
-function advisoryIds(id: string, advisory: Record<string, unknown>) {
-  const ids = [id, advisory["cve_id"]];
-  if (Array.isArray(advisory["identifiers"]))
-    for (const identifier of advisory["identifiers"])
-      ids.push(object(identifier)?.["value"]);
-  return [...new Set(strings(ids))];
-}
-
 function advisoryFinding(
   record: Record<string, unknown>,
   target: ExternalImportTarget = "cloud",
@@ -180,7 +164,7 @@ function advisoryFinding(
   if (
     !advisory ||
     !id ||
-    !/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/iu.test(id) ||
+    !GHSA_ID.test(id) ||
     text(advisory["ghsa_id"])?.toUpperCase() !== id.toUpperCase()
   )
     throw new Error(
@@ -212,6 +196,14 @@ function advisoryFinding(
     advisory["vulnerabilities"] === null ? [] : advisory["vulnerabilities"];
   if (!Array.isArray(vulnerabilities))
     throw new Error("GitHub advisory vulnerabilities must be an array.");
+  const identifiers = Array.isArray(advisory["identifiers"])
+    ? advisory["identifiers"]
+    : [];
+  const advisoryIds = [
+    id,
+    text(advisory["cve_id"]),
+    ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
+  ].filter((value): value is string => value !== null);
   const packages = vulnerabilities.flatMap((value) => {
     const vulnerability = object(value);
     const pkg = object(vulnerability?.["package"]);
@@ -242,7 +234,7 @@ function advisoryFinding(
         severity: severity(advisory["severity"]),
         description: text(advisory["description"]),
         url,
-        advisory_ids: advisoryIds(id, advisory),
+        advisory_ids: [...new Set(advisoryIds)],
         packages,
         source_updated_at: sourceTimestamp(advisory["updated_at"]),
         source_data: record,
@@ -272,136 +264,6 @@ function advisoryFinding(
   };
 }
 
-function dependabotIdentity(
-  url: string | null,
-  alert?: Record<string, unknown>,
-) {
-  const match = url?.match(
-    /^https?:\/\/[^/?#]+\/([^/?#]+\/[^/?#]+)\/security\/dependabot\/([1-9]\d*)(?:[?#].*)?$/iu,
-  );
-  if (!url || !match) return;
-  const [, name, number] = match;
-  const { parsed, host, origin } = sourceUrl(url);
-  if (alert?.["number"] != null && alert["number"] !== Number(number))
-    throw new Error("Dependabot alert number must match its HTML URL.");
-  const repository = repositoryName(name);
-  const repositoryUrl = `${origin}/${repository}`;
-  const reported = object(alert?.["repository"]);
-  const apiBase = isGitHubCloudHost(parsed.hostname)
-    ? `${parsed.protocol}//api.${host}`
-    : `${origin}/api/v3`;
-  const reportedApiUrl = text(alert?.["url"])?.split(/[?#]/u, 1)[0];
-  // Compare the retained authorities, including explicit ports.
-  for (const [actual, expected] of [
-    [reported?.["full_name"], repository],
-    [reported?.["html_url"], repositoryUrl],
-    [
-      reportedApiUrl,
-      `${apiBase}/repos/${repository}/dependabot/alerts/${number}`,
-    ],
-  ] as const) {
-    if (
-      actual != null &&
-      text(actual)?.toLowerCase() !== expected.toLowerCase()
-    )
-      throw new Error(
-        "Dependabot source repository or API URL conflicts with its HTML URL.",
-      );
-  }
-  return {
-    url,
-    repositoryUrl,
-    id: `${host}/${repository.toLowerCase()}/dependabot/${number}`,
-  };
-}
-
-/** SCA evidence has no typed repository details in the shared import contract. */
-export function githubFindingRepositoryUrl(evidence: ExternalFindingEvidence) {
-  const raw = evidence.source_data;
-  const typed = evidence.details?.repository?.url;
-  if (
-    !raw ||
-    !object(raw["security_advisory"]) ||
-    !object(raw["security_vulnerability"])
-  )
-    return typed;
-  // A normalized projection can retain just the alert link and advisory data.
-  const location =
-    dependabotIdentity(
-      text(raw["html_url"]),
-      Number.isSafeInteger(raw["number"]) ? raw : undefined,
-    ) ?? dependabotIdentity(text(evidence.url));
-  if (!location) return typed;
-  const { repositoryUrl } = location;
-  if (
-    typed &&
-    cloudRepositoryUrlKey(typed) !== cloudRepositoryUrlKey(repositoryUrl)
-  )
-    throw new Error(
-      "Dependabot alert conflicts with the normalized source repository.",
-    );
-  return repositoryUrl;
-}
-
-function dependabotFinding(
-  alert: Record<string, unknown>,
-  target: ExternalImportTarget,
-): ExternalFinding {
-  const identity = dependabotIdentity(text(alert["html_url"]), alert);
-  if (!identity || !Number.isSafeInteger(alert["number"]))
-    throw new Error("Expected a Dependabot alert number and HTML URL.");
-  const advisory = record(alert["security_advisory"], "Dependabot advisory");
-  if (advisory["classification"] === "malware")
-    throw new Error("Route Dependabot malware alerts to incident response.");
-  const vulnerability = record(
-    alert["security_vulnerability"],
-    "Dependabot vulnerability",
-  );
-  const dependency = record(alert["dependency"], "Dependabot dependency");
-  const id = requiredText(advisory["ghsa_id"], "Dependabot advisory ghsa_id");
-  const affected = record(vulnerability["package"], "Dependabot package");
-  const name = requiredText(affected["name"], "Dependabot package name");
-  const ecosystem = requiredText(
-    affected["ecosystem"],
-    "Dependabot package ecosystem",
-  );
-  const pkg = object(dependency["package"]);
-  if (pkg && (pkg["name"] !== name || pkg["ecosystem"] !== ecosystem))
-    throw new Error(
-      "Dependabot dependency and security vulnerability packages must match.",
-    );
-  const path = text(dependency["manifest_path"]);
-  const patch = object(vulnerability["first_patched_version"]);
-  return {
-    source_finding_id: identity.id,
-    evidence: validateExternalEvidence(
-      {
-        title: text(advisory["summary"]) ?? id,
-        description: text(advisory["description"]),
-        severity: severity(vulnerability["severity"]),
-        url: identity.url,
-        advisory_ids: advisoryIds(id, advisory),
-        locations: path ? [{ path }] : [],
-        packages: [
-          {
-            name,
-            ecosystem,
-            manifest_path: path,
-            vulnerable_version_range: requiredText(
-              vulnerability["vulnerable_version_range"],
-              "Dependabot vulnerable version range",
-            ),
-            fixed_versions: strings([patch?.["identifier"]]),
-          },
-        ],
-        source_updated_at: sourceTimestamp(alert["updated_at"]),
-        source_data: alert,
-      },
-      target,
-    ),
-  };
-}
-
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
@@ -421,11 +283,9 @@ function normalizeRecords(
         finding = codeScanningFinding(record, target);
       else if (record["source"] === "github-security-advisory")
         finding = advisoryFinding(record, target);
-      else if (record["security_vulnerability"])
-        finding = dependabotFinding(record, target);
       else
         throw new Error(
-          "Expected a Dependabot alert or saved output from import github or import github-advisories.",
+          "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
         );
       if (identities.has(finding.source_finding_id))
         throw new CodexSecurityError(
@@ -437,7 +297,7 @@ function normalizeRecords(
       if (error instanceof CodexSecurityError) throw error;
       result.excluded.push({
         position: index + 1,
-        source_finding_id: text(record?.["html_url"]) ?? text(record?.["url"]),
+        source_finding_id: text(record?.["url"]),
         reason: errorMessage(error),
       });
     }
@@ -461,17 +321,24 @@ export function normalizeGitHubAdvisories(
   return normalizeRecords(advisories, target);
 }
 
-/** Read native Dependabot alerts and saved GitHub imports as JSON or JSONL. */
+/** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */
 export async function readGitHubFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
   try {
     const payload = parseJsonOrJsonl(await readScannerText(path));
-    return normalizeRecords(
-      Array.isArray(payload) ? payload : [payload],
-      target,
-    );
+    const rows = Array.isArray(payload) ? payload : [payload];
+    if (
+      (rows.length > 0 && rows.every(Array.isArray)) ||
+      rows.some((row) =>
+        Array.isArray(row)
+          ? row.some(isGitHubDependabotAlert)
+          : isGitHubDependabotAlert(row),
+      )
+    )
+      return normalizeGitHubDependabotAlerts(payload, target);
+    return normalizeRecords(rows, target);
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read GitHub findings as UTF-8 JSON or JSONL: ${errorMessage(cause)}`,
