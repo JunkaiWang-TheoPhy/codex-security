@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { once } from "node:events";
 import { jsonLines } from "./support/json.js";
 import { createServer, type Socket } from "node:net";
@@ -19,7 +20,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync, writeSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -28,14 +29,7 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import {
-  afterEach,
-  describe,
-  expect,
-  mock,
-  spyOn,
-  test as nativeTest,
-} from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -82,7 +76,7 @@ import {
 import { normalizeTarget } from "../src/targets.js";
 import {
   copyCompletedScan,
-  INTEGRATION_TARGET,
+  copyCredentialTestPlugin,
   PLUGIN_ROOT,
 } from "./plugin-root.js";
 import {
@@ -119,51 +113,15 @@ import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-function traceApiTest(
-  register: typeof nativeTest,
-  table?: readonly unknown[],
-): typeof nativeTest {
-  return new Proxy(register, {
-    apply(target, receiver, argumentsList) {
-      const [name, callback] = argumentsList;
-      if (typeof callback === "function") {
-        // Bun requires a real callback function and uses its arity for done.
-        const traced = function (this: unknown, ...parameters: unknown[]) {
-          const rows = table?.flatMap((row, index) => {
-            const values = Array.isArray(row) ? row : [row];
-            return values.every((value, column) =>
-              Object.is(value, parameters[column]),
-            )
-              ? [index]
-              : [];
-          });
-          writeSync(
-            2,
-            `[api test] start: ${name}${rows === undefined ? "" : ` (each rows: ${rows.join(",")})`}\n`,
-          );
-          return Reflect.apply(callback, this, parameters);
-        };
-        Object.defineProperty(traced, "length", { value: callback.length });
-        Object.defineProperty(traced, "name", { value: callback.name });
-        argumentsList[1] = traced;
-      }
-      return Reflect.apply(target, receiver, argumentsList);
-    },
-    get(target, property) {
-      const value = Reflect.get(target, property);
-      if (property === "each" || property === "skipIf") {
-        return (...parameters: unknown[]) =>
-          traceApiTest(
-            Reflect.apply(value, target, parameters),
-            property === "each" ? (parameters[0] as readonly unknown[]) : table,
-          );
-      }
-      return value;
-    },
-  });
+async function registerEightFileScan(
+  _options: unknown,
+  args: readonly string[],
+  input?: string,
+): Promise<JsonObject> {
+  return args[0] === "register-cli-scan"
+    ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+    : mockWorkbench(args, input);
 }
-
-const test = traceApiTest(nativeTest);
 
 // Exact ASCII fixture for the pinned native 64 KiB persistence representation.
 const commandHead = "h".repeat(32_743);
@@ -172,8 +130,7 @@ const persistedCommandOutput = `${commandHead}\n... command output truncated for
 const commandOutput = (middle: string) =>
   `${commandHead}\n${middle}\n${commandTail}`;
 
-const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -608,12 +565,6 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
-
-  test("selects a real-scan target in the active repository layout", async () => {
-    await expect(
-      stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
-    ).resolves.toBeDefined();
-  });
 
   test("validates local inputs before runtime or plugin Python discovery", async () => {
     const client = new CodexSecurity({
@@ -1996,14 +1947,8 @@ describe("CodexSecurity orchestration", () => {
   test.each(["revision", "registration", "cancellation", "mock"] as const)(
     "keeps existing output when %s prevents scan registration",
     async (failurePoint) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
@@ -2025,13 +1970,13 @@ describe("CodexSecurity orchestration", () => {
       try {
         await expect(
           client.run(repository, {
-            outputDir: output,
+            outputDir: scanDir,
             archiveExisting: true,
             signal: cancellation.signal,
             mock: failurePoint === "mock",
           }),
         ).rejects.toThrow();
-        expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+        expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
           "previous scan\n",
         );
         expect(
@@ -2048,14 +1993,8 @@ describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
     "archives accepted output before starting, cancellation=%p",
     async (cancelRegistration) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const output = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(output, { mode: 0o700 });
-      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
       const notifications: string[] = [];
       let archived: string | undefined;
@@ -2095,7 +2034,7 @@ describe("CodexSecurity orchestration", () => {
 
       await expect(
         client.run(repository, {
-          outputDir: output,
+          outputDir: scanDir,
           archiveExisting: true,
           signal: cancellation.signal,
           onOutputDirReady: () => {
@@ -2115,13 +2054,13 @@ describe("CodexSecurity orchestration", () => {
       expect(observerErrors).toEqual([
         ["onOutputArchived", "archive observer exploded"],
       ]);
-      expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+      expect(archived?.startsWith(`${scanDir}.previous-`)).toBe(true);
       expect(registration).toContain("--archive-existing");
       expect(registration).not.toContain("--archived-scan-dir");
       expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
         "previous scan\n",
       );
-      await expect(stat(output)).resolves.toBeDefined();
+      await expect(stat(scanDir)).resolves.toBeDefined();
       await client.close();
     },
   );
@@ -2139,9 +2078,7 @@ describe("CodexSecurity orchestration", () => {
   )(
     "cancels archived registration at $boundary via $cancel, mode=$mode",
     async ({ boundary, cancel, mode }) => {
-      const { root, repository, codexHome } = await runtimeDirectories();
-      const output = join(root, "scan");
-      await mkdir(output, { mode: 0o700 });
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
       const python = pythonExecutable()!;
       const environment = {
         PATH: process.env["PATH"],
@@ -2166,7 +2103,7 @@ describe("CodexSecurity orchestration", () => {
           "--repository",
           repository,
           "--scan-dir",
-          output,
+          scanDir,
           "--recipe-json",
           JSON.stringify({
             repository,
@@ -2183,7 +2120,7 @@ describe("CodexSecurity orchestration", () => {
           "--message",
           "synthetic stopped scan",
         ]);
-        await writeFile(join(output, "previous.txt"), "previous scan\n");
+        await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       }
       const connections = new Set<Socket>();
       let cleaningUp = false;
@@ -2198,43 +2135,51 @@ describe("CodexSecurity orchestration", () => {
       if (address === null || typeof address === "string")
         throw new Error("Missing fixture port");
       const pluginRoot = join(root, "controlled-plugin");
-      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+      for (const file of [
+        ".codex-plugin/plugin.json",
+        "skills/security-scan/SKILL.md",
+        "schemas/findings.schema.json",
+      ]) {
+        await cp(join(PLUGIN_ROOT, file), join(pluginRoot, file));
+      }
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      const afterRename = boundary === "commit" || boundary === "rollback";
+      const hook = afterRename
+        ? "insert_running_scan"
+        : "directory_snapshot_regular_file_count";
+      const framedArgument = "--fixture-message=出力\0literal\nsecond line";
       await writeFile(
         join(pluginRoot, "scripts", "workbench_db.py"),
-        [
-          "import io, runpy, socket, sys",
-          "from pathlib import Path",
-          `workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})`,
-          "namespace = workbench['main'].__globals__",
-          "def pause():",
-          `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
-          "        connection.sendall(b'ready')",
-          "        if connection.recv(1) == b'p':",
-          "            connection.sendall(b'alive')",
-          "            connection.recv(1)",
-          "def main(**kwargs):",
-          "    sys.stdout.reconfigure(newline='\\r\\n')",
-          "    if sys.argv[1:2] == ['register-cli-scan'] and '--help' not in sys.argv:",
-          ...(mode === "real"
-            ? [
-                `        sys.argv.remove(${JSON.stringify("--fixture-message=出力\0literal\nsecond line")})`,
-              ]
-            : []),
-          "        payload = sys.stdin.buffer.read()",
-          `        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)`,
-          '        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")',
-          `        original = namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}]`,
-          "        def paused(*args, **options):",
-          "            pause()",
-          ...(boundary === "rollback"
-            ? [
-                "            raise RuntimeError('synthetic registration failure after rename')",
-              ]
-            : ["            return original(*args, **options)"]),
-          `        namespace[${JSON.stringify(boundary === "commit" || boundary === "rollback" ? "insert_running_scan" : "directory_snapshot_regular_file_count")}] = paused`,
-          "    workbench['main'](**kwargs)",
-          "if __name__ == '__main__': main()",
-        ].join("\n"),
+        `import io, runpy, socket, sys
+from pathlib import Path
+
+workbench = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench_db.py"))})
+namespace = workbench["main"].__globals__
+original = namespace["${hook}"]
+
+def paused(*args, **options):
+    with socket.create_connection(("127.0.0.1", ${address.port})) as connection:
+        connection.sendall(b"ready")
+        if connection.recv(1) == b"p":
+            connection.sendall(b"alive")
+            connection.recv(1)
+    if ${JSON.stringify(boundary)} == "rollback":
+        raise RuntimeError("synthetic registration failure after rename")
+    return original(*args, **options)
+
+def main(**kwargs):
+    sys.stdout.reconfigure(newline="\\r\\n")
+    if sys.argv[1:2] == ["register-cli-scan"] and "--help" not in sys.argv:
+        sys.argv.remove(${JSON.stringify(framedArgument)})
+        payload = sys.stdin.buffer.read()
+        Path(${JSON.stringify(join(root, "registration-input.json"))}).write_bytes(payload)
+        sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
+        namespace["${hook}"] = paused
+    workbench["main"](**kwargs)
+
+if __name__ == "__main__":
+    main()
+`,
       );
       let submitted: string | undefined;
       const registration: typeof runWorkbench = async (
@@ -2242,15 +2187,12 @@ describe("CodexSecurity orchestration", () => {
         args,
         input,
       ) => {
-        if (args[0] === "register-cli-scan") {
-          submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
-          input = submitted;
-          // The custom wrapper accepts this text argument before calling the
-          // real workbench, exercising framed argv at each archive boundary.
-          if (mode === "real")
-            args = [...args, "--fixture-message=出力\0literal\nsecond line"];
-        }
-        return runWorkbench(options, args, input);
+        if (args[0] !== "register-cli-scan")
+          return runWorkbench(options, args, input);
+        submitted = `\n${JSON.stringify(JSON.parse(input!), null, 2)}\r\n`;
+        // The custom wrapper accepts this text argument before calling the
+        // real workbench, exercising framed argv at each archive boundary.
+        return runWorkbench(options, [...args, framedArgument], submitted);
       };
       const controller = new AbortController();
       const client = new TestClient(
@@ -2276,7 +2218,7 @@ describe("CodexSecurity orchestration", () => {
       const deadline = guard.signal;
       const connected = once(server, "connection", { signal: deadline });
       const options = {
-        outputDir: output,
+        outputDir: scanDir,
         archiveExisting: true,
         signal: controller.signal,
       };
@@ -2337,7 +2279,7 @@ describe("CodexSecurity orchestration", () => {
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
-        if (boundary === "commit" || boundary === "rollback") {
+        if (afterRename) {
           // This child has already renamed the directory. A request/response
           // proves it remains alive after cancellation until we let it settle.
           const alive = once(socket, "data", { signal: deadline });
@@ -2361,7 +2303,7 @@ describe("CodexSecurity orchestration", () => {
         );
         if (previousId !== undefined) {
           const previous = scans.find((scan) => scan.scanId === previousId)!;
-          expect(previous.scanDir === output).toBe(boundary !== "commit");
+          expect(previous.scanDir === scanDir).toBe(boundary !== "commit");
           expect(
             await readFile(join(previous.scanDir, "previous.txt"), "utf8"),
           ).toBe("previous scan\n");
@@ -4198,14 +4140,7 @@ describe("CodexSecurity orchestration", () => {
       );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {
@@ -4387,14 +4322,7 @@ describe("CodexSecurity orchestration", () => {
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -4563,14 +4491,7 @@ describe("CodexSecurity orchestration", () => {
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -5145,14 +5066,7 @@ describe("CodexSecurity orchestration", () => {
       };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -5242,14 +5156,7 @@ describe("CodexSecurity orchestration", () => {
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -5428,14 +5335,7 @@ describe("CodexSecurity orchestration", () => {
 
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -5543,14 +5443,7 @@ describe("CodexSecurity orchestration", () => {
 
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -5893,11 +5786,7 @@ describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
     "retains saved parent coverage across idle polls (split inventory: %p)",
     async (split) => {
-      const stage = (name: string) =>
-        writeSync(2, `[saved parent progress] split=${split}: ${name}\n`);
-      stage("fixtures begin");
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      stage("fixtures ready");
       const updates: ScanProgress[] = [];
       const inventoryRead = Promise.withResolvers<void>();
       const completeRead = Promise.withResolvers<void>();
@@ -5918,39 +5807,20 @@ describe("CodexSecurity orchestration", () => {
                 }),
         },
       });
-      stage("construct client");
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
-          stage("runStreamed entry");
-          stage("copy scan begin");
           await copyCompletedScan(root);
-          stage("copy scan end");
-          stage("write session begin");
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          stage("write session end");
           async function* events(): AsyncGenerator<ThreadEvent> {
-            stage("generator entry");
             if (split) {
-              stage("inventory append begin");
               await appendFile(
                 rollout,
                 JSON.stringify(receipt("inventory", 0)) + "\n",
               );
-              stage("inventory append end");
-              stage("inventory wait begin");
               await inventoryRead.promise;
-              stage("inventory wait resolved");
             }
-            stage("complete append begin");
             await appendFile(
               rollout,
               [
@@ -5960,16 +5830,9 @@ describe("CodexSecurity orchestration", () => {
                 .map((row) => JSON.stringify(row))
                 .join("\n") + "\n",
             );
-            stage("complete append end");
-            stage("complete wait begin");
             await completeRead.promise;
-            stage("complete wait resolved");
-            stage("idle append begin");
             await appendFile(rollout, JSON.stringify(receipt("idle")) + "\n");
-            stage("idle append end");
-            stage("idle wait begin");
             await idleRead.promise;
-            stage("idle wait resolved");
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -5977,26 +5840,21 @@ describe("CodexSecurity orchestration", () => {
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
       try {
-        stage("client.run begin");
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
           onSessionEvent: ({ event }) => {
             const id = (event["payload"] as { call_id?: string })?.call_id;
             if (id === "inventory") {
-              stage("inventory observed");
               inventoryRead.resolve();
             }
             if (id === "complete") {
-              stage("complete observed");
               completeRead.resolve();
             }
             if (id === "idle") {
-              stage("idle observed");
               idleRead.resolve();
             }
           },
         });
-        stage("client.run end");
         expect(updates.at(-1)).toEqual({
           phase: "discovery",
           filesCompleted: 7,
@@ -6016,9 +5874,7 @@ describe("CodexSecurity orchestration", () => {
         ).toBe(true);
       } finally {
         clearInterval(keepAlive);
-        stage("client.close begin");
         await client.close();
-        stage("client.close end");
       }
     },
   );
@@ -6117,14 +5973,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker("discovery", completed, total);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -6303,14 +6152,7 @@ describe("CodexSecurity orchestration", () => {
       );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -6383,14 +6225,7 @@ describe("CodexSecurity orchestration", () => {
     const marker = (phase: string) => progressMarker(phase, 8, 8);
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-          : mockWorkbench(args, input),
+      runWorkbench: registerEightFileScan,
       createCodex: codexFactory(async () => {
         await copyCompletedScan(root);
         const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -6484,14 +6319,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker(phase, count, 9);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -6592,14 +6420,7 @@ describe("CodexSecurity orchestration", () => {
 
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -6705,14 +6526,7 @@ describe("CodexSecurity orchestration", () => {
 
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -6856,14 +6670,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker(phase, count, 9);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -6985,14 +6792,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker(phase, 8, 8);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -7116,14 +6916,7 @@ describe("CodexSecurity orchestration", () => {
         workerPhase === "discovery" ? "attack_path" : "validation";
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -7309,14 +7102,7 @@ describe("CodexSecurity orchestration", () => {
         completedCommand(command, output);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -7476,14 +7262,7 @@ describe("CodexSecurity orchestration", () => {
       );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -7826,14 +7605,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker(phase, 8, 8);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -8013,14 +7785,7 @@ describe("CodexSecurity orchestration", () => {
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -8182,14 +7947,7 @@ describe("CodexSecurity orchestration", () => {
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -8368,14 +8126,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker(phase, count, laterInventory && count > 0 ? 8 : total);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -8674,14 +8425,7 @@ describe("CodexSecurity orchestration", () => {
       };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -8789,14 +8533,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalReaddir);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -8975,14 +8712,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalOpen);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -9129,14 +8859,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalReaddir);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -9410,14 +9133,7 @@ describe("CodexSecurity orchestration", () => {
               );
         const client = TestClient.withDependencies({
           ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
+          runWorkbench: registerEightFileScan,
           createCodex: codexFactory(async () => {
             await copyCompletedScan(root);
             parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -9556,14 +9272,7 @@ describe("CodexSecurity orchestration", () => {
                 };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -10052,14 +9761,7 @@ describe("CodexSecurity orchestration", () => {
               );
         const client = TestClient.withDependencies({
           ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
+          runWorkbench: registerEightFileScan,
           createCodex: codexFactory(async () => {
             await copyCompletedScan(root);
             parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -10342,14 +10044,7 @@ describe("CodexSecurity orchestration", () => {
                 .join("\n");
         const client = TestClient.withDependencies({
           ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
+          runWorkbench: registerEightFileScan,
           createCodex: codexFactory(async () => {
             await copyCompletedScan(root);
             parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -10457,6 +10152,33 @@ describe("CodexSecurity orchestration", () => {
     | readonly ["boundary"]
     | readonly ["resolve"]
     | readonly ["begin"];
+  type ProgressScenario = {
+    name: string;
+    expected: ScanProgress;
+    steps: readonly ProgressScenarioStep[];
+    stopBeforeResolution?: boolean;
+  };
+  type ScopedProgressScenario = ProgressScenario & {
+    initialScope: number | null;
+    partitions?: readonly ("batch" | "each")[];
+  };
+  type SplitProgressScenario = ProgressScenario & {
+    partitions?: readonly boolean[];
+  };
+  const progress = (
+    phase: ScanProgress["phase"],
+    filesCompleted: number,
+    filesTotal: number,
+  ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+  const inventory = (total: number) => progress("discovery", 0, total);
+  const progressText = (value: ProgressScenarioValue) =>
+    typeof value === "string"
+      ? value
+      : [value]
+          .flat()
+          .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+          .join("\n");
+
   async function runProgressScenario(
     {
       steps,
@@ -10483,13 +10205,6 @@ describe("CodexSecurity orchestration", () => {
       pollReceipts?: boolean;
     } = {},
   ): Promise<void> {
-    const text = (value: ProgressScenarioValue) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];
     const checkpoints: {
@@ -10581,7 +10296,7 @@ describe("CodexSecurity orchestration", () => {
             else if (step[0] === "live-changed")
               yield completedCommand(
                 `${step[1]} displayed`,
-                text(step[2]),
+                progressText(step[2]),
                 `item-${index}`,
               );
             else if (step[0] === "save-response")
@@ -10593,7 +10308,9 @@ describe("CodexSecurity orchestration", () => {
                     payload: {
                       type: "message",
                       role: "assistant",
-                      content: [{ type: "output_text", text: text(step[2]) }],
+                      content: [
+                        { type: "output_text", text: progressText(step[2]) },
+                      ],
                     },
                   },
                 ]) + "\n",
@@ -10604,7 +10321,7 @@ describe("CodexSecurity orchestration", () => {
                 item: {
                   id: `item-${index}`,
                   type: "agent_message",
-                  text: text(step[2]),
+                  text: progressText(step[2]),
                 },
               };
             else if (step[0] === "save-message")
@@ -10618,19 +10335,29 @@ describe("CodexSecurity orchestration", () => {
                       item: {
                         type: "AgentMessage",
                         id: `native-${index}`,
-                        content: [{ type: "Text", text: text(step[2]) }],
+                        content: [
+                          { type: "Text", text: progressText(step[2]) },
+                        ],
                       },
                     },
                   },
                 ]) + "\n",
               );
             else if (step[0] === "live")
-              yield completedCommand(step[1], text(step[2]), `item-${index}`);
+              yield completedCommand(
+                step[1],
+                progressText(step[2]),
+                `item-${index}`,
+              );
             else if (step[0] === "save" || step[0] === "save-quiet")
               await appendFile(
                 parentPath,
                 jsonLines([
-                  nativeCommand(step[1], text(step[2]), `native-${index}`),
+                  nativeCommand(
+                    step[1],
+                    progressText(step[2]),
+                    `native-${index}`,
+                  ),
                 ]) + "\n",
               );
             else
@@ -10651,7 +10378,7 @@ describe("CodexSecurity orchestration", () => {
                     payload: {
                       type: "custom_tool_call_output",
                       call_id: `worker-${index}`,
-                      output: text(step[1]),
+                      output: progressText(step[1]),
                     },
                   },
                 ]) + "\n",
@@ -10695,51 +10422,7 @@ describe("CodexSecurity orchestration", () => {
   }
 
   describe("displayed receipt eligibility after inventory recovery", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "save-quiet"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "scope" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["boundary"]
-      | readonly ["resolve"]
-      | readonly ["begin"];
-    type Scenario = {
-      name: string;
-      initialScope: number | null;
-      partitions?: readonly ("batch" | "each")[];
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: ScopedProgressScenario[] = [];
     for (const mode of [
       "changed",
       "exact",
@@ -10761,7 +10444,9 @@ describe("CodexSecurity orchestration", () => {
       const next = progress("reporting", state.filesCompleted + 1, 5);
       const latest = mode === "multi marker" ? [inventory(5), review] : review;
       const liveText =
-        mode === "truncated latest" ? commandOutput(text(review)) : latest;
+        mode === "truncated latest"
+          ? commandOutput(progressText(review))
+          : latest;
       const savedText =
         mode === "truncated latest" ? persistedCommandOutput : latest;
       scenarios.push({
@@ -10773,9 +10458,12 @@ describe("CodexSecurity orchestration", () => {
           ["live", "inventory", inventory(5)],
           ...(mode === "omit latest"
             ? []
-            : ([["live", "latest", liveText]] as Step[])),
+            : ([["live", "latest", liveText]] as ProgressScenarioStep[])),
           ...(mode === "worker prior"
-            ? ([["worker", progress("attack_path", 1, 5)], ["poll"]] as Step[])
+            ? ([
+                ["worker", progress("attack_path", 1, 5)],
+                ["poll"],
+              ] as ProgressScenarioStep[])
             : []),
           ["save-quiet", "initial", inventory(5)],
           ["save-quiet", "first", review],
@@ -10784,7 +10472,9 @@ describe("CodexSecurity orchestration", () => {
           ["resolve"],
           ...(mode === "live only latest"
             ? []
-            : ([["save-quiet", "latest", savedText]] as Step[])),
+            : ([
+                ["save-quiet", "latest", savedText],
+              ] as ProgressScenarioStep[])),
           ["poll"],
           ["check", state],
           ["save-quiet", "anchor", "done"],
@@ -10822,51 +10512,7 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("recovered scope and phase authority", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "save-quiet"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "scope" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["boundary"]
-      | readonly ["resolve"]
-      | readonly ["begin"];
-    type Scenario = {
-      name: string;
-      initialScope: number | null;
-      partitions?: readonly ("batch" | "each")[];
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: ScopedProgressScenario[] = [];
     for (const initialScope of [null, 8]) {
       for (const multiple of [false, true]) {
         scenarios.push({
@@ -10875,7 +10521,7 @@ describe("CodexSecurity orchestration", () => {
           expected: progress("reporting", 4, 5),
           steps: [
             ...(multiple
-              ? ([["save", "initial", inventory(8)]] as Step[])
+              ? ([["save", "initial", inventory(8)]] as ProgressScenarioStep[])
               : []),
             ["save", "corrected", inventory(5)],
             ["save", "review", progress("validation", 3, 5)],
@@ -10895,7 +10541,7 @@ describe("CodexSecurity orchestration", () => {
         });
       }
       for (const mode of ["changed", "exact", "complete"] as const) {
-        const full = commandOutput(text(inventory(10)));
+        const full = commandOutput(progressText(inventory(10)));
         scenarios.push({
           name: `unbounded admitted scope (initial=${initialScope}, mode=${mode})`,
           initialScope,
@@ -10970,9 +10616,9 @@ describe("CodexSecurity orchestration", () => {
                   [
                     mode === "exact" ? "live" : "live-changed",
                     "latest",
-                    commandOutput(text(latest)),
+                    commandOutput(progressText(latest)),
                   ],
-                ] as Step[])),
+                ] as ProgressScenarioStep[])),
             ["poll"],
             ["check", expected],
             ["resolve"],
@@ -10983,10 +10629,10 @@ describe("CodexSecurity orchestration", () => {
                     "save",
                     "latest",
                     mode === "complete"
-                      ? commandOutput(text(latest))
+                      ? commandOutput(progressText(latest))
                       : persistedCommandOutput,
                   ],
-                ] as Step[])),
+                ] as ProgressScenarioStep[])),
             ["save", "anchor", "done"],
             ["live", "anchor", "done"],
             ["poll"],
@@ -11023,54 +10669,10 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("admitted inventory across truncated live copies", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "save-quiet"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "scope" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["boundary"]
-      | readonly ["resolve"]
-      | readonly ["begin"];
-    type Scenario = {
-      name: string;
-      initialScope: number | null;
-      partitions?: readonly ("batch" | "each")[];
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
     const outputs = (values: readonly ScanProgress[], visible: number) => {
       const pre = values
         .slice(0, visible)
-        .map((p) => text(p))
+        .map((p) => progressText(p))
         .join("\n");
       const prefix =
         (pre ? pre + "\n" : "") +
@@ -11078,14 +10680,14 @@ describe("CodexSecurity orchestration", () => {
       const rest =
         values
           .slice(visible)
-          .map((p) => text(p))
+          .map((p) => progressText(p))
           .join("\n") || "m".repeat(100);
       return {
         full: `${prefix}\n${rest}\n${commandTail}`,
         saved: `${prefix}\n... command output truncated for persistence ...\n${commandTail}`,
       };
     };
-    const scenarios: Scenario[] = [];
+    const scenarios: ScopedProgressScenario[] = [];
     for (const initialScope of [8, null]) {
       for (const mode of [
         "delayed",
@@ -11108,7 +10710,7 @@ describe("CodexSecurity orchestration", () => {
           : progress("reporting", 3, 8);
         const currentText =
           mode === "untruncated"
-            ? text([inventory(8), progress("validation", 1, 8)])
+            ? progressText([inventory(8), progress("validation", 1, 8)])
             : current.full;
         const currentSaved =
           mode === "untruncated" ? currentText : current.saved;
@@ -11121,7 +10723,9 @@ describe("CodexSecurity orchestration", () => {
             ["save", "old", old.saved],
             ["save", "current", currentSaved],
             ...(mode === "ambiguous"
-              ? ([["save", "repeated current", currentSaved]] as Step[])
+              ? ([
+                  ["save", "repeated current", currentSaved],
+                ] as ProgressScenarioStep[])
               : []),
             ...(mode === "unadmitted"
               ? []
@@ -11133,10 +10737,14 @@ describe("CodexSecurity orchestration", () => {
                       ? progress("validation", 1, 8)
                       : inventory(8),
                   ],
-                ] as Step[])),
-            ...(mode === "new turn" ? ([["begin"]] as Step[]) : []),
+                ] as ProgressScenarioStep[])),
+            ...(mode === "new turn"
+              ? ([["begin"]] as ProgressScenarioStep[])
+              : []),
             ...(mode === "early"
-              ? ([["live-changed", "current", currentText]] as Step[])
+              ? ([
+                  ["live-changed", "current", currentText],
+                ] as ProgressScenarioStep[])
               : []),
             ["save-quiet", "review", progress("reporting", 1, 8)],
             ["live-changed", "old", old.full],
@@ -11150,7 +10758,7 @@ describe("CodexSecurity orchestration", () => {
                     "current",
                     currentText,
                   ],
-                ] as Step[])),
+                ] as ProgressScenarioStep[])),
             ["live", "review", progress("reporting", 1, 8)],
             ["poll"],
             ["check", reviewed],
@@ -11166,7 +10774,7 @@ describe("CodexSecurity orchestration", () => {
                   ["save", "followup", progress("reporting", 3, 8)],
                   ["poll"],
                   ["check", settled],
-                ] as Step[])),
+                ] as ProgressScenarioStep[])),
           ],
         });
       }
@@ -11192,48 +10800,12 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("saved inventory receipts and live prefix proof", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "scope" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["boundary"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
-    const add = (name: string, state: ScanProgress, steps: Step[]) => {
+    const scenarios: ProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+    ) => {
       const next = progress(
         state.filesCompleted === state.filesTotal ? "validation" : "reporting",
         Math.min(state.filesCompleted + 1, state.filesTotal),
@@ -11275,7 +10847,7 @@ describe("CodexSecurity orchestration", () => {
         progress("reporting", 9, 9),
         [
           ...(mode === "live first"
-            ? ([[live, "batch", values]] as Step[])
+            ? ([[live, "batch", values]] as ProgressScenarioStep[])
             : []),
           ["save", "batch", values],
           ["poll"],
@@ -11283,7 +10855,7 @@ describe("CodexSecurity orchestration", () => {
           ["resolve"],
           ...(mode === "live first"
             ? []
-            : ([[live, "batch", values]] as Step[])),
+            : ([[live, "batch", values]] as ProgressScenarioStep[])),
           ["save", "report", progress("reporting", 9, 9)],
           ["live", "report", progress("reporting", 9, 9)],
           ...(mode === "repeated source"
@@ -11292,7 +10864,7 @@ describe("CodexSecurity orchestration", () => {
                 ["check", progress("reporting", 9, 9)],
                 ["save", "batch", values],
                 ["save", "late expansion", inventory(10)],
-              ] as Step[])
+              ] as ProgressScenarioStep[])
             : []),
         ],
       );
@@ -11323,14 +10895,16 @@ describe("CodexSecurity orchestration", () => {
                 ? "live"
                 : "live-changed",
             "latest",
-            mode === "truncated" ? commandOutput(text(last)) : last,
+            mode === "truncated" ? commandOutput(progressText(last)) : last,
           ],
           ["save", "inventory", inventory(5)],
           ["save", "first", first],
           ...(mode === "truncated"
-            ? ([["save", "latest", persistedCommandOutput]] as Step[])
+            ? ([
+                ["save", "latest", persistedCommandOutput],
+              ] as ProgressScenarioStep[])
             : mode === "complete" || mode === "exact"
-              ? ([["save", "latest", last]] as Step[])
+              ? ([["save", "latest", last]] as ProgressScenarioStep[])
               : []),
           ["poll"],
           ...(mode === "unproved prefix"
@@ -11339,13 +10913,13 @@ describe("CodexSecurity orchestration", () => {
                 ["resolve"],
                 ["save", "latest", last],
                 ["live", "latest", last],
-              ] as Step[])
+              ] as ProgressScenarioStep[])
             : ([
                 ["check", last],
                 ["resolve"],
                 ["save", "anchor", "done"],
                 ["live", "anchor", "done"],
-              ] as Step[])),
+              ] as ProgressScenarioStep[])),
           ["worker", progress("attack_path", 5, 8)],
           ["poll"],
           ["check", last],
@@ -11388,41 +10962,12 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("source eligibility and durable inventory proof", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "scope" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["boundary"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const scenarios: Scenario[] = [];
-    const add = (name: string, state: ScanProgress, steps: Step[]) => {
+    const scenarios: ProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+    ) => {
       const next = progress(
         "reporting",
         state.filesCompleted + 1,
@@ -11502,12 +11047,12 @@ describe("CodexSecurity orchestration", () => {
               ? ([
                   ["live", "initial", inventory(8)],
                   ["save", "initial", inventory(8)],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             [live, "review", review],
             ...(mode === "omit rejected" || mode === "after anchor"
               ? []
-              : ([[live, "rejected", rejected]] as Step[])),
+              : ([[live, "rejected", rejected]] as ProgressScenarioStep[])),
             ["save", "correction", inventory(total)],
             ["save", "review", review],
             ["save", "rejected", rejected],
@@ -11516,7 +11061,10 @@ describe("CodexSecurity orchestration", () => {
             ["save", "anchor", "done"],
             ["live", "anchor", "done"],
             ...(mode === "after anchor"
-              ? ([["poll"], [live, "rejected", rejected]] as Step[])
+              ? ([
+                  ["poll"],
+                  [live, "rejected", rejected],
+                ] as ProgressScenarioStep[])
               : []),
             ["poll"],
             ["scope", inventory(total)],
@@ -11548,44 +11096,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("review eligibility and ordered projections", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-      partitions?: readonly boolean[];
-    };
-    const scenarios: Scenario[] = [];
+    const scenarios: SplitProgressScenario[] = [];
     const add = (
       name: string,
       state: ScanProgress,
-      steps: Step[],
+      steps: ProgressScenarioStep[],
       partitions?: readonly boolean[],
     ) => {
       const next =
@@ -11637,11 +11152,14 @@ describe("CodexSecurity orchestration", () => {
                     "review",
                     review,
                   ],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["save", "initial", inventory(initialTotal)],
             ...(mode === "after inventory"
-              ? ([["poll"], ["live", "review", review]] as Step[])
+              ? ([
+                  ["poll"],
+                  ["live", "review", review],
+                ] as ProgressScenarioStep[])
               : []),
             ["save", "review", review],
             ["poll"],
@@ -11677,12 +11195,12 @@ describe("CodexSecurity orchestration", () => {
           ],
           ...(mode === "no repeat"
             ? []
-            : ([[live, "last", inventory(10)]] as Step[])),
+            : ([[live, "last", inventory(10)]] as ProgressScenarioStep[])),
           ["save", "middle", inventory(8)],
           ["save", "review", progress("reporting", 3, 8)],
           ...(mode === "no repeat"
             ? []
-            : ([["save", "last", inventory(10)]] as Step[])),
+            : ([["save", "last", inventory(10)]] as ProgressScenarioStep[])),
           ["save", "anchor", "done"],
           ["resolve"],
           ["live", "anchor", "done"],
@@ -11711,44 +11229,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("inventory authority before scope projection", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-      partitions?: readonly boolean[];
-    };
-    const scenarios: Scenario[] = [];
+    const scenarios: SplitProgressScenario[] = [];
     const add = (
       name: string,
       state: ScanProgress,
-      steps: Step[],
+      steps: ProgressScenarioStep[],
       partitions?: readonly boolean[],
     ) => {
       const next =
@@ -11801,7 +11286,7 @@ describe("CodexSecurity orchestration", () => {
               ? ([
                   ["save", "late-inventory", inventory(5)],
                   ["save", "late-parent", progress(phase, 6, 8)],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["poll"],
             ["check", progress("validation", 3, 5)],
@@ -11810,7 +11295,7 @@ describe("CodexSecurity orchestration", () => {
               ? ([
                   ["save", "late-inventory", inventory(5)],
                   ["save", "late-parent", progress(phase, 6, 8)],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
           ],
         );
@@ -11837,7 +11322,9 @@ describe("CodexSecurity orchestration", () => {
           ["save", "late", inventory(5)],
           ["save", "final", inventory(8)],
           ...(mode === "review delivered"
-            ? ([["live", "review", progress("validation", 3, 8)]] as Step[])
+            ? ([
+                ["live", "review", progress("validation", 3, 8)],
+              ] as ProgressScenarioStep[])
             : []),
           [mode === "exact" ? "live" : "live-changed", "late", inventory(5)],
           ["resolve"],
@@ -11867,51 +11354,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("inventory proof across completion intervals", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-      partitions?: readonly boolean[];
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: SplitProgressScenario[] = [];
     const add = (
       name: string,
       state: ScanProgress,
-      steps: Step[],
+      steps: ProgressScenarioStep[],
       partitions?: readonly boolean[],
     ) => {
       const next =
@@ -11966,7 +11413,7 @@ describe("CodexSecurity orchestration", () => {
               [
                 exact ? "live" : "live-changed",
                 "inventory",
-                commandOutput(text(markers)),
+                commandOutput(progressText(markers)),
               ],
               ["save", "inventory", persistedCommandOutput],
               ["poll"],
@@ -11987,13 +11434,17 @@ describe("CodexSecurity orchestration", () => {
           `intermediate completion bound (exact=${exact}, review=${intermediate})`,
           progress("reporting", 3, 10),
           [
-            ["live-changed", "inventory", commandOutput(text(inventory(10)))],
+            [
+              "live-changed",
+              "inventory",
+              commandOutput(progressText(inventory(10))),
+            ],
             [
               exact ? "live" : "live-changed",
               "review",
               intermediate === "complete"
                 ? review
-                : commandOutput(text(review)),
+                : commandOutput(progressText(review)),
             ],
             ["save", "inventory", persistedCommandOutput],
             [
@@ -12002,14 +11453,18 @@ describe("CodexSecurity orchestration", () => {
               intermediate === "complete" ? review : persistedCommandOutput,
             ],
             ...(intermediate === "complete"
-              ? ([["save", "report", progress("reporting", 3, 10)]] as Step[])
+              ? ([
+                  ["save", "report", progress("reporting", 3, 10)],
+                ] as ProgressScenarioStep[])
               : []),
             ["save", "anchor", "done"],
             ["resolve"],
             ["live", "anchor", "done"],
             ["poll"],
             ...(intermediate === "omitted"
-              ? ([["save", "report", progress("reporting", 3, 10)]] as Step[])
+              ? ([
+                  ["save", "report", progress("reporting", 3, 10)],
+                ] as ProgressScenarioStep[])
               : []),
           ],
         );
@@ -12029,7 +11484,9 @@ describe("CodexSecurity orchestration", () => {
               [exact ? "live" : "live-changed", "review", review],
               ["save", "review", review],
               ...(zero
-                ? ([["save", "zero", progress("threat_model", 0, 5)]] as Step[])
+                ? ([
+                    ["save", "zero", progress("threat_model", 0, 5)],
+                  ] as ProgressScenarioStep[])
                 : []),
               ["save", "anchor", "done"],
               ["resolve"],
@@ -12059,51 +11516,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("bounded inventory marker evidence", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-      partitions?: readonly boolean[];
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: SplitProgressScenario[] = [];
     const add = (
       name: string,
       state: ScanProgress,
-      steps: Step[],
+      steps: ProgressScenarioStep[],
       partitions?: readonly boolean[],
     ) => {
       const next =
@@ -12175,7 +11592,9 @@ describe("CodexSecurity orchestration", () => {
             ["save", "current", markers],
             ["poll"],
             ...(delayed
-              ? ([["live-changed", "old", inventory(8)]] as Step[])
+              ? ([
+                  ["live-changed", "old", inventory(8)],
+                ] as ProgressScenarioStep[])
               : []),
             ["live", "anchor", inventory(8)],
             ["poll"],
@@ -12202,7 +11621,7 @@ describe("CodexSecurity orchestration", () => {
             ...(kind === "persisted message"
               ? ([
                   ["save-message", "inventory", inventory(messageTotal)],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["save", "anchor", "done"],
             ["resolve"],
@@ -12230,7 +11649,7 @@ describe("CodexSecurity orchestration", () => {
             [
               command === "exact" ? "live" : "live-changed",
               "inventory",
-              commandOutput(text(markers)),
+              commandOutput(progressText(markers)),
             ],
             ["save", "inventory", persistedCommandOutput],
             ["poll"],
@@ -12252,14 +11671,14 @@ describe("CodexSecurity orchestration", () => {
           [
             live,
             "early-review",
-            commandOutput(text(progress("discovery", 1, 8))),
+            commandOutput(progressText(progress("discovery", 1, 8))),
           ],
-          [live, "late-inventory", commandOutput(text(inventory(9)))],
+          [live, "late-inventory", commandOutput(progressText(inventory(9)))],
           ...(kind === "command"
             ? ([
                 ["save", "early-review", persistedCommandOutput],
                 ["save", "late-inventory", persistedCommandOutput],
-              ] as Step[])
+              ] as ProgressScenarioStep[])
             : []),
           ["save", "anchor", progress("validation", 3, 8)],
           ["resolve"],
@@ -12289,51 +11708,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("inventory occurrence and cutoff revalidation", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-      partitions?: readonly boolean[];
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: SplitProgressScenario[] = [];
     const add = (
       name: string,
       state: ScanProgress,
-      steps: Step[],
+      steps: ProgressScenarioStep[],
       partitions?: readonly boolean[],
     ) => {
       const next =
@@ -12382,7 +11761,7 @@ describe("CodexSecurity orchestration", () => {
           ["live", "expanded", inventory(10)],
           ["save", "restored", inventory(8)],
           ...(control === "delivered"
-            ? ([["live", "restored", inventory(8)]] as Step[])
+            ? ([["live", "restored", inventory(8)]] as ProgressScenarioStep[])
             : []),
           ["save", "review", review],
           ["poll"],
@@ -12407,12 +11786,18 @@ describe("CodexSecurity orchestration", () => {
           ["live", "final-inventory", inventory(4)],
           ["live", "final-report", progress("reporting", 4, 4)],
           ["save", "review", progress("discovery", 3, 7)],
-          ...(control !== "single batch" ? ([["poll"]] as Step[]) : []),
-          ...(control !== "single batch" ? ([["resolve"]] as Step[]) : []),
+          ...(control !== "single batch"
+            ? ([["poll"]] as ProgressScenarioStep[])
+            : []),
+          ...(control !== "single batch"
+            ? ([["resolve"]] as ProgressScenarioStep[])
+            : []),
           ["save", "final-inventory", inventory(4)],
           ["save", "final-report", progress("reporting", 4, 4)],
           ["save", "anchor", "done"],
-          ...(control === "single batch" ? ([["resolve"]] as Step[]) : []),
+          ...(control === "single batch"
+            ? ([["resolve"]] as ProgressScenarioStep[])
+            : []),
           ["live", "anchor", "done"],
         ],
         control === "single batch" ? [false] : undefined,
@@ -12430,15 +11815,15 @@ describe("CodexSecurity orchestration", () => {
         [
           ["save", "old", persistedCommandOutput],
           ["save", "note", "done"],
-          ["live-changed", "old", commandOutput(text(inventory(5)))],
+          ["live-changed", "old", commandOutput(progressText(inventory(5)))],
           ...(control === "early anchor"
-            ? ([["live", "note", "done"]] as Step[])
+            ? ([["live", "note", "done"]] as ProgressScenarioStep[])
             : []),
           ["save", "review", review],
           ["poll"],
           ["resolve"],
           ...(control !== "early anchor"
-            ? ([["live", "note", "done"]] as Step[])
+            ? ([["live", "note", "done"]] as ProgressScenarioStep[])
             : []),
           ["live", "final-inventory", inventory(4)],
           ["live", "final-report", progress("reporting", 4, 4)],
@@ -12469,48 +11854,12 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("inventory cutoffs from retained source proof", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"]
-      | readonly ["resolve"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const control of [false, true]) {
-      const finish = (state: ScanProgress, next: ScanProgress): Step[] => [
+      const finish = (
+        state: ScanProgress,
+        next: ScanProgress,
+      ): ProgressScenarioStep[] => [
         ["poll"],
         ["check", state],
         [
@@ -12535,7 +11884,10 @@ describe("CodexSecurity orchestration", () => {
           expected: progress("reporting", 8, 8),
           steps: [
             ...(control
-              ? ([["save", "initial", inventory(8)], ["poll"]] as Step[])
+              ? ([
+                  ["save", "initial", inventory(8)],
+                  ["poll"],
+                ] as ProgressScenarioStep[])
               : []),
             ["worker", progress("attack_path", 2, 5)],
             ["poll"],
@@ -12585,7 +11937,7 @@ describe("CodexSecurity orchestration", () => {
                     "batch",
                     [inventory(10), progress("threat_model", 0, 8)],
                   ],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["poll"],
             ["live", "current", inventory(8)],
@@ -12597,7 +11949,7 @@ describe("CodexSecurity orchestration", () => {
                     "batch",
                     [inventory(10), progress("threat_model", 0, 8)],
                   ],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["live", "phase", progress("discovery", 3, 8)],
             ["save", "current", inventory(8)],
@@ -12618,7 +11970,7 @@ describe("CodexSecurity orchestration", () => {
             [
               control ? "live" : "live-changed",
               "review",
-              commandOutput(text(progress("validation", 3, 5))),
+              commandOutput(progressText(progress("validation", 3, 5))),
             ],
             ["live", "later", [inventory(8), progress("reporting", 3, 8)]],
             ["save", "review", persistedCommandOutput],
@@ -12665,7 +12017,7 @@ describe("CodexSecurity orchestration", () => {
               ? ([
                   ["save", "review", progress("validation", 3, 8)],
                   ["poll"],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["live", "inventory", inventory(6)],
             ["poll"],
@@ -12673,7 +12025,7 @@ describe("CodexSecurity orchestration", () => {
               ? ([
                   ["save", "review", progress("validation", 3, 8)],
                   ["poll"],
-                ] as Step[])
+                ] as ProgressScenarioStep[])
               : []),
             ["resolve"],
             ["save", "inventory", inventory(6)],
@@ -12705,48 +12057,13 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("source proof before inventory admission", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly [
-          "worker" | "additional-worker" | "check" | "receipt",
-          ScanProgress,
-        ]
-      | readonly ["poll"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const exact of [false, true]) {
       const live = exact ? "live" : "live-changed";
-      const finish = (state: ScanProgress, next: ScanProgress): Step[] => [
+      const finish = (
+        state: ScanProgress,
+        next: ScanProgress,
+      ): ProgressScenarioStep[] => [
         ["poll"],
         ["check", state],
         [
@@ -12779,7 +12096,11 @@ describe("CodexSecurity orchestration", () => {
           name: `newer inventory after an older truncated bound (exact=${exact})`,
           expected: progress("reporting", 5, 9),
           steps: [
-            ["live-changed", "older", commandOutput(text(inventory(5)))],
+            [
+              "live-changed",
+              "older",
+              commandOutput(progressText(inventory(5))),
+            ],
             [live, "newer", inventory(9)],
             ["save", "older", persistedCommandOutput],
             ["save", "newer", inventory(9)],
@@ -12803,7 +12124,7 @@ describe("CodexSecurity orchestration", () => {
             ["poll"],
             ["save", "anchor", inventory(9)],
             ["live", "review", progress("validation", 1, 5)],
-            ...(exact ? [["poll"] as Step] : []),
+            ...(exact ? [["poll"] as ProgressScenarioStep] : []),
             ["live", "anchor", inventory(9)],
             ...finish(
               progress("validation", 1, 5),
@@ -12818,7 +12139,11 @@ describe("CodexSecurity orchestration", () => {
             ["save", "initial", persistedCommandOutput],
             ["save", "current", inventory(5)],
             ["save", "anchor", progress("validation", 1, 5)],
-            ["live-changed", "initial", commandOutput(text(inventory(8)))],
+            [
+              "live-changed",
+              "initial",
+              commandOutput(progressText(inventory(8))),
+            ],
             ["poll"],
             [live, "current", inventory(5)],
             ["live", "anchor", progress("validation", 1, 5)],
@@ -12832,7 +12157,11 @@ describe("CodexSecurity orchestration", () => {
           name: `count-rejected inventory inside a complete projection (exact=${exact})`,
           expected: progress("reporting", 4, 5),
           steps: [
-            ["live-changed", "initial", commandOutput(text(inventory(9)))],
+            [
+              "live-changed",
+              "initial",
+              commandOutput(progressText(inventory(9))),
+            ],
             ["save", "initial", persistedCommandOutput],
             ["poll"],
             ["save", "current", [inventory(5), progress("validation", 2, 5)]],
@@ -12851,7 +12180,11 @@ describe("CodexSecurity orchestration", () => {
           expected: progress("reporting", 8, 8),
           steps: [
             ["worker", progress("attack_path", 2, 5)],
-            ["live-changed", "initial", commandOutput(text(inventory(5)))],
+            [
+              "live-changed",
+              "initial",
+              commandOutput(progressText(inventory(5))),
+            ],
             ["save", "initial", persistedCommandOutput],
             ["poll"],
             [live, "expansion", [inventory(8), progress("validation", 2, 5)]],
@@ -12879,7 +12212,11 @@ describe("CodexSecurity orchestration", () => {
             ["live-changed", "scope", inventory(3)],
             ["poll"],
             ["live-changed", "review", progress("validation", 1, 3)],
-            [live, "report", commandOutput(text(progress("reporting", 2, 3)))],
+            [
+              live,
+              "report",
+              commandOutput(progressText(progress("reporting", 2, 3))),
+            ],
             ["live", "anchor", "done"],
             ...finish(progress("reporting", 2, 3), progress("reporting", 3, 3)),
           ],
@@ -12890,7 +12227,11 @@ describe("CodexSecurity orchestration", () => {
           steps: [
             ["save", "older", persistedCommandOutput],
             ["save", "newer", inventory(5)],
-            ["live-changed", "older", commandOutput(text(inventory(8)))],
+            [
+              "live-changed",
+              "older",
+              commandOutput(progressText(inventory(8))),
+            ],
             ["save", "anchor", progress("reporting", 3, 5)],
             ["poll"],
             [live, "newer", inventory(5)],
@@ -12935,7 +12276,7 @@ describe("CodexSecurity orchestration", () => {
           [
             "live-changed",
             "old-report",
-            commandOutput(text(progress("reporting", 2, 3))),
+            commandOutput(progressText(progress("reporting", 2, 3))),
           ],
           ["save", "old-report", persistedCommandOutput],
           ["save", "anchor", progress("validation", 2, 3)],
@@ -12970,50 +12311,15 @@ describe("CodexSecurity orchestration", () => {
   });
 
   describe("inventory authority through stronger source proof", () => {
-    const progress = (
-      phase: ScanProgress["phase"],
-      filesCompleted: number,
-      filesTotal: number,
-    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
-    const inventory = (total: number) => progress("discovery", 0, total);
-    type Value = string | ScanProgress | readonly ScanProgress[];
-    type Step =
-      | readonly [
-          (
-            | "save"
-            | "live"
-            | "save-message"
-            | "live-message"
-            | "save-response"
-            | "live-changed"
-          ),
-          string,
-          Value,
-        ]
-      | readonly ["worker" | "check" | "receipt", ScanProgress]
-      | readonly ["poll"];
-    type Scenario = {
-      name: string;
-      expected: ScanProgress;
-      steps: readonly Step[];
-      stopBeforeResolution?: boolean;
-    };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
-    const scenarios: Scenario[] = [
-      ...[false, true].map((exact): Scenario => ({
+    const scenarios: ProgressScenario[] = [
+      ...[false, true].map((exact): ProgressScenario => ({
         name: `bounded omitted inventory expansion (exact=${exact})`,
         expected: progress("reporting", 10, 10),
         steps: [
           [
             exact ? "live" : "live-changed",
             "inventory",
-            commandOutput(text(inventory(10))),
+            commandOutput(progressText(inventory(10))),
           ],
           ["save", "inventory", persistedCommandOutput],
           ["save", "anchor", "done"],
@@ -13028,7 +12334,7 @@ describe("CodexSecurity orchestration", () => {
           ["save", "report", progress("reporting", 10, 10)],
         ],
       })),
-      ...[false, true].map((exact): Scenario => ({
+      ...[false, true].map((exact): ProgressScenario => ({
         name: `newer inventory during older-scope corroboration (exact=${exact})`,
         expected: progress("validation", 5, 9),
         steps: [
@@ -13049,7 +12355,7 @@ describe("CodexSecurity orchestration", () => {
         ],
       })),
       ...["bounded", "exact", "eligible", "discovery"].map(
-        (control): Scenario => {
+        (control): ProgressScenario => {
           const review = progress(
             control === "discovery" ? "discovery" : "validation",
             2,
@@ -13078,7 +12384,7 @@ describe("CodexSecurity orchestration", () => {
           };
         },
       ),
-      ...[false, true].map((withoutOversized): Scenario => {
+      ...[false, true].map((withoutOversized): ProgressScenario => {
         const first = withoutOversized
           ? [inventory(8)]
           : [inventory(8), progress("validation", 2, 10)];
@@ -13103,8 +12409,8 @@ describe("CodexSecurity orchestration", () => {
           ],
         };
       }),
-      ...[false, true].map((nativeInventory): Scenario => {
-        const steps: Step[] = [
+      ...[false, true].map((nativeInventory): ProgressScenario => {
+        const steps: ProgressScenarioStep[] = [
           ["live-message", "inventory", inventory(8)],
           ["save-response", "inventory", inventory(8)],
         ];
@@ -13429,14 +12735,7 @@ describe("CodexSecurity orchestration", () => {
         }) as typeof originalReaddir);
         const client = TestClient.withDependencies({
           ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
+          runWorkbench: registerEightFileScan,
           createCodex: codexFactory(async () => {
             await copyCompletedScan(root);
             parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -13805,14 +13104,7 @@ describe("CodexSecurity orchestration", () => {
                 .join("\n");
         const client = TestClient.withDependencies({
           ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
+          runWorkbench: registerEightFileScan,
           createCodex: codexFactory(async () => {
             await copyCompletedScan(root);
             parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -13964,14 +13256,7 @@ describe("CodexSecurity orchestration", () => {
         changedDisplay ? `${command} displayed` : command;
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -14112,14 +13397,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalReaddir);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -14273,14 +13551,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalOpen);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -14408,14 +13679,7 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalReaddir);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -14675,14 +13939,7 @@ describe("CodexSecurity orchestration", () => {
       nativeCommand("scan-inventory", persistedCommandOutput, id);
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-          : mockWorkbench(args, input),
+      runWorkbench: registerEightFileScan,
       createCodex: codexFactory(async () => {
         await copyCompletedScan(root);
         const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -14793,14 +14050,7 @@ describe("CodexSecurity orchestration", () => {
         appendFile(file, JSON.stringify(row) + "\n");
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           await writeUsageSession(codexHome, "thread-1", {});
@@ -14944,14 +14194,7 @@ describe("CodexSecurity orchestration", () => {
         nativeCommand(id, marker(phase), id);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
@@ -15053,14 +14296,7 @@ describe("CodexSecurity orchestration", () => {
       const parentPhase = multiple ? "attack_path" : "validation";
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-            : mockWorkbench(args, input),
+        runWorkbench: registerEightFileScan,
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           await writeUsageSession(codexHome, "thread-1", {});
@@ -15387,7 +14623,7 @@ describe("CodexSecurity orchestration", () => {
         "prompt captured",
       );
       expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
+        `Use exactly "${scanId}" as the scan ID in the manifest and findings.`,
       );
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
@@ -15925,14 +15161,6 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  const pricedModels = [
-    "gpt-5.5",
-    "gpt-6-astra",
-    "gpt-5.6-terra",
-    "gpt-5.6-cyber",
-    "gpt-daybreak-blue-latest",
-    "gpt-daybreak-red-latest",
-  ];
   test("reports unpriced model usage without letting its observer stop the scan", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
@@ -15963,19 +15191,13 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
-  test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
+  const prices = [
+    { model: "gpt-6-astra", min: 0.000232, max: 0.000389 },
+    { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
+  ];
+  test.each(prices)("tracks live and saved $model costs", async (price) => {
+    const { model, min, max } = price;
     const { root, repository, codexHome, scanDir } = await scanDirectories();
-
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
-    const expectedCost = estimateScanCost(model, usage);
-    expect(expectedCost).not.toBeNull();
-    if (expectedCost === null) throw new Error("Missing selected-model price");
 
     const costs: ScanCost[] = [];
     const commands: Array<readonly string[]> = [];
@@ -16006,15 +15228,24 @@ describe("CodexSecurity orchestration", () => {
     });
 
     expect(result.turnResult.model).toBe(model);
-    expect(result.cost).toEqual(expectedCost);
-    expect(costs).toEqual([expectedCost]);
+    expect(result.cost).toMatchObject({
+      model,
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      cacheWriteInputTokens: 0,
+      outputTokens: 3,
+      estimatedUsd: min,
+      estimatedUsdRange: { min, max, context: "unknown" },
+      pricing: { serviceTier: "standard", context: "short" },
+    });
+    expect([result.cost]).toEqual(costs);
 
     const completion = commands.find((args) => args[0] === "complete-scan");
     expect(completion).toBeDefined();
     const costIndex = completion?.indexOf("--cost-json") ?? -1;
     expect(costIndex).toBeGreaterThan(0);
     expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
-      expectedCost,
+      result.cost,
     );
 
     await client.close();
@@ -16163,7 +15394,9 @@ describe("CodexSecurity orchestration", () => {
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.deferred).toEqual([
+        expect(
+          (await readReviewState((await result).scanDir)).deferred,
+        ).toEqual([
           {
             id: "runtime-note",
             reason: "Optional runtime reproduction was unavailable.",
@@ -16785,7 +16018,7 @@ describe("CodexSecurity orchestration", () => {
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage).not.toHaveProperty("completeness");
+          expect(recovered.review).not.toHaveProperty("status");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
@@ -17277,9 +16510,10 @@ describe("CodexSecurity orchestration", () => {
           process.platform === "win32" ? "junction" : "dir",
         );
       }
+      const sessions = new Map<string, string>();
       const client = new TestClient(
         {
-          pluginPath: PLUGIN_ROOT,
+          pluginPath: await copyCredentialTestPlugin(root),
           codexOverrides: {
             model,
             ...(provider === undefined
@@ -17332,9 +16566,12 @@ describe("CodexSecurity orchestration", () => {
                     ? "synthetic-transient-key"
                     : undefined,
                 );
-                await writeUsageSession(codexHome, "persistent-thread", {
-                  input_tokens: 1,
-                });
+                const path = await writeUsageSession(
+                  codexHome,
+                  `persistent-thread-${sessions.size + 1}`,
+                  { input_tokens: 1 },
+                );
+                sessions.set(path, await readFile(path, "utf8"));
                 throw new Error("persistent session recorded");
               },
             }),
@@ -17353,18 +16590,10 @@ describe("CodexSecurity orchestration", () => {
         await client.close();
       }
 
-      expect(
-        existsSync(
-          join(
-            codexHome,
-            "sessions",
-            "2026",
-            "07",
-            "26",
-            "rollout-persistent-thread.jsonl",
-          ),
-        ),
-      ).toBe(true);
+      expect(sessions.size).toBe(2);
+      for (const [path, contents] of sessions) {
+        expect(await readFile(path, "utf8")).toBe(contents);
+      }
       expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
       const persistentConfigText = await readFile(
         join(codexHome, "config.toml"),
@@ -17999,16 +17228,19 @@ describe("CodexSecurity orchestration", () => {
     );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
-      "/scripts/generate_rank_input.py",
+      "/scripts/launch_codex_security_mcp",
     );
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
-    const makeScopeCommand = `${pythonCommand} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
+    const makeScopeCommand =
+      process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
+        : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     const bindScopeCommand =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
     expect(prompt).toContain(makeScopeCommand);
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -18048,10 +17280,11 @@ describe("CodexSecurity orchestration", () => {
         `${repository}\0${scanDir}\0${python}\0${serializedPaths}\n`,
       );
     }
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
     const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
-    const runScopedHelper = (command: string): void => {
+    const runScopedHelper = (
+      command: string,
+      overrides: NodeJS.ProcessEnv = {},
+    ): void => {
       const shell =
         process.platform === "win32" ? Bun.which("powershell.exe") : "/bin/sh";
       expect(shell).not.toBeNull();
@@ -18065,11 +17298,10 @@ describe("CodexSecurity orchestration", () => {
           env: {
             ...process.env,
             ...environment,
-            PYTHON: interpreter!,
-            PYTHONDONTWRITEBYTECODE: "1",
             CODEX_MCP_NODE_PATH: Bun.which("node")!,
             PATH_LITERAL: "expanded-wrong-directory",
             CODEX_SECURITY_TARGET_PATHS_FILE: capturedTargetPathsFile,
+            ...overrides,
           },
           stdio: "pipe",
         },
@@ -18086,126 +17318,133 @@ describe("CodexSecurity orchestration", () => {
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
-    const coverage = join(scanDir, "coverage.json");
     await writeFile(
       manifest,
       JSON.stringify({ scan: { scope: { includePaths: ["wrong"] } } }),
     );
-    await writeFile(coverage, JSON.stringify({ includePaths: ["wrong"] }));
     runScopedHelper(bindScopeCommand);
     expect(
       JSON.parse(await readFile(manifest, "utf8")).scan.scope.includePaths,
     ).toEqual(paths);
-    expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
-      paths,
-    );
+    if (process.platform === "win32") {
+      const driveRoot = win32.parse(repository).root;
+      const absoluteScopes = join(root, "absolute-scopes.json");
+      await writeFile(
+        absoluteScopes,
+        JSON.stringify(paths.map((value) => join(repository, value))),
+      );
+      runScopedHelper(makeScopeCommand, {
+        CODEX_SECURITY_REPOSITORY: driveRoot,
+        CODEX_SECURITY_TARGET_PATHS_FILE: absoluteScopes,
+      });
+      expect(
+        (await readFile(scopedSourceInput, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((row) => JSON.parse(row).path),
+      ).toEqual(
+        paths
+          .map((value) =>
+            win32
+              .relative(driveRoot, join(repository, value))
+              .replaceAll("\\", "/"),
+          )
+          .sort(),
+      );
+    }
     await client.close();
   });
 
-  test("keeps requested source paths without ranking or ignored directory files", async () => {
+  test("uses an existing Python scope generator from a custom plugin", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const source = join(repository, "src");
-    const ignored = join(source, "node_modules");
-    const vendored = join(source, "vendor");
-    const scopes = join(root, "scopes.json");
-    const output = join(root, "scoped-source-input.jsonl");
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
-
-    await mkdir(join(source, "tests"), { recursive: true });
-    await mkdir(join(source, "examples"));
-    await mkdir(ignored);
-    await mkdir(vendored);
-    execFileSync("git", ["init", "-q"], { cwd: repository });
-    execFileSync("git", ["config", "--local", "core.autocrlf", "false"], {
-      cwd: repository,
+    const pluginRoot = join(root, "legacy plugin");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const python = pythonExecutable()!;
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(join(pluginRoot, "skills", "security-scan"), {
+      recursive: true,
     });
-    await Promise.all([
-      writeFile(
-        join(repository, ".gitignore"),
-        "node_modules/\n.env\nvendor/\n",
-      ),
-      writeFile(join(source, "handler.ts"), "export {};\n"),
-      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
-      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
-      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
-      writeFile(join(source, ".env"), "SECRET=private\n"),
-      writeFile(
-        join(source, "logo.png"),
-        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-      ),
-      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
-      writeFile(join(vendored, "dependency.ts"), "export {};\n"),
-    ]);
-    execFileSync(
-      "git",
-      ["add", "--force", "src/vendor/dependency.ts", "src/logo.png"],
-      { cwd: repository },
+    await mkdir(join(pluginRoot, "scripts"));
+    await writeFile(join(repository, "source [1].ts"), "export {};\n");
+    await writeFile(
+      join(pluginRoot, "skills", "security-scan", "SKILL.md"),
+      "Review the requested source.\n",
     );
-
-    const enumerate = async (requested: string[]) => {
-      await writeFile(scopes, JSON.stringify(requested));
-      execFileSync(
-        interpreter!,
-        [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-          "make-repo-scope-input",
-          "--repo",
-          repository,
-          "--scopes-file",
-          scopes,
-          "--out",
-          output,
-        ],
-        { stdio: "pipe" },
-      );
-      return (await readFile(output, "utf8"))
-        .trimEnd()
-        .split("\n")
-        .map((row) => (JSON.parse(row) as { path: string }).path);
-    };
-
-    expect(await enumerate(["src"])).toEqual([
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src", "src/.env"])).toEqual([
-      "src/.env",
-      "src/Dockerfile",
-      "src/examples/demo.ts",
-      "src/handler.ts",
-      "src/logo.png",
-      "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
-    ]);
-    expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
-      "src/logo.png",
-      "src/vendor/dependency.ts",
-    ]);
-    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
-    if (process.platform !== "win32") {
-      await symlink(join(source, "handler.ts"), join(source, "alias.ts"));
-      await symlink(source, join(repository, "alias"));
-      await expect(enumerate(["src/alias.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-      await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
-    } else {
-      await symlink(source, join(repository, "junction"), "junction");
-      await expect(enumerate(["junction/handler.ts"])).rejects.toThrow(
-        /symbolic links/,
-      );
+    await writeFile(
+      join(pluginRoot, "scripts", "generate_rank_input.py"),
+      [
+        "import argparse, json",
+        "from pathlib import Path",
+        "parser = argparse.ArgumentParser()",
+        "parser.add_argument('command', choices=['make-repo-scope-input'])",
+        "for name in ('repo', 'scopes-file', 'out'): parser.add_argument('--' + name, required=True)",
+        "args = parser.parse_args()",
+        "scopes = json.loads(Path(args.scopes_file).read_text())",
+        "Path(args.out).write_text(''.join(json.dumps({'path': scope}) + '\\n' for scope in scopes))",
+      ].join("\n"),
+    );
+    const client = new TestClient(
+      { pluginPath: pluginRoot },
+      {
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          return {
+            ...runtime,
+            plugin: {
+              ...runtime.plugin,
+              pluginRoot,
+              installedRoot: pluginRoot,
+            },
+          };
+        },
+        resolvePluginPython: async () => python,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(prompt: string) {
+              const command =
+                /Scan target paths:.* using (.+)\. Before finalization/u.exec(
+                  prompt,
+                )?.[1];
+              expect(command).toContain("/scripts/generate_rank_input.py");
+              expect(command).not.toContain("--helper make-repo-scope-input");
+              const shell =
+                process.platform === "win32"
+                  ? Bun.which("powershell.exe")!
+                  : "/bin/sh";
+              execFileSync(
+                shell,
+                process.platform === "win32"
+                  ? ["-NoProfile", "-NonInteractive", "-Command", command!]
+                  : ["-c", command!],
+                { env: { ...process.env, ...options.env }, stdio: "pipe" },
+              );
+              expect(
+                JSON.parse(
+                  await readFile(
+                    join(scanDir, "scoped-source-input.jsonl"),
+                    "utf8",
+                  ),
+                ),
+              ).toEqual({ path: "source [1].ts" });
+              throw new Error("legacy scope prepared");
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { target: ["source [1].ts"] }),
+      ).rejects.toThrow("legacy scope prepared");
+    } finally {
+      await client.close();
     }
   });
 
@@ -18307,8 +17546,8 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt()).not.toContain("$codex-security:");
     expect(prompt()).not.toContain("record_codex_security_scan_draft");
-    expect(prompt()).toContain("complete_codex_security_scan");
-    expect(prompt()).not.toContain("do not finalize or seal them");
+    expect(prompt()).not.toContain("complete_codex_security_scan");
+    expect(prompt()).toContain("The SDK owns finalization");
     expect(prompt()).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
     );
@@ -18319,7 +17558,7 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, { mode: "deep", maxCostUsd: 1 }),
     ).rejects.toThrow("prompt captured");
-    expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toContain("The SDK owns finalization");
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(
@@ -18718,8 +17957,10 @@ process.exit(2);
       },
       prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
         CODEX_HOME: codexHome,
-        OpenAi_Api_Key: "forwarded-openai-key",
-        codex_api_key: "forwarded-codex-key",
+        OPENAI_API_KEY: "forwarded-openai-key",
+        OpenAi_Api_Key: "mixed-case-openai-key",
+        CODEX_API_KEY: "forwarded-codex-key",
+        codex_api_key: "lowercase-codex-key",
         ...fakeCommand.environment,
       })),
       resolveCodexCommand: () => fakeCommand.command,
@@ -19633,42 +18874,6 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       ]),
     ).resolves.toBeUndefined();
     await expect(login.wait()).resolves.toMatchObject({ success: false });
-  });
-
-  test("keeps ambient credentials available to scans", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome, { mode: 0o700 });
-    await mkdir(scanDir, { mode: 0o700 });
-    const createCodex = mock(completedCodex(root));
-    const client = TestClient.withDependencies({
-      environment: {
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        OPENAI_API_KEY: "ambient-key",
-      },
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-        ...process.env,
-        CODEX_HOME: codexHome,
-        OPENAI_API_KEY: "ambient-key",
-        CODEX_API_KEY: "secondary-ambient-key",
-      })),
-      createCodex,
-    });
-    try {
-      await client.run(repository);
-      expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
-      expect(
-        Object.keys(createCodex.mock.lastCall?.[0]?.env ?? {}).some((name) =>
-          ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-        ),
-      ).toBe(false);
-    } finally {
-      await client.close();
-    }
   });
 
   test("aborts and waits for an in-flight API-key login during close", async () => {

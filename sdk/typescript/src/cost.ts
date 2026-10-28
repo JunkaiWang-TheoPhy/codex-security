@@ -113,10 +113,6 @@ type ProgressOccurrenceQueues = Map<
   { indexes: number[]; next: number }
 >;
 
-interface NativeProgressItem extends ProgressItem {
-  updates: ScanProgress[];
-}
-
 interface SessionCompletion {
   position: number;
   item: ProgressItem | null;
@@ -479,13 +475,11 @@ export class ScanCostTracker {
       accepted: false,
     };
     live.markers.push(marker);
-    if (progress.phase === "discovery" && progress.filesCompleted === 0)
-      this.#parentInventory = marker;
+    if (isInventoryProgress(progress)) this.#parentInventory = marker;
     if (live.position !== null) this.#readyParentMarkers.set(marker, live);
-    const current =
-      progress.phase === "discovery" && progress.filesCompleted === 0
-        ? this.#retainedInventory()
-        : this.#parentFacts.get(progress.filesTotal);
+    const current = isInventoryProgress(progress)
+      ? this.#retainedInventory()
+      : this.#parentFacts.get(progress.filesTotal);
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, marker.index) ||
@@ -569,8 +563,7 @@ export class ScanCostTracker {
     if (
       candidate.position === undefined ||
       !this.#parentSourceIsEligible(candidate) ||
-      (candidate.progress.phase === "discovery" &&
-        candidate.progress.filesCompleted === 0)
+      isInventoryProgress(candidate.progress)
     )
       return;
     const total = candidate.progress.filesTotal;
@@ -589,8 +582,7 @@ export class ScanCostTracker {
     const marker = candidate.live?.markers[candidate.markerIndex ?? 0];
     return (
       // Inventory establishes scope; only coverage is bounded by its prefix.
-      (candidate.progress.phase === "discovery" &&
-        candidate.progress.filesCompleted === 0) ||
+      isInventoryProgress(candidate.progress) ||
       candidate.progress.filesTotal <=
         (candidate.source?.scopeFilesTotal ??
           marker?.scopeFilesTotal ??
@@ -617,11 +609,7 @@ export class ScanCostTracker {
     // keep their predecessors' ordering evidence without gaining a position.
     for (const live of this.#liveParentItems) {
       for (const marker of live.markers) {
-        if (
-          marker.progress.phase === "discovery" &&
-          marker.progress.filesCompleted === 0
-        )
-          continue;
+        if (isInventoryProgress(marker.progress)) continue;
         const position = live.position ?? marker.projection?.position;
         if (position === undefined) continue;
         const candidate = {
@@ -656,8 +644,7 @@ export class ScanCostTracker {
       for (const marker of live.markers) {
         if (
           !marker.accepted ||
-          marker.progress.phase !== "discovery" ||
-          marker.progress.filesCompleted !== 0 ||
+          !isInventoryProgress(marker.progress) ||
           (live.position !== null &&
             !this.#inventoryPrecedesReview(
               live.position,
@@ -770,10 +757,7 @@ export class ScanCostTracker {
       selected === undefined &&
       this.#liveParentItems.some((item) =>
         item.markers.some(
-          (marker) =>
-            marker.accepted &&
-            marker.progress.phase === "discovery" &&
-            marker.progress.filesCompleted === 0,
+          (marker) => marker.accepted && isInventoryProgress(marker.progress),
         ),
       );
     // Empty source history does not override a caller's explicit scope update.
@@ -843,7 +827,7 @@ export class ScanCostTracker {
       // Scope-ineligible progress supplies that witness, not a reviewed cutoff.
       reviewed = false;
     }
-    if (progress.filesCompleted === 0 && progress.phase === "discovery") return;
+    if (isInventoryProgress(progress)) return;
     const boundary = this.#parentInventoryBoundary;
     const order =
       boundary === null
@@ -967,8 +951,7 @@ export class ScanCostTracker {
         // replace inventory whose order still proves it precedes review.
         for (const marker of live.markers) {
           if (
-            marker.progress.phase !== "discovery" ||
-            marker.progress.filesCompleted !== 0 ||
+            !isInventoryProgress(marker.progress) ||
             // A bound orders a lossy inventory but does not admit its scope.
             // Unaccepted inventory needs a complete projection or corroboration.
             (!marker.accepted && !projectedItems.has(live))
@@ -1033,10 +1016,7 @@ export class ScanCostTracker {
           },
           completion,
         );
-        if (
-          marker.progress.phase === "discovery" &&
-          marker.progress.filesCompleted === 0
-        ) {
+        if (isInventoryProgress(marker.progress)) {
           if (
             this.#inventoryPrecedesReview(
               completion.position,
@@ -1096,7 +1076,7 @@ export class ScanCostTracker {
             markerIndex: saved.markerIndex,
           };
       }
-      if (progress.phase === "discovery" && progress.filesCompleted === 0) {
+      if (isInventoryProgress(progress)) {
         // Source eligibility follows the inventory at this position, not the
         // display scope at the start or end of a poll. The retained rows make
         // this ordered pass identical for every partition of the same input.
@@ -1413,7 +1393,7 @@ export class ScanCostTracker {
           latest === undefined &&
           !reserved &&
           bound === Infinity &&
-          !(progress.phase === "discovery" && progress.filesCompleted === 0)
+          !isInventoryProgress(progress)
         )
           continue;
         const visible = latest?.lastCommandProgress;
@@ -1563,8 +1543,7 @@ export class ScanCostTracker {
       inventory = candidate.markers.findLast(
         (observed) =>
           (observed.accepted || observed === this.#parentInventory) &&
-          observed.progress.phase === "discovery" &&
-          observed.progress.filesCompleted === 0 &&
+          isInventoryProgress(observed.progress) &&
           observed.progress.filesTotal === marker.progress.filesTotal,
       );
       if (inventory !== undefined) {
@@ -1625,8 +1604,7 @@ export class ScanCostTracker {
     const later = this.#parentSession?.progress.findLast(
       (saved) =>
         !saved.duplicate &&
-        saved.update.phase === "discovery" &&
-        saved.update.filesCompleted === 0 &&
+        isInventoryProgress(saved.update) &&
         (saved.position > position! ||
           (pending.position !== null &&
             saved.position === position &&
@@ -1756,8 +1734,7 @@ export class ScanCostTracker {
             this.#inventoryPrecedesReview(position, marker.index, live))) &&
         (corroborated !== undefined ||
           this.#inventoryPrecedesReview(position, marker.index, live)) &&
-        progress.phase === "discovery" &&
-        progress.filesCompleted === 0 &&
+        isInventoryProgress(progress) &&
         (position > this.#inventoryFrontier.position ||
           (position === this.#inventoryFrontier.position &&
             marker.index >= this.#inventoryFrontier.markerIndex))
@@ -1923,7 +1900,7 @@ export class ScanCostTracker {
           !this.#parentSourceIsEligible(candidate) ||
           // Inventory has its own admission path. A rejected inventory cannot
           // become a phase merely because coverage later falls to zero.
-          (progress.phase === "discovery" && progress.filesCompleted === 0) ||
+          isInventoryProgress(progress) ||
           progress.filesTotal >
             (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER) ||
           progress.filesCompleted < this.#highestFilesCompleted ||
@@ -2001,8 +1978,7 @@ export class ScanCostTracker {
           progress.filesTotal >
             (marker.scopeFilesTotal ?? Number.MAX_SAFE_INTEGER) ||
           progress.filesCompleted < this.#highestFilesCompleted ||
-          (progress.phase === "discovery" &&
-            progress.filesCompleted === 0 &&
+          (isInventoryProgress(progress) &&
             !this.#inventoryPrecedesReview(position, marker.index, live))
         ) {
           // Saved inventory can admit the live receipt or invalidate provisional
@@ -2174,8 +2150,7 @@ export class ScanCostTracker {
     const key = progressKey(progress);
     // An initial zero-count discovery already reported this inventory. Other
     // equal raw keys can still require synchronization of the API's file total.
-    const inventoryReported =
-      progress.phase === "discovery" && progress.filesCompleted === 0;
+    const inventoryReported = isInventoryProgress(progress);
     const duplicate =
       displayed !== null &&
       progressKey(displayed.update) === key &&
@@ -2569,8 +2544,7 @@ export class ScanCostTracker {
     corroboration?: { live: StreamedProgressItem; after: ProgressOrder },
     inventoryWitness?: ProgressOrder,
   ): "current" | "proven" | "retained" | undefined {
-    if (saved.update.phase !== "discovery" || saved.update.filesCompleted !== 0)
-      return undefined;
+    if (!isInventoryProgress(saved.update)) return undefined;
     const newer =
       saved.position > this.#inventoryFrontier.position ||
       (saved.position === this.#inventoryFrontier.position &&
@@ -3188,10 +3162,11 @@ function readSessionEvent(
     payload["type"] === "item_completed"
   ) {
     const item = nativeProgressItem(payload["item"]);
+    const signature = item?.signature;
     const value = payload["item"];
     const duplicateCompletion =
-      item?.kind === "message" &&
-      repeatedMessageProjection(session, item.outputDigest, "native");
+      signature?.kind === "message" &&
+      repeatedMessageProjection(session, signature.outputDigest, "native");
     let completion: SessionCompletion | undefined;
     if (
       isRecord(value) &&
@@ -3199,30 +3174,19 @@ function readSessionEvent(
         value["type"] === "AgentMessage") &&
       !duplicateCompletion
     ) {
-      const signature =
-        item === null
-          ? null
-          : {
-              kind: item.kind,
-              outputDigest: item.outputDigest,
-              persistedOutputDigest: item.persistedOutputDigest,
-              ...(item.commandDigest === undefined
-                ? {}
-                : { commandDigest: item.commandDigest }),
-            };
       completion = {
         position,
-        item: signature,
-        kind: item?.kind,
+        item: signature ?? null,
+        kind: signature?.kind,
       };
       session.completions.push(completion);
     }
     if (item !== null) {
       const duplicate =
-        item.kind === "message" &&
+        item.signature.kind === "message" &&
         repeatedMessageProjection(
           session,
-          item.outputDigest,
+          item.signature.outputDigest,
           "native",
           item.updates,
         );
@@ -3236,7 +3200,7 @@ function readSessionEvent(
           duplicate,
         };
         session.progress.push(saved);
-        if (completion !== undefined && item.kind === "command")
+        if (completion !== undefined && item.signature.kind === "command")
           completion.lastCommandProgress = saved;
       }
     }
@@ -3253,10 +3217,11 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
+      const signature = progressSignature("message", payload["message"]);
       const updates = scanProgressUpdatesFromText(payload["message"]);
       const duplicate = repeatedMessageProjection(
         session,
-        digest(payload["message"]),
+        signature.outputDigest,
         "event",
         updates,
       );
@@ -3264,11 +3229,11 @@ function readSessionEvent(
       // item. It provides the same compact output signature for live matching.
       if (
         session.threadId === progressThread &&
-        !repeatedMessageProjection(session, digest(payload["message"]), "event")
+        !repeatedMessageProjection(session, signature.outputDigest, "event")
       )
         session.completions.push({
           position,
-          item: progressSignature("message", payload["message"]),
+          item: signature,
         });
       for (const [markerIndex, update] of (duplicate
         ? []
@@ -3462,6 +3427,10 @@ function persistedOutputDigest(text: string, fullDigest: string): string {
     .digest("hex");
 }
 
+function isInventoryProgress(progress: ScanProgress): boolean {
+  return progress.phase === "discovery" && progress.filesCompleted === 0;
+}
+
 function progressSignature(
   kind: ProgressItem["kind"],
   text: string,
@@ -3549,7 +3518,7 @@ function streamedProgressItem(
     : progressSignature("command", item["aggregated_output"], command);
 }
 
-function nativeProgressItem(value: unknown): NativeProgressItem | null {
+function nativeProgressItem(value: unknown) {
   if (!isRecord(value)) return null;
   let kind: ProgressItem["kind"];
   let text: string;
@@ -3599,7 +3568,7 @@ function nativeProgressItem(value: unknown): NativeProgressItem | null {
     }
   }
   return {
-    ...progressSignature(kind, text, command),
+    signature: progressSignature(kind, text, command),
     updates: scanProgressUpdatesFromText(progressText),
   };
 }
