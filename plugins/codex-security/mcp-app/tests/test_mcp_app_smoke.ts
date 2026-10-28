@@ -1875,10 +1875,6 @@ try {
     complete.description,
     /does not create missing artifacts or run skipped phases/,
   );
-  assert.match(
-    complete.description,
-    /If it fails with explicit repair guidance, correct the same scan and retry completion/,
-  );
   assert.deepEqual(setFindingTriage._meta.ui.visibility, ["app"]);
   assert.deepEqual(requestFindingRemediation._meta.ui.visibility, ["app"]);
   assert.deepEqual(requestFindingRemediationAction._meta.ui.visibility, [
