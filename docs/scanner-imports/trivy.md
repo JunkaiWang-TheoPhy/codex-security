@@ -12,7 +12,7 @@ codex-security publish findings /path/to/reports/trivy.json --to local --reposit
   --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
 ```
 
-The importer infers `.` only when the report names a remote repository and its Git metadata confirms that repository. Otherwise, set `--trivy-scan-root` to the scanned directory relative to the Git root. Use `.` for the whole checkout or `apps/web` for a subtree on any platform. In this argument, a backslash is a path separator on Windows and a literal filename character on POSIX.
+The importer infers `.` only when the report names a remote repository and its Git metadata confirms that repository. If a target such as `HTTPS://example.com/org/repo` differs from the recorded Git URL only in the case of its HTTP scheme, set the scan root explicitly. A local scan may emit the same label. For other scans without a corroborated remote, set `--trivy-scan-root` to the scanned directory relative to the Git root. Use `.` for the whole checkout or `apps/web` for a subtree on any platform. In this argument, a backslash is a path separator on Windows and a literal filename character on POSIX.
 
 A saved Git origin such as `r:org/repo.git` can name either a Windows drive-relative path or a one-letter SSH server. Supply the scan root if this is the only origin. For a one-letter SSH server, configure the remote as `git@r:org/repo.git`. Trivy preserves this spelling in the report.
 

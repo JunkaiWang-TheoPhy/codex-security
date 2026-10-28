@@ -272,7 +272,7 @@ test("local Trivy paths use the checkout root even without a report remote", asy
     "apps/web",
   );
   await expect(checkout.prepare(findings, nested)).rejects.toThrow(
-    `--repository ${JSON.stringify(checkout.repository)} and set --trivy-scan-root`,
+    `Git found the checkout at ${JSON.stringify(checkout.repository)}.`,
   );
   await expect(
     checkout.prepare(findings, join(checkout.repository, ".git", "objects")),
@@ -390,6 +390,8 @@ test.each([
     false,
     false,
   ],
+  [checkoutUrl, "ssh://github.com/example/project", false, false],
+  [checkoutUrl, "ssh://git@github.com/example/project", false, true],
   [checkoutUrl, "SSH://github.com/example/project", false, false],
   [checkoutUrl, "HTTPS://github.com/example/project", false, false],
   [checkoutUrl, "git+ssh://git@github.com/example/project.git", false, true],

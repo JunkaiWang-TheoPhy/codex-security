@@ -86,6 +86,33 @@ test("corroborates Trivy's scheme-less repository target", () => {
     );
 });
 
+test("uses Git metadata for a repository target with a mixed-case HTTPS scheme", () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "HTTPS://github.com/example/project",
+  };
+  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+  const batch = normalizeTrivyFindings(report, "local", "apps/web");
+  expect(batch.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
+  const retained = batch.findings[0]!.evidence.source_data!["report"];
+  expect(retained).toMatchObject({
+    ArtifactName: report.ArtifactName,
+    Metadata: { RepoURL: report.Metadata.RepoURL },
+  });
+  expect(trivyRepositoryUrl(retained, report.Metadata.RepoURL)).toBe(
+    report.Metadata.RepoURL,
+  );
+  expect(() =>
+    normalizeAtRoot({
+      ...report,
+      ArtifactName: "HTTPS://github.com/example/other",
+    }),
+  ).toThrow("different repositories");
+  expect(
+    normalizeAtRoot({ ...report, Metadata: {} }).sourceRepositoryUrls,
+  ).toEqual([report.ArtifactName]);
+});
+
 test("retains a provisional Enterprise SSH alias until the destination is known", () => {
   const report = {
     ...trivyReport(),

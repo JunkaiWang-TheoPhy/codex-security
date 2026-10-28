@@ -418,7 +418,7 @@ async function requireMatchingRepository(
         !(await abortable(() => sameFile(root, repository), signal))
       )
         throw new CodexSecurityError(
-          `Trivy finding paths are checkout-relative. Use --repository ${JSON.stringify(root)} and set --trivy-scan-root to the scanned directory relative to that root.`,
+          `Trivy finding paths are checkout-relative. Git found the checkout at ${JSON.stringify(root)}. Select it with --repository and set --trivy-scan-root relative to it.`,
         );
       if (sources.length === 0) return;
     }

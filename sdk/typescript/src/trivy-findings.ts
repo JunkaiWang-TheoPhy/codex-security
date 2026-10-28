@@ -56,6 +56,7 @@ function networkRepository(value: unknown): string | null {
 function comparableGitHubRemote(
   remote: string,
   cloudRepositoryUrl?: string,
+  checkout = false,
 ): string | undefined {
   if (/[?#\t\r\n]/u.test(remote)) return undefined;
   const parsed = parseGitRemote(remote);
@@ -72,10 +73,10 @@ function comparableGitHubRemote(
     const pathStart = remote.indexOf("/", authorityStart);
     if (pathStart < 0 || remote.slice(pathStart) !== parsed.url.pathname)
       return undefined;
-    // Trivy omits SSH userinfo. The shared normalizer accepts GitHub's supported
-    // SSH users and ports for the known or explicitly selected host.
+    // Trivy strips SSH userinfo from reported URLs. Git checkout remotes
+    // retain their actual spelling and may use a different configured SSH user.
     const authority = remote.slice(authorityStart, pathStart);
-    remote = `ssh://${authority.includes("@") ? "" : "git@"}${authority}${parsed.url.pathname}`;
+    remote = `ssh://${checkout || authority.includes("@") ? "" : "git@"}${authority}${parsed.url.pathname}`;
   }
   const normalized = normalizeGitRepositoryUrl(remote, githubUrl);
   if (!/^https?:\/\//iu.test(normalized)) return undefined;
@@ -92,7 +93,11 @@ export function trivyRemoteKey(
   cloudRepositoryUrl?: string,
   checkout = false,
 ): string {
-  const normalized = comparableGitHubRemote(remote, cloudRepositoryUrl);
+  const normalized = comparableGitHubRemote(
+    remote,
+    cloudRepositoryUrl,
+    checkout,
+  );
   if (!normalized) return remote;
   // GitHub identifies an HTTPS repository by host and path. Other Git servers
   // may use the HTTP username to select the repository.
@@ -144,10 +149,22 @@ export function trivyReportRemotes(report: unknown) {
     // Trivy can omit the HTTPS scheme, but also accepts relative checkout paths.
     artifact = repository;
   }
+  const artifactRepository =
+    artifact && artifact !== repository ? artifact : undefined;
+  if (
+    artifactRepository &&
+    report["ArtifactType"] === "repository" &&
+    artifactRepository.replace(/^https?:/iu, (scheme) =>
+      scheme.toLowerCase(),
+    ) === repository
+  ) {
+    // Trivy keeps the target spelling but clones with a lowercase HTTP scheme.
+    // A local scan can emit the same label, so keep the scan root explicit.
+    return { urls: [repository], artifactRepository };
+  }
   return {
     urls: [repository, artifact].filter((url) => url !== null),
-    artifactRepository:
-      artifact && artifact !== repository ? artifact : undefined,
+    artifactRepository,
   };
 }
 
