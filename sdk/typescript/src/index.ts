@@ -19,11 +19,7 @@ export type {
   RemediationExecutionEvent,
 } from "./hosted-remediation.js";
 export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-export type {
-  FindingPatch,
-  FindingVerification,
-  FindingVerificationCheck,
-} from "./remediation.js";
+export type { FindingPatch, FindingVerification } from "./remediation.js";
 export {
   runHostedScan,
   HostedScanInputSchema,
@@ -329,6 +325,11 @@ export type {
 } from "./validation-records.js";
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
 export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,

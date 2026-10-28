@@ -868,7 +868,7 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
     ("encoding", "bom"),
     [("utf-8", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")],
 )
-def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
+def test_git_blob_binary_flags_match_full_file_classification_with_bounded_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str, bom: bytes
 ) -> None:
     target = tmp_path / "target"
@@ -887,9 +887,9 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     subprocess.run(["git", "add", "."], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
 
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    function_globals = git_blob_samples.__globals__
-    read_batch_samples = function_globals["_read_git_batch_samples"]
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+    function_globals = git_blob_binary_flags.__globals__
+    read_batch_samples = function_globals["_read_git_batch_flags"]
     reads: list[int] = []
 
     def require_bounded_output(output: Any, names: list[str]):
@@ -904,24 +904,20 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
         output.read = bounded_read
         return read_batch_samples(output, names)
 
-    monkeypatch.setitem(function_globals, "_read_git_batch_samples", require_bounded_output)
+    monkeypatch.setitem(function_globals, "_read_git_batch_flags", require_bounded_output)
     # Both request and response exceed pipe buffers, before the multi-megabyte binary.
     missing = ["HEAD:missing"] * 10_000
-    samples = git_blob_samples(target, [*missing, *(f"HEAD:{name}" for name in contents)])
+    samples = git_blob_binary_flags(target, [*missing, *(f"HEAD:{name}" for name in contents)])
 
     assert samples == [
         *([None] * len(missing)),
-        (text[: 64 * 1024], False),
-        (b"", True),
-        (b"", True),
-        (b"", False),
-        (b"after\n", False),
+        False,
+        True,
+        True,
+        False,
+        False,
     ]
     assert max(reads) == 64 * 1024
-
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
 
 
 @pytest.mark.parametrize(
@@ -935,11 +931,20 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
         b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
         b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
     ],
+    ids=[
+        "unterminated-header",
+        "invalid-size",
+        "negative-size",
+        "short-body",
+        "invalid-terminator",
+        "large-invalid-header",
+        "truncated-large-body",
+    ],
 )
-def test_git_blob_samples_reject_incomplete_framing(
+def test_git_blob_binary_flags_reject_incomplete_framing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
 ) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
 
     def git_command(*args: Any, **kwargs: Any):
         remaining = memoryview(output)
@@ -951,33 +956,33 @@ def test_git_blob_samples_reject_incomplete_framing(
             return subprocess.CompletedProcess(args, 1)
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_command)
 
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
+    assert git_blob_binary_flags(tmp_path, ["HEAD:source"]) == [None]
 
 
 @pytest.mark.parametrize("output", [b"", b"object blob 4\ntext\n"])
-def test_git_blob_samples_reject_git_failure(
+def test_git_blob_binary_flags_reject_git_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
 ) -> None:
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
 
     def git_command(*args: Any, **kwargs: Any):
         kwargs["stdout_file"].write(output)
         return subprocess.CompletedProcess(args, 1)
 
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_command)
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_command)
 
-    assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
+    assert git_blob_binary_flags(tmp_path, ["HEAD:source"]) == [None]
 
 
-def test_git_blob_samples_work_with_git_before_2_38(
+def test_git_blob_binary_flags_work_with_git_before_2_38(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
-    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
-    git_command = git_blob_samples.__globals__["git_command"]
+    git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
+    git_command = git_blob_binary_flags.__globals__["git_command"]
 
     def git_before_2_38(*args: Any, **kwargs: Any):
         # Git before 2.38 rejects cat-file -z with a usage error.
@@ -985,10 +990,10 @@ def test_git_blob_samples_work_with_git_before_2_38(
             return subprocess.CompletedProcess(args, 129)
         return git_command(*args, **kwargs)
 
-    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_before_2_38)
+    monkeypatch.setitem(git_blob_binary_flags.__globals__, "git_command", git_before_2_38)
 
-    assert git_blob_samples(target, ["HEAD:README.md", "HEAD:missing"]) == [
-        (b"fixture\n", False),
+    assert git_blob_binary_flags(target, ["HEAD:README.md", "HEAD:missing"]) == [
+        False,
         None,
     ]
 
@@ -1586,6 +1591,23 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert not (copied / "submodule").exists()
 
 
+@pytest.mark.cross_platform
+def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path: Path) -> None:
+    target = tmp_path / "repository"
+    revision = initialize_git_repository(target)
+    (target / revision).write_text("synthetic revision-named file\n")
+    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["README.md"],
+        ["README.md"],
+    )
+
+    assert sources == {"README.md": {"path": "README.md", "lineCount": 1}}
+
+
 @pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
 @pytest.mark.parametrize("case_insensitive", [False, True])
 def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
@@ -1616,9 +1638,12 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
             )
         else:
             source.symlink_to(outside, target_is_directory=True)
-    from generate_rank_input import git_changed_paths
-
-    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    assert (
+        dict(WORKBENCH_TARGET["git_changed_paths"](target, revision, revision, "local-patch"))[
+            source
+        ]
+        == "D"
+    )
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
         {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
