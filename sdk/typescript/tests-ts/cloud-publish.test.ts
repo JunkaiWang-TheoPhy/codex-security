@@ -554,24 +554,6 @@ describe("Cloud publication", () => {
     });
   });
 
-  test("honors a Cloud publication URL override", async () => {
-    const { scan, environment } = await fixture();
-    const publishUrl =
-      "https://chatgpt-staging.com/backend-api/aardvark/cli/findings";
-    let requestedUrl: string | undefined;
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
-        CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
-      },
-      fetch: async (url) => {
-        requestedUrl = String(url);
-        return Response.json(receipt);
-      },
-    });
-    expect(requestedUrl).toBe(publishUrl);
-  });
-
   test("uses the shared Cloud API base while preserving the publication URL override", async () => {
     const { scan, environment } = await fixture();
     const cloudBase = "https://cloud.example.test/pilot/backend-api/aardvark";
@@ -580,23 +562,21 @@ describe("Cloud publication", () => {
       urls.push(String(url));
       return Response.json(receipt);
     };
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/`,
-      },
-      fetch,
-    });
     const publishUrl = "https://other-cloud.example.test/publish";
-    await publishScanToCloud(scan, {
-      environment: {
-        ...environment,
+    for (const settings of [
+      { CODEX_SECURITY_CLOUD_BASE_URL: `${cloudBase}/` },
+      { CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl },
+      {
         CODEX_SECURITY_CLOUD_BASE_URL: cloudBase,
         CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
       },
-      fetch,
-    });
-    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl]);
+    ]) {
+      await publishScanToCloud(scan, {
+        environment: { ...environment, ...settings },
+        fetch,
+      });
+    }
+    expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl, publishUrl]);
   });
 
   test("rejects a remote HTTP Cloud base before reading credentials or sending a scan", async () => {

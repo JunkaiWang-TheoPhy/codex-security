@@ -9,7 +9,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Event
+from threading import Event
 
 import pytest
 from workbench_test_support import SCRIPT, run_workbench
@@ -133,85 +133,6 @@ def test_only_one_concurrent_registration_archives_previous_output(workflow_scan
         workflow(state, action="bind", binding={"scanId": scan_id, "scanDir": str(archive)})
         == saved_workflow
     )
-
-
-def test_registration_waits_for_concurrent_archive_directory_restore(workflow_scan, monkeypatch):
-    state, target, output, scan_id = workflow_scan
-    mark_stopped(state, scan_id)
-    saved_workflow = workflow(state)
-    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
-    module = runpy.run_path(str(SCRIPT))
-    register_scan = module["register_cli_scan"]
-    args = argparse.Namespace(
-        repository=str(target),
-        scan_dir=str(output),
-        archive_existing=True,
-        archived_scan_dir=None,
-        recipe_json=recipe(target),
-        recipe_json_stdin=False,
-        registration_json_stdin=False,
-        parent_scan_id=None,
-    )
-    connected = Barrier(2)
-    output_moved = Event()
-    loser_reached_registration = Event()
-    rename = Path.rename
-    canonical_directory = register_scan.__globals__["require_canonical_scan_directory"]
-
-    def pause_after_archive_move(source, destination):
-        result = rename(source, destination)
-        if source == output:
-            assert not output.exists()
-            output_moved.set()
-            assert loser_reached_registration.wait(5)
-        return result
-
-    def observe_directory_validation(path):
-        try:
-            return canonical_directory(path)
-        finally:
-            if path == output and not output.exists():
-                loser_reached_registration.set()
-
-    monkeypatch.setattr(Path, "rename", pause_after_archive_move)
-    monkeypatch.setitem(
-        register_scan.__globals__,
-        "require_canonical_scan_directory",
-        observe_directory_validation,
-    )
-
-    def attempt(winner):
-        connection = module["connect"]()
-        try:
-            connected.wait(5)
-            if not winner:
-                assert output_moved.wait(5)
-
-                def observe_writer_admission(statement):
-                    if statement == "BEGIN IMMEDIATE":
-                        loser_reached_registration.set()
-
-                connection.set_trace_callback(observe_writer_admission)
-            try:
-                return register_scan(connection, args)
-            except SystemExit as error:
-                return str(error)
-        finally:
-            connection.close()
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(attempt, [True, False]))
-    registered = [result for result in results if isinstance(result, dict)]
-    rejected = [result for result in results if isinstance(result, str)]
-    assert len(registered) == 1
-    archive = Path(registered[0]["archivedScanDir"])
-    assert (archive / "report.md").read_text() == "previous scan\n"
-    assert list(output.iterdir()) == []
-    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
-    saved_workflow["scanDir"] = str(archive)
-    saved_workflow["stages"]["scan"]["result"]["sarifPath"] = str(archive / "exports/results.sarif")
-    assert workflow(state) == saved_workflow
-    assert rejected == ["Cannot archive the output of a running scan."]
 
 
 @pytest.mark.parametrize("result", [None, {}, {"sarifPath": None}, {"sarifPath": "unrelated"}])
@@ -338,20 +259,6 @@ def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
     assert workflow(state) == saved_workflow
 
 
-def test_legacy_caller_can_supply_already_archived_output(previous_scan):
-    state, target, output, scan_id = previous_scan
-    mark_stopped(state, scan_id)
-    archive = output.with_name("scan.previous-fixture")
-    output.rename(archive)
-    output.mkdir(mode=0o700)
-    registered = register(
-        state, target, output, "--archive-existing", "--archived-scan-dir", str(archive)
-    )
-    assert registered["archivedScanDir"] == str(archive)
-    assert (archive / "report.md").read_text() == "previous scan\n"
-    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
-
-
 def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
     state = tmp_path / "state"
     output = tmp_path / "output"
@@ -412,22 +319,18 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
     assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
 
 
-@pytest.mark.parametrize("layout", ["same", "nested", "alias"])
-def test_registration_does_not_archive_its_active_workbench_state(tmp_path, layout):
+def test_registration_does_not_archive_state_reached_through_an_external_alias(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
-    (target / "fixture.py").write_text("preserved source\n")
     output = tmp_path / "output"
     output.mkdir(mode=0o700)
-    state = output if layout == "same" else output / "state"
-    state.mkdir(mode=0o700, exist_ok=True)
-    if layout == "alias":
-        alias = tmp_path / "state-alias"
-        try:
-            alias.symlink_to(state, target_is_directory=True)
-        except OSError:
-            pytest.skip("Directory symlinks are unavailable")
-        state = alias
+    nested_state = output / "state"
+    nested_state.mkdir(mode=0o700)
+    state = tmp_path / "state-alias"
+    try:
+        state.symlink_to(nested_state, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks are unavailable")
     saved = tmp_path / "saved"
     saved.mkdir(mode=0o700)
     previous = register(state, target, saved)

@@ -23,9 +23,9 @@ const { recordCodexSecurityDiscoveryCandidates } = await importSource(
     },
   },
 );
-const inventoryScript = path.join(
+const inventoryHelper = path.join(
   import.meta.dirname,
-  "../../scripts/generate_in_scope_files.py",
+  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
 );
 
 for (const deleted of [false, true]) {
@@ -66,8 +66,9 @@ for (const deleted of [false, true]) {
         git("commit", "-qm", "change");
 
         const scope = path.join(root, "in-scope.txt");
-        execFileSync(process.env.PYTHON ?? "python3", [
-          inventoryScript,
+        execFileSync(process.execPath, [
+          inventoryHelper,
+          "generate-in-scope-files",
           "--repo",
           repo,
           "--scope",

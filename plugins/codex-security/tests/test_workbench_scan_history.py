@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 from argparse import Namespace
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -77,22 +78,6 @@ def test_rename_rejects_blank_names(tmp_path: Path) -> None:
     assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
 
 
-@pytest.mark.parametrize(
-    ("name", "query"),
-    [("Évaluation", "évaluation"), ("Straße", "STRASSE"), ("Проверка", "проверка")],
-)
-def test_scan_name_search_ignores_unicode_case(tmp_path: Path, name: str, query: str) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=False)
-    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
-
-    listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-
-    assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
-
-
 def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "Straße"
@@ -104,9 +89,11 @@ def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
         tmp_path / "scans",
         extra_args=("--scope=Ä", "--target-summary=Überblick"),
     )["scan"]
-    for query in ("Straße", "STRASSE", "Ä", "ä", "Überblick", "ÜBERBLICK"):
+    name = "Évaluation Größe Проверка"
+    run_workbench(state_dir, "rename-scan", "--scan-id", scan["scanId"], f"--name={name}")
+    for query in ("STRASSE", "ä", "ÜBERBLICK", "évaluation", "GRÖSSE", "проверка"):
         listed = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
-        assert [item["scanId"] for item in listed] == [scan["scanId"]]
+        assert [(item["scanId"], item["name"]) for item in listed] == [(scan["scanId"], name)]
     assert run_workbench(state_dir, "list-scans", "--query", "unrelated")["scans"] == []
 
 
@@ -971,6 +958,53 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
+def create_ordered_history(root: Path, anchors: tuple[str, ...]):
+    repository = root / "repository"
+    repository.mkdir()
+    state_dir = root / "state"
+    scans = sorted(
+        (
+            create_cli_scan(state_dir, root / "results", repository, identity_anchor=anchor)
+            for anchor in anchors
+        ),
+        key=lambda scan: scan["scanId"],
+    )
+    return state_dir / "workbench.sqlite3", repository, scans
+
+
+@pytest.fixture(scope="module")
+def recurring_history(tmp_path_factory: pytest.TempPathFactory):
+    return create_ordered_history(tmp_path_factory.mktemp("recurring-scans"), ("recurring",) * 2)
+
+
+@pytest.fixture(scope="module")
+def matched_history(tmp_path_factory: pytest.TempPathFactory):
+    database, _repository, scans = create_ordered_history(
+        tmp_path_factory.mktemp("matched-scans"), tuple(f"synthetic-{index}" for index in range(4))
+    )
+    findings = [get_scan(database.parent, scan["scanId"])["scan"]["findings"][0] for scan in scans]
+    for left, right in ((0, 1), (1, 3)):
+        save_scan_matches(
+            database.parent,
+            scans[left],
+            scans[right],
+            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
+        )
+    return database, scans, [sorted(finding["findingId"] for finding in findings[:2])]
+
+
+def copy_history_state(database: Path, tmp_path: Path) -> Path:
+    # Each case changes its own timestamps or matches. The sealed scan directories are read-only.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with (
+        closing(sqlite3.connect(database)) as source,
+        closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as destination,
+    ):
+        source.backup(destination)
+    return state_dir
+
+
 @pytest.mark.parametrize(
     ("timestamps", "expected_order"),
     [
@@ -981,15 +1015,10 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     ids=["mixed-offsets", "microseconds", "equal-instants"],
 )
 def test_finding_occurrence_history_uses_start_instants(
-    tmp_path: Path, timestamps: tuple[str, str], expected_order: tuple[int, int]
+    tmp_path: Path, recurring_history, timestamps: tuple[str, str], expected_order: tuple[int, int]
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scans = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
-    )
+    database, _repository, scans = recurring_history
+    state_dir = copy_history_state(database, tmp_path)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1509,15 +1538,10 @@ def test_list_unmatched_scan_pairs_skips_incompatible_replaced_repositories(tmp_
     ],
 )
 def test_automatic_matching_orders_instants_and_preserves_directed_cache(
-    tmp_path: Path, before_started: str, after_started: str
+    tmp_path: Path, recurring_history, before_started: str, after_started: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    before, after = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
-    )
+    database, repository, (before, after) = recurring_history
+    state_dir = copy_history_state(database, tmp_path)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1756,37 +1780,17 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     ids=["offsets", "microseconds", "equal-instants"],
 )
 def test_explicit_comparison_uses_chronological_matching_cutoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
+    tmp_path: Path, matched_history, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scans = sorted(
-        (
-            create_cli_scan(
-                state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
-            )
-            for index in range(4)
-        ),
-        key=lambda scan: scan["scanId"],
-    )
+    database, scans, expected = matched_history
+    state_dir = copy_history_state(database, tmp_path)
     middle, after, future = scans[1:]
-    findings = [get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in scans]
-    for left, right in ((0, 1), (1, 3)):
-        save_scan_matches(
-            state_dir,
-            scans[left],
-            scans[right],
-            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
-        )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
             [(timestamp, scan["scanId"]) for timestamp, scan in zip(timestamps, scans)],
         )
         original = list(connection.iterdump())
-    expected = [sorted(finding["findingId"] for finding in findings[:2])]
-
     for before_scan, after_scan in ((middle, after), (after, middle)):
         compared = compare_scan_pair(
             state_dir, before_scan, after_scan, "--include-matching-inputs"
@@ -2169,24 +2173,15 @@ def replace_history_repository(repository: Path, origin: str) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("change", "confirmed"),
-    [
-        ("replacement", True),
-        ("same-repository", True),
-        ("same-origin-clone", True),
-        ("remote-edit", True),
-        ("replacement", False),
-        ("legacy", True),
-    ],
-)
-def test_finding_history_scopes_saved_aliases_to_repository_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, confirmed: bool
-) -> None:
+HISTORY_ORIGIN = "https://example.test/original.git"
+
+
+@pytest.fixture
+def git_finding_history(tmp_path: Path):
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    origin = "https://example.test/original.git"
+    origin = HISTORY_ORIGIN
     subprocess.run(["git", "-C", str(repository), "remote", "add", "origin", origin], check=True)
 
     def scan(anchor: str, location: str) -> dict[str, Any]:
@@ -2199,6 +2194,24 @@ def test_finding_history_scopes_saved_aliases_to_repository_identity(
             relative_path=location,
         )
 
+    return state_dir, repository, scan
+
+
+@pytest.mark.parametrize(
+    ("change", "confirmed"),
+    [
+        ("replacement", True),
+        ("same-repository", True),
+        ("same-origin-clone", True),
+        ("remote-edit", True),
+        ("replacement", False),
+        ("legacy", True),
+    ],
+)
+def test_finding_history_scopes_saved_aliases_to_repository_identity(
+    git_finding_history, monkeypatch: pytest.MonkeyPatch, change: str, confirmed: bool
+) -> None:
+    state_dir, repository, scan = git_finding_history
     old = [scan("control-a", "src/old-a.py"), scan("control-b", "src/old-b.py")]
     old_findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in old]
     if confirmed:
@@ -2219,7 +2232,7 @@ def test_finding_history_scopes_saved_aliases_to_repository_identity(
     if change in {"replacement", "same-origin-clone"}:
         replace_history_repository(
             repository,
-            "https://example.test/replacement.git" if change == "replacement" else origin,
+            "https://example.test/replacement.git" if change == "replacement" else HISTORY_ORIGIN,
         )
     elif change == "remote-edit":
         subprocess.run(
@@ -2293,34 +2306,9 @@ def test_finding_history_scopes_saved_aliases_to_repository_identity(
     [(True, True, False), (False, True, False), (True, False, False), (False, True, True)],
 )
 def test_finding_history_scopes_related_location_veto_to_repository_identity(
-    tmp_path: Path, replacement: bool, related: bool, mixed_neighbor: bool
+    git_finding_history, replacement: bool, related: bool, mixed_neighbor: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "remote",
-            "add",
-            "origin",
-            "https://example.test/original.git",
-        ],
-        check=True,
-    )
-
-    def scan(anchor: str, location: str) -> dict[str, Any]:
-        return create_cli_scan(
-            state_dir,
-            tmp_path / "scans",
-            repository,
-            target_revision=revision,
-            identity_anchor=anchor,
-            relative_path=location,
-        )
-
+    state_dir, repository, scan = git_finding_history
     old = [scan("control-a", "src/old-a.py")]
     if mixed_neighbor:
         replace_history_repository(repository, "https://example.test/original.git")
@@ -2366,34 +2354,9 @@ def test_finding_history_scopes_related_location_veto_to_repository_identity(
 
 @pytest.mark.parametrize("replacement", [True, False])
 def test_finding_history_scopes_transitive_aliases_to_repository_identity(
-    tmp_path: Path, replacement: bool
+    git_finding_history, replacement: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "remote",
-            "add",
-            "origin",
-            "https://example.test/original.git",
-        ],
-        check=True,
-    )
-
-    def scan(anchor: str, location: str) -> dict[str, Any]:
-        return create_cli_scan(
-            state_dir,
-            tmp_path / "scans",
-            repository,
-            target_revision=revision,
-            identity_anchor=anchor,
-            relative_path=location,
-        )
-
+    state_dir, repository, scan = git_finding_history
     old = [scan("control-a", "src/old-a.py"), scan("control-bridge", "src/old-x.py")]
     old_findings = [get_scan(state_dir, item["scanId"])["scan"]["findings"][0] for item in old]
     save_scan_matches(
@@ -2670,7 +2633,9 @@ def test_legacy_git_identity_preserves_saved_matches_without_inference(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         if legacy_identity == "missing-snapshot":
             connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE name = 'save scan Git repository identities'"
+            )
         else:
             identity = json.loads(
                 connection.execute(

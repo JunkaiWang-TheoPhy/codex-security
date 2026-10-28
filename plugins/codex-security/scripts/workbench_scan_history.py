@@ -22,6 +22,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -146,7 +147,7 @@ def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
-    coverage_ref = ARTIFACTS["coverage"]
+    coverage_ref = "coverage.json"
     try:
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
@@ -156,7 +157,7 @@ def coverage_summary_for_history(
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:
             # Completion already validated the full scan. History only needs the
-            # pinned manifest and its coverage artifact, not findings or receipts.
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
             manifest, manifest_bytes = _read_scan_local_json_bytes(
                 scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
             )
@@ -166,11 +167,15 @@ def coverage_summary_for_history(
             ):
                 raise ContractError("The sealed scan manifest changed after completion.")
             sealed_scan = manifest["scan"]
-            if (
-                sealed_scan["id"] != scan["id"]
-                or not sealed_scan.get("sealedAt")
-                or sealed_scan["coverageRef"] != coverage_ref
-            ):
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
                 raise ContractError("The sealed coverage does not belong to this scan.")
             coverage, coverage_bytes = _read_scan_local_json_bytes(
                 scan_dir, coverage_ref, coverage_ref
@@ -203,6 +208,16 @@ def coverage_summary_for_history(
 
 def _windows_path_key(value: str) -> str:
     return os.path.normcase(os.path.realpath(value))
+
+
+def _requested_repository(connection: sqlite3.Connection, repository: Path) -> sqlite3.Row:
+    return connection.execute(
+        """
+        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = :path), '') AS target_id,
+            :path AS target_path
+        """,
+        {"path": str(repository)},
+    ).fetchone()
 
 
 def _same_repository(
@@ -260,8 +275,7 @@ def _same_repository(
     )
 
 
-SCAN_SUMMARY_QUERY = """
-SELECT
+SCAN_SUMMARY_COLUMNS = """
     scans.*,
     progress.reportable_findings_count,
     progress.scope_file_count,
@@ -273,6 +287,9 @@ SELECT
         FROM finding_occurrences AS occurrences
         WHERE occurrences.scan_id = scans.id
     ) AS finding_count
+"""
+SCAN_SUMMARY_QUERY = f"""
+SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
 """
@@ -333,13 +350,7 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        requested_repository = connection.execute(
-            """
-            SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-                ? AS target_path
-            """,
-            (str(repository), str(repository)),
-        ).fetchone()
+        requested_repository = _requested_repository(connection, repository)
         requested_identity = (
             git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
             repository_origin(repository),
@@ -433,13 +444,7 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
-    requested = connection.execute(
-        """
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-            ? AS target_path
-        """,
-        (str(repository), str(repository)),
-    ).fetchone()
+    requested = _requested_repository(connection, repository)
     selected = [
         scan
         for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
@@ -488,8 +493,11 @@ def list_unmatched_scan_pairs(
                 ]
         history = selected[: selected_index + 1]
         excluded = [scan["id"] for scan in history if _saved_repository_conflict(scan, after)]
+        eligible_ids = {scan["id"] for scan in history} - set(excluded)
         known_groups = _known_finding_groups(
-            known_links, {scan["id"] for scan in history} - set(excluded)
+            link
+            for link in known_links
+            if link["before_scan_id"] in eligible_ids and link["after_scan_id"] in eligible_ids
         )
         batches.append(
             {
@@ -550,11 +558,9 @@ def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
     return {finding_id: root(finding_id) for finding_id in parents}
 
 
-def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
+def _known_finding_groups(links: Iterable[sqlite3.Row]) -> list[list[str]]:
     aliases = _finding_aliases(
-        (link["before_finding_id"], link["after_finding_id"])
-        for link in links
-        if link["before_scan_id"] in scan_ids and link["after_scan_id"] in scan_ids
+        (link["before_finding_id"], link["after_finding_id"]) for link in links
     )
     groups: dict[str, list[str]] = {}
     for finding_id, identity in aliases.items():
@@ -892,12 +898,9 @@ def compare_scans(
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
-            [
-                link
-                for link in _saved_finding_links(connection, known_scan_ids)
-                if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
-            ],
-            known_scan_ids,
+            link
+            for link in _saved_finding_links(connection, known_scan_ids)
+            if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
         )
         result["matchingCached"] = cached is not None
         result["matchingInputs"] = {
