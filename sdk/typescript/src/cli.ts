@@ -7424,11 +7424,9 @@ async function runDependencyScan(
       [
         summary,
         `last event ${seconds}s`,
-        ...(showCost
-          ? [
-              `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`,
-            ]
-          : []),
+        showCost
+          ? `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`
+          : undefined,
         activity ?? detail,
       ]
         .filter((part) => part !== undefined)
@@ -7440,13 +7438,12 @@ async function runDependencyScan(
     lastMilestone = message;
     progress.writeAboveTimer(() => progress.stage(diagnosticValue(message)));
   };
-  const writeDiagnostic = (message: string): void => {
-    try {
+  const writeDiagnostic = (message: string): void =>
+    notify(() =>
       progress.writeAboveTimer(() =>
         errorOutput.write(`${diagnosticLines(message)}\n`),
-      );
-    } catch {}
-  };
+      ),
+    );
   try {
     if (verbose) {
       writeDiagnostic(
@@ -7599,7 +7596,7 @@ async function runDependencyScan(
         `Model: ${result.model.model ?? "not used"}`,
     );
   }
-  if (presentation.showCost || options.maxCostUsd !== undefined) {
+  if (showCost) {
     writeDiagnostic(
       `Estimated cost: ${result.model.costUsd === null ? "unavailable" : formatUsd(result.model.costUsd)}`,
     );

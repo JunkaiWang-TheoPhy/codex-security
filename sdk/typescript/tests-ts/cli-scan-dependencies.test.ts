@@ -26,6 +26,20 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
+function trackIntervals(deps: ReturnType<typeof dependencies>) {
+  const activeTimers = new Map<NodeJS.Timeout, () => void>();
+  const start = mock((callback: () => void) => {
+    const handle = fakeInterval(callback);
+    activeTimers.set(handle, callback);
+    return handle;
+  });
+  deps.setInterval = start;
+  deps.clearInterval = (handle) => {
+    activeTimers.delete(handle);
+  };
+  return { activeTimers, start };
+}
+
 function dependencyResult(
   status: ScaResult["status"] = "completed",
 ): ScaResult {
@@ -1314,9 +1328,7 @@ test.each([
     Object.assign(stderr.stream, { columns: 240 });
     const started = Promise.withResolvers<void>();
     const answer = Promise.withResolvers<"chatgpt" | "api-key">();
-    const activeTimers = new Map<NodeJS.Timeout, () => void>();
     let now = 0;
-    let timersStarted = 0;
     let promptStarted = false;
     let pauseFailures = 0;
     let promptSignal: AbortSignal | undefined;
@@ -1341,15 +1353,7 @@ test.each([
       signals,
     });
     deps.now = () => now;
-    deps.setInterval = (callback) => {
-      const handle = fakeInterval(callback);
-      activeTimers.set(handle, callback);
-      timersStarted++;
-      return handle;
-    };
-    deps.clearInterval = (handle) => {
-      activeTimers.delete(handle);
-    };
+    const { activeTimers, start } = trackIntervals(deps);
     deps.hasStoredChatGPTSignIn = async () => true;
     deps.scanAuthenticationPrompt = selectionPrompt(
       async (question, choices, _presentation, signal) => {
@@ -1404,7 +1408,7 @@ test.each([
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     expect(timersDuringPrompt).toBe(0);
     expect(writesDuringPrompt).toBe("");
-    expect(timersStarted).toBe(ending === "selection" ? 2 : 1);
+    expect(start).toHaveBeenCalledTimes(ending === "selection" ? 2 : 1);
     if (ending === "selection") {
       expect(beforeTick).toContain("\n\u001b[?25hBoth a ChatGPT sign-in");
       expect(afterSelectionTimers).toBe(1);
@@ -1441,8 +1445,6 @@ test.each([
     const { stderr, runCli } = createCliTest(main, { stderr: terminal });
     const result = dependencyResult();
     if (mode !== "zero matches") addMatch(result);
-    const activeTimers = new Set<NodeJS.Timeout>();
-    let timersStarted = 0;
     let prompts = 0;
     let probes = 0;
     const deps = dependencies({
@@ -1451,15 +1453,7 @@ test.each([
           ? {}
           : { OPENAI_API_KEY: "synthetic-progress-auth-key" },
     });
-    deps.setInterval = (callback) => {
-      const handle = fakeInterval(callback);
-      activeTimers.add(handle);
-      timersStarted++;
-      return handle;
-    };
-    deps.clearInterval = (handle) => {
-      activeTimers.delete(handle);
-    };
+    const { activeTimers, start } = trackIntervals(deps);
     deps.hasStoredChatGPTSignIn = async () => {
       probes++;
       return false;
@@ -1495,7 +1489,7 @@ test.each([
     expect(await runCli(["scan", "dependencies", ...flags], deps)).toBe(0);
     expect(prompts).toBe(0);
     expect(probes).toBe(mode === "no stored sign-in" ? 1 : 0);
-    expect(timersStarted).toBe(terminal ? 1 : 0);
+    expect(start).toHaveBeenCalledTimes(terminal ? 1 : 0);
     expect(activeTimers.size).toBe(0);
     expect(stderr.text().split("\u001b[?25l").length - 1).toBe(
       terminal ? 1 : 0,
