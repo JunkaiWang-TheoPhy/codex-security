@@ -11,29 +11,19 @@ import { assertFlagPair } from "./assertions.ts";
 import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 
-export async function testWorkerCancellation({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  trustedParentSandbox,
-  restoreEnv,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<{
-    root: string;
-    executablePath: string;
-    preflightMarkerPath: string;
-    markerPath: string;
-  }>;
-  trustedParentSandbox: DeepWorkerParentSandbox;
-  restoreEnv: (name: string, value: string | undefined) => void;
-}) {
-  const fixture = await fakeCodexFixture();
+import { restoreEnv } from "./support/fake-codex-source.ts";
+
+export function mockWorkerSpawn(
+  executablePath: string,
+  onExec: (
+    child: ChildProcess,
+    args: readonly string[],
+    options: SpawnOptions,
+  ) => void,
+) {
   const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = process.execPath;
   const originalSpawn = childProcess.spawn;
-  let worker: ChildProcess | undefined;
-  let workerSignal: AbortSignal | undefined;
-  let cancelDuringCleanup: (() => void) | undefined;
-  let timeout: NodeJS.Timeout | undefined;
   childProcess.spawn = ((
     command: string,
     args: readonly string[] = [],
@@ -43,11 +33,43 @@ export async function testWorkerCancellation({
       command,
       command === process.execPath ||
         command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
+        ? [executablePath, ...args]
         : args,
       options,
     );
-    if (args[0] === "exec") {
+    if (args[0] === "exec") onExec(child, args, options);
+    return child;
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  return () => {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+  };
+}
+
+export async function testWorkerCancellation({
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+  trustedParentSandbox,
+}: {
+  CodexSdkWorkerExecutor: typeof WorkerExecutor;
+  fakeCodexFixture: () => Promise<{
+    root: string;
+    executablePath: string;
+    preflightMarkerPath: string;
+    markerPath: string;
+  }>;
+  trustedParentSandbox: DeepWorkerParentSandbox;
+}) {
+  const fixture = await fakeCodexFixture();
+  let worker: ChildProcess | undefined;
+  let workerSignal: AbortSignal | undefined;
+  let cancelDuringCleanup: (() => void) | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  const restoreSpawn = mockWorkerSpawn(
+    fixture.executablePath,
+    (child, args, options) => {
       assertFlagPair(args, "--thread-source", "security_scan");
       worker = child;
       workerSignal = options.signal;
@@ -56,11 +78,8 @@ export async function testWorkerCancellation({
         cancelDuringCleanup?.();
         return kill.apply(this, args);
       };
-    }
-    return child;
-  }) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
+    },
+  );
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
@@ -179,8 +198,6 @@ export async function testWorkerCancellation({
     cancelDuringCleanup = undefined;
     if (worker && worker.exitCode === null && worker.signalCode === null)
       worker.kill("SIGKILL");
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreSpawn();
   }
 }

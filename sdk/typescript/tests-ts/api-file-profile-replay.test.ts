@@ -316,7 +316,8 @@ test.each(
       await mkdir(path, { mode: 0o700 });
     const profilePath = join(home, "review.config.toml");
     const fileProfile = (version: string) => ({
-      model: "gpt-5.6-sol",
+      model: version === "first" ? "initial-model" : "updated-model",
+      model_reasoning_effort: version === "first" ? "low" : "high",
       analytics: { enabled: true },
       shell_environment_policy: {
         inherit: "all",
@@ -412,6 +413,8 @@ test.each(
         await mergedCodexConfig({ codexOverrides: replay }, home),
       );
       expect(restored).toMatchObject({
+        model: "updated-model",
+        model_reasoning_effort: "high",
         analytics: { enabled: false },
         shell_environment_policy: {
           inherit: "none",

@@ -8,6 +8,84 @@ import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
+test("requires opt-in before reading the source file", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const environment: NodeJS.ProcessEnv = { ...fixture.environment };
+    delete environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
+    let workbenchCalls = 0;
+    await expect(
+      prepareLocalExternalImport(
+        join(fixture.root, "missing-findings.json"),
+        {
+          repository: fixture.repository,
+          provider: "wiz",
+          sourceKey: "example-project/main",
+        },
+        {
+          environment,
+          runWorkbench: async () => {
+            workbenchCalls++;
+            throw new Error("Disabled imports must not access the workbench");
+          },
+        },
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(workbenchCalls).toBe(0);
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("a file import rechecks the selected workbench opt-in after reading", async () => {
+  const f = await localFindingsFixture();
+  try {
+    const file = join(f.root, "report.json");
+    await writeFile(
+      file,
+      JSON.stringify([
+        {
+          source_finding_id: "example",
+          evidence: { title: "Example finding", severity: "high" },
+        },
+      ]),
+    );
+    const selection = {
+      repository: f.repository,
+      provider: "wiz" as const,
+      sourceKey: "example",
+    };
+    class Workbench {
+      get environment() {
+        return { ...f.environment, HOME: f.root, USERPROFILE: f.root };
+      }
+    }
+    const prepared = await prepareLocalExternalImport(
+      file,
+      { ...selection, repository: "~/repository" },
+      new Workbench(),
+    );
+    expect(prepared.preview.repository).toBe(f.repository);
+
+    const dependencies = { environment: { ...f.environment } };
+    const pending = prepareLocalExternalImport(file, selection, dependencies);
+    const disabledState = join(f.root, "disabled-state");
+    dependencies.environment = {
+      ...f.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+      CODEX_SECURITY_STATE_DIR: disabledState,
+    };
+    await expect(pending).rejects.toThrow(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    await expect(access(f.stateDirectory)).rejects.toThrow();
+    await expect(access(disabledState)).rejects.toThrow();
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("cancels preparation while the source file read is pending", async () => {
   const fixture = await localFindingsFixture();
   try {
@@ -89,13 +167,17 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
       sourceKey: "example-project/main",
     };
     const dependencies = { environment: fixture.environment };
-    const parsed = await readVendorFindings(file);
+    const parsed = await readVendorFindings(file, "local");
     const prepared = await prepareLocalExternalImport(
       file,
       options,
       dependencies,
     );
     expect(prepared.preview.findings).toEqual(parsed.findings);
+    expect(prepared.preview.source).toEqual({
+      provider: "wiz",
+      source_key: options.sourceKey,
+    });
     await expect(
       access(join(fixture.stateDirectory, "workbench.sqlite3")),
     ).rejects.toThrow();
@@ -107,6 +189,7 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
     );
     expect(stored).toEqual(first.findings);
     expect(stored[0]).toMatchObject({
+      provider: "wiz",
       sourceFindingId: "package-occurrence",
       assessment: { state: "not_assessed" },
       version: 1,
@@ -195,7 +278,7 @@ test.each([
           file,
           format === "gzip JSON" ? gzipSync(contents) : contents,
         );
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         if (format.includes("normalized JSONL")) {
           const normalized = parsed.findings
             .map((finding) => JSON.stringify(finding))
@@ -263,7 +346,7 @@ test.each(["raw JSON", "normalized JSONL"])(
       async function writeSelection(url: string) {
         record.vulnerableAsset.cloudProviderURL = url;
         await writeFile(file, JSON.stringify([record]));
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         if (format === "normalized JSONL")
           await writeFile(
             file,
@@ -380,7 +463,7 @@ for (const kind of [
           sourceKey: "named-project/main",
         };
         const dependencies = { environment: fixture.environment };
-        const parsed = await readVendorFindings(file);
+        const parsed = await readVendorFindings(file, "local");
         expect(parsed.findings).toHaveLength(1);
         expect(parsed.excluded).toHaveLength(1);
         execFileSync(

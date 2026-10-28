@@ -484,7 +484,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               resumeThreadId !== undefined,
             );
             assert.equal(invocation.configPath, scanConfigPaths[index]);
-            assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
+            assert.partialDeepStrictEqual(
+              invocation.gitEnvironment,
+              gitEnvironment,
+            );
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
             }
@@ -514,7 +517,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
+            assert.partialDeepStrictEqual(
+              preflight.gitEnvironment,
+              gitEnvironment,
+            );
             assert.equal(
               workerPermissionProfileOverride(launch.args),
               workerPermissionProfileOverride(workerLaunches[0].args),

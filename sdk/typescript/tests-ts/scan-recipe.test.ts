@@ -13,6 +13,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
+import { scanPreflightCodexConfig } from "../src/api.js";
 import { main } from "../src/cli.js";
 import { codexSecurityCredentialHome, runWorkbench } from "../src/runtime.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
@@ -366,26 +367,51 @@ test.each(
   },
 );
 
-test.each(
-  ["standard", "deep"].flatMap((mode) =>
-    ["review", "review.v2", "review mode", "分析"].map(
-      (profile) => [mode, profile] as const,
-    ),
-  ),
-)(
+const selected = {
+  model: "synthetic-selected-model",
+  model_reasoning_effort: "high",
+  model_provider: "amazon-bedrock",
+  features: { goals: false },
+};
+const selectedProviders = {
+  "amazon-bedrock": {
+    aws: { region: "us-east-2", profile: "scan-profile" },
+  },
+};
+function profileConfig(profile: string) {
+  return {
+    model: "synthetic-root-model",
+    model_reasoning_effort: "low",
+    model_provider: "openai",
+    model_providers: {
+      "amazon-bedrock": {
+        aws: { region: "us-west-2", profile: "ambient-profile" },
+      },
+    },
+    profile,
+    profiles: {
+      [profile]: { ...selected, model_providers: selectedProviders },
+    },
+  };
+}
+
+test.each(["review", "review.v2", "review mode", "分析"])(
+  "preserves effective settings for profile %s in the recipe configuration",
+  (profile) => {
+    const recipeConfig = scanPreflightCodexConfig(profileConfig(profile));
+    expect(resolveCodexProfile(recipeConfig)).toMatchObject({
+      ...selected,
+      model_providers: selectedProviders,
+    });
+  },
+);
+
+test.each([
+  ["standard", "review"],
+  ["deep", "分析"],
+])(
   "%s scans save prompts and replay the selected %s profile",
   async (mode, profile) => {
-    const selected = {
-      model: "synthetic-selected-model",
-      model_reasoning_effort: "high",
-      model_provider: "amazon-bedrock",
-      features: { goals: false },
-    };
-    const selectedProviders = {
-      "amazon-bedrock": {
-        aws: { region: "us-east-2", profile: "scan-profile" },
-      },
-    };
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "state", "codex-home");
@@ -432,23 +458,7 @@ test.each(
           new TestClient(
             {
               ...config,
-              codexOverrides: {
-                model: "synthetic-root-model",
-                model_reasoning_effort: "low",
-                model_provider: "openai",
-                model_providers: {
-                  "amazon-bedrock": {
-                    aws: { region: "us-west-2", profile: "ambient-profile" },
-                  },
-                },
-                profile,
-                profiles: {
-                  [profile]: {
-                    ...selected,
-                    model_providers: selectedProviders,
-                  },
-                },
-              },
+              codexOverrides: profileConfig(profile),
             },
             {
               environment,

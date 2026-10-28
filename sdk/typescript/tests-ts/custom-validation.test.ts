@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { resolveCodexProfile } from "../src/config.js";
 import { randomUUID } from "node:crypto";
 import {
+  cp,
   mkdir,
   readFile,
   rename,
@@ -19,6 +20,7 @@ import {
   runCustomValidation,
   type CustomValidationResult,
 } from "../src/custom-validation.js";
+import { readScanFile } from "../src/contract.js";
 import {
   customDiscoveryPrompt,
   customValidationConfig,
@@ -39,6 +41,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { readReviewState } from "./support/review-state.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
@@ -238,6 +241,89 @@ describe("custom validation", () => {
     },
   );
 
+  test.each(["unchanged", "replaced"])(
+    "compares exact provisional file identity when numeric IDs collide: %s",
+    async (state) => {
+      const title = `compares exact provisional file identity when numeric IDs collide: ${state}`;
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const f = await fixture();
+      const path = join(f.scanDir, "coverage.json");
+      const before = 2n ** 60n;
+      const after = before + 1n;
+      expect(Number(before)).toBe(Number(after));
+      const files = await import("node:fs/promises");
+      const original = {
+        lstat: files.lstat,
+        open: files.open,
+        realpath: files.realpath,
+      };
+      let replaced = false;
+      const inspecting = spyOn(files, "lstat").mockImplementation((async (
+        ...args: Parameters<typeof original.lstat>
+      ) => {
+        const metadata = await original.lstat(...args);
+        if (args[0] === path) {
+          const identity = replaced ? after : before;
+          Object.defineProperty(metadata, "ino", {
+            value:
+              typeof metadata.ino === "bigint" ? identity : Number(identity),
+          });
+        }
+        return metadata;
+      }) as typeof original.lstat);
+      const opening = spyOn(files, "open").mockImplementation(
+        async (...args) => {
+          const file = await original.open(...args);
+          if (args[0] === path) {
+            const identity = replaced ? after : before;
+            const stat = file.stat.bind(file);
+            spyOn(file, "stat").mockImplementation((async (
+              ...options: Parameters<typeof stat>
+            ) => {
+              const metadata = await stat(...options);
+              Object.defineProperty(metadata, "ino", {
+                value:
+                  typeof metadata.ino === "bigint"
+                    ? identity
+                    : Number(identity),
+              });
+              return metadata;
+            }) as typeof stat);
+          }
+          return file;
+        },
+      );
+      const resolving = spyOn(files, "realpath").mockImplementation((async (
+        ...args: Parameters<typeof original.realpath>
+      ) => {
+        const canonical = await original.realpath(...args);
+        if (args[0] === path && state === "replaced" && !replaced) {
+          await rename(path, `${path}.original`);
+          await writeFile(path, await readFile(`${path}.original`));
+          replaced = true;
+        }
+        return canonical;
+      }) as typeof original.realpath);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      try {
+        if (state === "replaced") {
+          await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
+            "expected the checked regular file",
+          );
+          expect(replaced).toBe(true);
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          await runCustomValidation({ ...f, run });
+          expect(run).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        resolving.mockRestore();
+        opening.mockRestore();
+        inspecting.mockRestore();
+      }
+    },
+  );
+
   test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
     "reads the checked %s descriptor after pathname replacement",
     async (name) => {
@@ -276,6 +362,53 @@ describe("custom validation", () => {
       }
     },
   );
+
+  test("rejects scan root replacement when numeric directory IDs collide", async () => {
+    const title =
+      "rejects scan root replacement when numeric directory IDs collide";
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const f = await fixture();
+    const before = 2n ** 60n;
+    const after = before + 1n;
+    expect(Number(before)).toBe(Number(after));
+    const files = await import("node:fs/promises");
+    const original = { lstat: files.lstat, realpath: files.realpath };
+    let replaced = false;
+    const inspecting = spyOn(files, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original.lstat>
+    ) => {
+      const metadata = await original.lstat(...args);
+      if (args[0] === f.scanDir) {
+        const identity = replaced ? after : before;
+        Object.defineProperty(metadata, "ino", {
+          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
+        });
+      }
+      return metadata;
+    }) as typeof original.lstat);
+    const resolving = spyOn(files, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof original.realpath>
+    ) => {
+      const canonical = await original.realpath(...args);
+      if (args[0] === f.scanDir && !replaced) {
+        replaced = true;
+        await rename(f.scanDir, `${f.scanDir}.original`);
+        await mkdir(f.scanDir, { mode: 0o700 });
+      }
+      return canonical;
+    }) as typeof original.realpath);
+    try {
+      await expect(
+        readScanFile(f.scanDir, "coverage.json", "coverage.json"),
+      ).rejects.toThrow(
+        "Scan directory must be an existing non-symlink directory",
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      resolving.mockRestore();
+      inspecting.mockRestore();
+    }
+  });
 
   test.each(["malformed", "directory"])(
     "rejects a %s provisional document before invoking validation",
@@ -429,6 +562,30 @@ describe("custom validation", () => {
     });
   });
 
+  test.each([{ artifacts: [] }, { artifacts: null }])(
+    "validates an unfinished draft with %j",
+    async ({ artifacts }) => {
+      const f = await fixture();
+      const manifest = await json<{ scan: Record<string, unknown> }>(
+        join(f.scanDir, "scan-manifest.json"),
+      );
+      manifest.scan["artifacts"] = artifacts;
+      manifest.scan["sealedAt"] = null;
+      await save(join(f.scanDir, "scan-manifest.json"), manifest);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      await runCustomValidation({ ...f, run });
+      expect(run).toHaveBeenCalledTimes(1);
+      const findings = await json<FindingsDocument>(
+        join(f.scanDir, "findings.json"),
+      );
+      expect(findings.findings).toHaveLength(1);
+      expect(findings.findings[0]).toMatchObject({
+        identity: f.findings.findings[0]!.identity,
+        validation: { disposition: "reportable" },
+      });
+    },
+  );
+
   test.each([
     "sealedAt",
     "artifacts",
@@ -441,7 +598,14 @@ describe("custom validation", () => {
       join(f.scanDir, "scan-manifest.json"),
     );
     if (kind === "sealedAt") manifest.scan.sealedAt = "2026-01-01T00:00:00Z";
-    if (kind === "artifacts") manifest.scan.artifacts = [];
+    if (kind === "artifacts")
+      manifest.scan.artifacts = [
+        {
+          path: "findings.json",
+          sha256: "0".repeat(64),
+          mediaType: "application/json",
+        },
+      ];
     if (kind === "manifest ID") manifest.scan.id = randomUUID();
     if (kind === "findings ID" || kind === "coverage ID") {
       const name = kind === "findings ID" ? "findings.json" : "coverage.json";
@@ -477,6 +641,99 @@ describe("custom validation", () => {
       expect(
         await json<FindingsDocument>(join(f.scanDir, "findings.json")),
       ).toEqual(f.findings);
+    },
+  );
+
+  test.each([
+    ["bundled", ""],
+    ["unmarked oneOf", "coverage/deferred/0/paths/1"],
+    ["additional pattern", "coverage/deferred/0/paths/1"],
+    ["referenced array", "coverage/checkedPaths"],
+    ["conditional", "must have required property 'reviewReceipt'"],
+    ["referenced predicate", "must have required property 'reviewReceipt'"],
+  ])(
+    "honors %s deferred path rules before custom validation",
+    async (rules, expectedError) => {
+      const f = await fixture();
+      const path = join(f.scanDir, "coverage.json");
+      const coverage = await json<CoverageDocument>(path);
+      coverage.deferred = [
+        {
+          id: "pending",
+          reason: "Review pending.",
+          paths: ["src/valid", "../outside"],
+        },
+      ];
+      await save(path, coverage);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      if (rules === "bundled") {
+        await runCustomValidation({ ...f, run });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect((await json<CoverageDocument>(path)).deferred).toEqual(
+          coverage.deferred,
+        );
+        return;
+      }
+      const pluginRoot = join(f.root, "plugin");
+      await cp(join(f.pluginRoot, "schemas"), join(pluginRoot, "schemas"), {
+        recursive: true,
+      });
+      const schemaPath = join(pluginRoot, "schemas", "coverage.schema.json");
+      const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+      const deferred = schema.properties.deferred.items;
+      const paths = deferred.properties.paths;
+      if (rules === "unmarked oneOf") delete paths.items.oneOf[1].$comment;
+      if (rules === "additional pattern") paths.items.pattern = "^src/";
+      if (rules === "referenced array") {
+        schema.$id = "relative/coverage.json";
+        paths.$id = "deferred-paths.json";
+        schema.$defs = { ...schema.$defs, sharedPaths: paths };
+        schema.properties.deferred.items.properties.paths = {
+          $ref: "#/$defs/sharedPaths",
+        };
+        schema.properties.checkedPaths = {
+          anyOf: [{ $ref: "#/$defs/sharedPaths" }, { type: "null" }],
+        };
+        await save(path, {
+          ...coverage,
+          checkedPaths: ["src/other", "../outside"],
+        });
+      }
+      if (rules === "conditional") {
+        schema.if = {
+          properties: { deferred: { $ref: "#/properties/deferred" } },
+        };
+        schema.then = { required: ["reviewReceipt"] };
+      }
+      if (rules === "referenced predicate") {
+        deferred.properties.reviewReceipt = { type: "boolean" };
+        deferred.if = {
+          properties: {
+            paths: {
+              contains: {
+                $ref: "#/properties/deferred/items/properties/paths/items/oneOf/1",
+              },
+            },
+          },
+        };
+        deferred.then = { required: ["reviewReceipt"] };
+      }
+      await save(schemaPath, schema);
+      await expect(
+        runCustomValidation({ ...f, pluginRoot, run }),
+      ).rejects.toThrow(expectedError);
+      expect(run).not.toHaveBeenCalled();
+      if (rules === "referenced array" || rules === "referenced predicate") {
+        if (rules === "referenced array")
+          Object.assign(coverage, { checkedPaths: ["src/other"] });
+        else Object.assign(coverage.deferred[0]!, { reviewReceipt: true });
+        await save(path, coverage);
+        await runCustomValidation({ ...f, pluginRoot, run });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect((await json<CoverageDocument>(path)).deferred).toEqual(
+          coverage.deferred,
+        );
+      }
     },
   );
 
@@ -586,6 +843,7 @@ describe("custom validation", () => {
             ...args,
           ]);
         git("init", "-q");
+        git("config", "--local", "core.autocrlf", "false");
         git("add", ".");
         git("commit", "-qm", "base");
         await writeFile(
@@ -878,9 +1136,7 @@ describe("custom validation", () => {
           expect(await json(join(scanDir, resultName))).toMatchObject({
             status: "complete",
           });
-          expect(
-            await json<CoverageDocument>(join(scanDir, "coverage.json")),
-          ).toMatchObject({
+          expect(await readReviewState(scanDir)).toMatchObject({
             deferred: expect.arrayContaining([
               expect.objectContaining({ id: "unfinished-source" }),
             ]),
@@ -959,7 +1215,7 @@ describe("custom validation", () => {
           output_tokens: count === 0 ? 3 : 6,
         });
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
-          count === 0 ? "No findings" : "Fixture 0",
+          count === 0 || scenario === "dismissed" ? "No findings" : "Fixture 0",
         );
       } finally {
         await client.close();
@@ -986,7 +1242,7 @@ describe("custom validation", () => {
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
-    expect(standard).toContain("use it for the same early model checkpoint");
+    expect(standard).toContain("`complete: false` checkpoint");
     expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");

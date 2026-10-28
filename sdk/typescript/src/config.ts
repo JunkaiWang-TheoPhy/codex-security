@@ -299,48 +299,44 @@ export async function readCodexFileProfile(
       "sqlite_home",
       "log_dir",
     ]) {
-      const path = nativeProfile[key];
-      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-        nativeProfile[key] = resolve(profileHome, path);
-      }
+      resolveConfigPath(nativeProfile, key, profileHome);
     }
-    resolveAgentPaths(nativeProfile, profileHome);
-    resolveSkillPaths(nativeProfile, profileHome);
-    resolveOtelPaths(nativeProfile, profileHome);
+    resolveNestedConfigPaths(nativeProfile, profileHome);
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
   return nativeProfile;
 }
 
-/** @internal Preserve agent file origins when a native config changes directories. */
-export function resolveAgentPaths(config: JsonObject, directory: string): void {
-  const agents = config["agents"];
-  if (!isObject(agents)) return;
-  for (const agent of Object.values(agents)) {
-    if (!isObject(agent)) continue;
-    const path = agent["config_file"];
-    if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-      agent["config_file"] = resolve(directory, path);
-    }
+function resolveConfigPath(
+  config: JsonObject,
+  key: string,
+  directory: string,
+): void {
+  const path = config[key];
+  if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+    config[key] = resolve(directory, path);
   }
 }
 
-/** @internal Preserve skill file origins when a native config changes directories. */
-export function resolveSkillPaths(config: JsonObject, directory: string): void {
+/** @internal Keep agent, skill, and TLS file paths anchored to their config directory. */
+export function resolveNestedConfigPaths(
+  config: JsonObject,
+  directory: string,
+): void {
+  const agents = config["agents"];
+  if (isObject(agents)) {
+    for (const agent of Object.values(agents)) {
+      if (isObject(agent)) resolveConfigPath(agent, "config_file", directory);
+    }
+  }
   const skills = config["skills"];
   if (isObject(skills) && Array.isArray(skills["config"])) {
     for (const skill of skills["config"]) {
       if (!isObject(skill)) continue;
-      const path = skill["path"];
-      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-        skill["path"] = resolve(directory, path);
-      }
+      resolveConfigPath(skill, "path", directory);
     }
   }
-}
 
-/** @internal Preserve TLS file origins when a native config changes directories. */
-export function resolveOtelPaths(config: JsonObject, directory: string): void {
   const otel = config["otel"];
   if (!isObject(otel)) return;
   for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
@@ -354,10 +350,7 @@ export function resolveOtelPaths(config: JsonObject, directory: string): void {
         "client-certificate",
         "client-private-key",
       ]) {
-        const path = tls[field];
-        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-          tls[field] = resolve(directory, path);
-        }
+        resolveConfigPath(tls, field, directory);
       }
     }
   }

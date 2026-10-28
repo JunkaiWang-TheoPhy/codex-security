@@ -426,6 +426,11 @@ codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+`--path` selects files or directories. The scan summary and saved scan details
+show requested paths and exclusions. `coverage.deferred` records unfinished
+requested work separately from optional `coverage.openQuestions` follow-up.
+Human-readable output quotes ambiguous paths, while JSON retains their original strings.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
@@ -433,6 +438,11 @@ working copies. Their source inventories exclude `.git` and `.svn` metadata.
 changes. Both require Git. Deep scans support whole repositories and path scopes.
 Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
+
+Committed-diff scans require a clean, full checkout at the requested head
+revision, including when using `--validate`. A different checkout revision or
+local changes are rejected before scanning; check out the requested head and
+commit or stash local changes before retrying.
 
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
@@ -496,7 +506,7 @@ or JSONL output produce:
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
 If the scan target changed, the error explains that the results no longer
 represent the current checkout. Retained sealed results remain available under
-`data`, including their manifest, findings, coverage, scan directory, and report
+`data`, including their manifest, findings, review summary, scan directory, and report
 path. Unsealed or invalid artifacts are not included. This also applies to
 `scans rerun` and `scans resume`.
 For `scans rerun` and `scans resume`, `--filter-output` applies to retained `data`;
@@ -511,6 +521,38 @@ stderr-only failures, including when `--full-output` is selected.
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
+
+### Follow-up finding validation
+
+Scans already validate findings against local source. Add `--validate` to run
+the existing standalone validation workflow for each reported finding after
+the scan, using the same selected Cyber access program. Validation has read-only
+filesystem access with network and web search disabled. Each assessment uses a
+separate evidence directory; the combined report is saved as
+`<scan-dir>/validation.md`, or a uniquely suffixed report
+if that path already exists. Each completed assessment is saved immediately;
+failed or interrupted runs retain the partial report. JSON scan output includes
+the execution status, completed assessment count, and report path. Completion means the assessments finished,
+not that every finding was confirmed. A scan with no findings needs no second
+pass.
+
+With `--workflow-id`, retries reuse completed assessments for unchanged findings,
+source, validation settings, and saved evidence. Missing or changed evidence
+causes validation to run again, as do older assessments without recorded evidence
+fingerprints. By default, regeneration uses a new evidence directory. An explicit
+SDK validation `outputDir` reuses an assessment only when it points to the same
+evidence directory. A different destination starts a new assessment. The requested
+directory must be empty when regenerating; existing files are never overwritten.
+When `--knowledge-base` is supplied, the scan and all follow-up assessments use
+one captured copy of those documents. A workflow retry must use the same document
+contents. Use a new workflow ID if they changed or if the workflow was created
+before document snapshots were bound to follow-up validation.
+
+The report is supplemental: its assessments are not applied to the saved
+findings or the `--fail-on-severity` decision. Validation failures exit with
+`2` while retaining the completed scan. The additional model calls are not
+cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
+configured scan cost limit), `--dry-run`, or `--mock`.
 
 ### Understand scan scope and follow-up work
 
@@ -843,14 +885,14 @@ To select a Codex file profile, put its settings in
 npx @openai/codex-security scan . --codex 'profile="review"'
 ```
 
-SDK callers can set `codexOverrides: { profile: "review" }`, and project config
-files can set `codex.profile: review`. The file uses top-level Codex TOML keys.
-Its settings override scanner defaults; explicit scan settings override the
-file. Relative `model_instructions_file` paths in that file resolve from its
-directory. Saved scan launches retain the file-profile name to reload its
-settings. The scan runs from an isolated Codex home, so include any custom provider
-definition in the profile file. An absent profile file contributes no settings.
-Inline `profiles` tables remain supported for existing scanner configurations.
+In the SDK, set `codexOverrides: { profile: "review" }`. In a project config,
+set `codex.profile: review`. The profile file uses top-level Codex TOML keys.
+Its settings override scanner defaults. Explicit scan settings take precedence.
+Relative file paths, including `model_instructions_file`, resolve from the
+profile directory. Saved launches retain the profile name and reload its settings.
+Include custom provider definitions in the file so the scan
+can use them from its isolated Codex home. An absent file contributes no
+settings. Existing inline `profiles` tables still work.
 
 Choose plugins with `--plugin-path`; native plugin and marketplace overrides are
 rejected. New and resumed Deep Scans require the current plugin's direct engine,
@@ -915,26 +957,27 @@ For filesystem and approval behavior, see the
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                                                                               |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                        |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                    |
-| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
-| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
-| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
-| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
-| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
-| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
-| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                            |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
-| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                |
-| `CI`                                                                        | Disable interactive update notices.                                                                                  |
-| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                   |
+| Variable                                                                    | Effect                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                                 |
+| `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS`                                    | Set to `1` to enable vendor finding imports, imported-findings readback, and GitHub advisory acquisition; disabled otherwise. |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                             |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                                     |
+| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                                       |
+| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                                        |
+| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                                    |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                              |
+| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                                     |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                              |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                                      |
+| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`.          |
+| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                                     |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                                        |
+| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                                    |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                           |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                         |
+| `CI`                                                                        | Disable interactive update notices.                                                                                           |
+| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                            |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -998,6 +1041,14 @@ any `cost` estimate. `byRole` separates parent tokens from combined worker token
 work could not be measured, including in-flight turns or missing earlier attempts.
 The parent can continue after report completion, so final CLI tokens can exceed
 the saved measurement window.
+
+During a scan, progress shows when Codex reported the displayed token and cost
+totals, in UTC. If the report has no timestamp, progress says so.
+In-flight requests may add tokens and cost after that time. When Codex supplies
+account allowance, progress shows the percentage used in each reported window
+and the time of that reading. On a short terminal, resize the window or press
+`d` to scroll through the full readings in Details. With ChatGPT authentication,
+progress also says when Codex has yet to report allowance.
 
 `usage.accountRateLimits` saves the latest observed account-wide readings with
 their own timestamps, window durations, and reset times. These are historical
@@ -1235,6 +1286,26 @@ Supply the validation prompt again when rerunning.
 
 ## Import vendor findings locally
 
+Use the [scanner file import schema and capability guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md) to compare provider identities, mapped evidence and destination behavior before selecting a report.
+
+External finding imports are disabled by default. Opt in for the current shell:
+
+```bash
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+```
+
+In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
+Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
+and `import github-advisories` are absent from command help and schemas and cannot
+run. The SDK's external publication, local import/readback, and advisory
+acquisition APIs require the same flag in their effective environment. An explicit
+`dependencies.environment` is used instead of the process environment. Pure
+normalizers and file readers remain available as library utilities.
+
+This flag does not affect `publish scan`, `publish check`, `scan import`, or the
+existing `import github` alert collector. Disabling it retains previously imported
+records; enable it again to read them with `findings imported`.
+
 Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
 reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
 inputs only for providers and report profiles that support them. A JSON API
@@ -1252,6 +1323,7 @@ repository path instead of a Cloud repository ID or URL. Supported inputs includ
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
+[OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
 and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
 
 ```bash
@@ -1284,8 +1356,18 @@ Repeated imports update the same record by repository, provider, source key, and
 source finding ID. The result reports created, updated, and unchanged counts.
 Keep the source key stable across exports. Records omitted from a later selection
 remain stored; omission does not resolve or delete a finding. Excluded records
-are reported, and an import with exclusions exits with status 1. The same
-supported vendor formats and evidence requirements apply locally and in Cloud.
+are reported, and an import with exclusions exits with status 1. Both destinations
+read the same vendor formats; Cloud's field, size and nesting limits do not apply
+to local file imports.
+
+For OpenGrep, use `--provider opengrep` and supply `--source-repository-url`.
+The reader supports native JSON and gzip for both destinations. It uses the
+existing `semgrep` source-provider contract while retaining `OpenGrep` as the
+scanner origin; keep a stable OpenGrep-specific source key. Review report
+diagnostics as well as findings: import completion does not establish scan
+coverage. The [OpenGrep guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md)
+covers evidence identity, empty reports, and assessing an imported finding with
+the existing SDK validator.
 
 `scan import --json` and `scan import --csv` remain separate commands for importing
 Codex Security's findings schema as a saved scan; they do not accept vendor
@@ -2334,6 +2416,9 @@ installation fails. The installer respects `core.hooksPath`.
 
 ## Import GitHub findings locally or to Cloud
 
+Local and Cloud ingestion require the [external-import opt-in](#import-vendor-findings-locally).
+The existing alert collector remains available without it.
+
 Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
@@ -2424,6 +2509,8 @@ its preview, and call `import()`. `prepareLocalExternalImport()` accepts the sav
 import file directly. Read records with `listLocalExternalFindings({ repository })`.
 
 ### Import GHSA advisories separately
+
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` before using this command or its SDK API.
 
 **Importing a GHSA advisory does not establish an installed dependency or
 applicability to the destination repository.** Repository advisories are
@@ -2761,6 +2848,11 @@ for `patch`. Omit it or use `--verification-mode standard` for the default check
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
+Authentication and execution failures print diagnostics on stderr and return
+`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message` with `--json`
+or `--format jsonl`. With JSON/JSONL `--full-output`, failures use an `ok: false`
+error envelope. Other formats retain stderr-only failures. Interruptions retain
+exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 

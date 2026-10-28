@@ -135,21 +135,24 @@ def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
-    finding["summary"] = "The `route/set` RPC forwards `routeName` to `RouteTable::set_route()`."
+    finding["summary"] = (
+        "The `environment/add` RPC forwards `environmentId` to "
+        "`EnvironmentManager::upsert_environment()`."
+    )
     finding["codeEvidence"] = [
         {
             "id": "runtime-upsert",
             "label": "Runtime upsert omits the reserved-ID check",
-            "path": "src/routes/table.rs",
-            "startLine": 25,
-            "endLine": 29,
+            "path": "codex-rs/exec-server/src/environment.rs",
+            "startLine": 253,
+            "endLine": 281,
             "language": "rust",
-            "code": "self.routes.insert(route_name, destination);",
-            "explanation": "The runtime path inserts `owner` without reusing the startup check.",
+            "code": "self.environments.write().insert(environment_id, environment);",
+            "explanation": "The runtime path inserts `local` without reusing the startup check.",
         }
     ]
     finding["rootCause"] = {
-        "summary": "`owner` is reserved, but `set_route()` accepts it.",
+        "summary": "`local` is reserved, but `upsert_environment()` accepts it.",
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["validation"] = {
@@ -157,19 +160,19 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["attackPath"] = {
-        "dataflow": {"summary": "`route/set` -> shared route map"},
+        "dataflow": {"summary": "`environment/add` -> shared environment map"},
         "evidenceRefs": ["runtime-upsert"],
     }
 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
-    assert "The `route/set` RPC forwards `routeName`" in markdown
+    assert "The `environment/add` RPC forwards `environmentId`" in markdown
     assert "#### Root Cause" in markdown
     assert "**Runtime upsert omits the reserved-ID check**" in markdown
-    assert "`src/routes/table.rs:25-29`" in markdown
+    assert "`codex-rs/exec-server/src/environment.rs:253-281`" in markdown
     assert "```rust" in markdown
-    assert "self.routes.insert(route_name, destination);" in markdown
-    assert "The runtime path inserts `owner` without reusing the startup check." in markdown
+    assert "self.environments.write().insert(environment_id, environment);" in markdown
+    assert "The runtime path inserts `local` without reusing the startup check." in markdown
 
 
 @pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
@@ -800,6 +803,90 @@ def test_projection_escapes_raw_html_in_markdown() -> None:
     assert r'\<img src="x" onerror="alert(1)"\>' in markdown_text
 
 
+def test_projection_keeps_html_entities_literal_in_markdown() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = "Sanitizer decodes &#x3C;script&#x3E; and &amp;lt;"
+    coverage["includePaths"] = ["docs/&lt;b&gt;.md"]
+
+    markdown_text = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert r"Sanitizer decodes \&#x3C;script\&#x3E; and \&amp;lt;" in markdown_text
+    assert "- Included paths: `docs/&lt;b&gt;.md`" in markdown_text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/?first=1&second=2",
+        "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
+        "www.example.com/?payload=&lt;tag&gt;&mode=1",
+        "WWW.example.com/?first=1&second=2",
+        "WwW.example.com/?first=1&second=2",
+        "ftp://example.com/?first=1&second=2",
+        "https://example.com/`a`?first=1&second=2",
+        "www.example.com/`a`?first=1&second=2",
+        "example.com/?first=1&second=2",
+        "//example.com/?first=1&second=2",
+        '"example.com/?first=1&second=2"',
+        "éxample.com/?first=1&second=2",
+        "例子.com/?first=1&second=2",
+        "example.com/?payload=&lt;tag&gt;&mode=1",
+        "example.com/?first=1&word;=2",
+        "//example.com/?first=1&word;=2",
+        "user&tag@example.com",
+        "mailto:user&tag@example.com",
+        "//localhost:8080/?first=1&word;=2",
+        "{//example.com/?first=1&word;=2}",
+        "?example.com/?first=1&word;=2",
+        "mailto:user&tag@localhost",
+    ],
+)
+def test_projection_preserves_bare_url_ampersands_in_prose_and_tables(url: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = f"R&D decoded &#60;tag&#62;. Reproduce with {url} then compare &amp;."
+    finding["confidence"]["rationale"] = f"Request: {url}"
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Reproduce with {url} then compare \\&amp;." in markdown
+    assert f"| Confidence rationale | Request: {url} |" in markdown
+    assert r"R&D decoded \&#60;tag\&#62;." in markdown
+
+
+def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = (
+        "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;` with "
+        "https://example.com/a_b?first=1&second=2 and &amp;. "
+        "Keep https://example.com/`a _b_` as written."
+    )
+    coverage["includePaths"] = [
+        "docs/www.example.com/&lt;tag&gt;.md",
+        "docs/`&lt;tag&gt;`.md",
+        "dir&lt;tag&gt;.example/file.md",
+        "dir.example/file&lt;tag&gt;.md",
+        "www.example.com/file&amp;.md",
+        "`&amp;`",
+        "`&amp;.md",
+        "file&amp;`",
+    ]
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
+    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert "Keep https://example.com/`a _b_` as written." in markdown
+    assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
+    assert "``docs/`&lt;tag&gt;`.md``" in markdown
+    assert "`dir&lt;tag&gt;.example/file.md`" in markdown
+    assert "`dir.example/file&lt;tag&gt;.md`" in markdown
+    assert "`www.example.com/file&amp;.md`" in markdown
+    assert "`` `&amp;` ``" in markdown
+    assert "`` `&amp;.md ``" in markdown
+    assert "`` file&amp;` ``" in markdown
+
+
 def test_projection_omits_informational_findings() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["severity"]["level"] = "informational"
@@ -848,7 +935,8 @@ def test_projection_preserves_follow_up_without_classifying_its_reason(reason: s
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "No findings were reported." in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Deferred Requested Work" in markdown
+    assert "## Open Questions And Follow Up" not in markdown
     assert reason in markdown
     assert "Review deferred unit candidate-parser" in markdown
     assert "Paths: src/parser.py." in markdown
@@ -863,7 +951,7 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
     assert '<a id="finding-1"></a>' in markdown
 
 
-def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
+def test_projection_separates_deferred_work_from_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
 
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
@@ -883,6 +971,12 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Review deferred unit parser-review" in markdown
     assert "Paths: src/parser.py." in markdown
     assert "Surfaces: parser-surface." in markdown
+    deferred_section, optional_section = markdown.split("## Open Questions And Follow Up")
+    assert "## Deferred Requested Work" in deferred_section
+    assert "Parser review incomplete." in deferred_section
+    assert "Is production authentication enabled?" not in deferred_section
+    assert "Is production authentication enabled?" in optional_section
+    assert "Parser review incomplete." not in optional_section
 
 
 def test_projection_includes_surface_evidence_receipts() -> None:
