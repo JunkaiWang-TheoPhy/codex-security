@@ -83,6 +83,7 @@ import {
   mergedCodexConfig,
   resolveCodexProfile,
   resolveCommandAuthConfig,
+  MODEL_FILE_SETTINGS,
   resolveNestedConfigPaths,
   scanApprovalPolicy,
   scanCyberAccessConfig,
@@ -2497,17 +2498,18 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
       const overrides = this.config.codexOverrides ?? {};
       const recipeConfig: JsonObject = {
-        ...(fileProfile ? scanPreflightCodexConfig(overrides) : preflightConfig),
+        ...(fileProfile
+          ? scanPreflightCodexConfig(overrides)
+          : preflightConfig),
         approval_policy: approvalPolicy,
       };
       // Reruns allocate a new output directory; retain the original file origins.
-      for (const key of [
-        "model_instructions_file",
-        "model_catalog_json",
-        "experimental_compact_prompt_file",
-      ]) {
+      for (const key of MODEL_FILE_SETTINGS) {
         const value = workerRuntimeConfig[key];
-        if (typeof value !== "string" || (fileProfile && !(key in recipeConfig)))
+        if (
+          typeof value !== "string" ||
+          (fileProfile && !(key in recipeConfig))
+        )
           continue;
         recipeConfig[key] = value;
         const profiles = recipeConfig["profiles"];
@@ -6213,9 +6215,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const copyWorkerSettings = (result: JsonObject, source: JsonObject): void => {
     for (const key of [
-      "model_instructions_file",
-      "model_catalog_json",
-      "experimental_compact_prompt_file",
+      ...MODEL_FILE_SETTINGS,
       "model_verbosity",
       "web_search",
     ]) {
@@ -6425,12 +6425,7 @@ function selectedWorkerRuntimeConfig(
     }),
   );
   // Workers use separate directories; preserve the parent scan's native paths.
-  for (const key of [
-    "model_instructions_file",
-    "experimental_compact_prompt_file",
-    "model_catalog_json",
-    "sqlite_home",
-  ]) {
+  for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
     if (typeof file === "string") {
       resolved[key] = resolve(workingDirectory, expandHome(file, environment));

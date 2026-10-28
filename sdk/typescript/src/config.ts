@@ -60,6 +60,12 @@ export function isExternalModelProvider(
   );
 }
 
+export const MODEL_FILE_SETTINGS = [
+  "model_instructions_file",
+  "model_catalog_json",
+  "experimental_compact_prompt_file",
+] as const;
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   approval_policy: "on-request",
   approvals_reviewer: "auto_review",
@@ -292,13 +298,7 @@ export async function readCodexFileProfile(
     validateOverrideKeys(nativeProfile);
     validateOverrides(nativeProfile);
     // CLI overrides otherwise resolve this file against the scan directory.
-    for (const key of [
-      "model_instructions_file",
-      "experimental_compact_prompt_file",
-      "model_catalog_json",
-      "sqlite_home",
-      "log_dir",
-    ]) {
+    for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home", "log_dir"]) {
       resolveConfigPath(nativeProfile, key, profileHome);
     }
     resolveNestedConfigPaths(nativeProfile, profileHome);
