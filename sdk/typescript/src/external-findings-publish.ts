@@ -755,7 +755,8 @@ async function preparePublicationInput(
         );
     }
     if (binding) requireDestination(binding.findingId, binding.url);
-    for (const { source_finding_id: id, evidence } of findings) {
+    for (const finding of findings) {
+      const { source_finding_id: id, evidence } = finding;
       const urls = [
         evidence.details?.repository?.url,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
