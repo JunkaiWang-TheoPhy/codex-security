@@ -875,9 +875,6 @@ async function preparePublicationInput(
   };
   const preview: ExternalPublicationPreview = {
     ...parsed,
-    ...(parsed.report === undefined
-      ? {}
-      : { report: structuredClone(parsed.report) }),
     findings: submissionFindings(requests),
     cloudApiUrl,
     cloudUrl: cloudFindingsUrl(environment, destination.id),
@@ -888,10 +885,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    // Inspector requests must keep the ARN and host binding validated above,
-    // including when an SDK caller edits the preview before publishing.
-    preview:
-      options.provider === "inspector" ? structuredClone(preview) : preview,
+    preview: structuredClone(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (

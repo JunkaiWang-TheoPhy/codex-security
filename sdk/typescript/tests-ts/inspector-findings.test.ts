@@ -6,7 +6,6 @@ import { gzipSync } from "node:zlib";
 import type { ExternalImportTarget } from "../src/external-import-contract.js";
 import {
   inspectorReportRepositories,
-  inspectorEvidenceRepositoryUrls,
   normalizeInspectorFindings,
   readInspectorFindings,
 } from "../src/inspector-findings.js";
@@ -25,6 +24,26 @@ function normalize(
   projectMap?: ReadonlyMap<string, string>,
 ) {
   return normalizeInspectorFindings({ findings }, source, target, projectMap);
+}
+
+function replayRepository(
+  source_data: Record<string, unknown> | undefined,
+  id = source_data?.["format"] === "aws-inspector2-list-findings/v1"
+    ? inspectorPackageFinding().findingArn
+    : "opaque",
+  target: ExternalImportTarget = "local",
+  projectMap?: ReadonlyMap<string, string>,
+) {
+  return inspectorReportRepositories(
+    [
+      {
+        source_finding_id: id,
+        evidence: { title: "test", severity: "unknown", source_data },
+      },
+    ],
+    target,
+    projectMap,
+  ).get(id);
 }
 
 function codeFinding(
@@ -115,9 +134,9 @@ test("projects the vulnerable package and advisory IDs without attributing the a
   expect(row.evidence.code_revision ?? null).toBeNull();
   expect(row.evidence.source_scan_id ?? null).toBeNull();
   expect(row).not.toHaveProperty("assessment");
-  expect(inspectorEvidenceRepositoryUrls(row.evidence.source_data)).toEqual([
-    inspectorRepositoryUrl,
-  ]);
+  expect(replayRepository(row.evidence.source_data)).toMatchObject({
+    url: inspectorRepositoryUrl,
+  });
   expect(native).toEqual(original);
   native.status = "CLOSED";
   native.packageVulnerabilityDetails.vulnerablePackages[0]!.version = "^2.0";
@@ -567,16 +586,11 @@ test.each(["local", "cloud"] as const)(
       sourceRepositoryUrl: urls[1],
       projectMap: { [arn]: urls[1] },
     };
+    expect(() => replayRepository(tampered, slug.findingArn, target)).toThrow(
+      "native repository URL",
+    );
     expect(() =>
-      inspectorEvidenceRepositoryUrls(tampered, slug.findingArn, target),
-    ).toThrow("native repository URL");
-    expect(() =>
-      inspectorEvidenceRepositoryUrls(
-        tampered,
-        slug.findingArn,
-        target,
-        projectMap,
-      ),
+      replayRepository(tampered, slug.findingArn, target, projectMap),
     ).toThrow("mapping does not match");
     expect(() =>
       inspectorReportRepositories(
@@ -646,17 +660,17 @@ test("GitHub project slugs cannot identify a host; without a map, each destinati
     };
     const tenantRow = normalize([tenantFinding], tenantA, target).findings[0]!;
     expect(
-      inspectorEvidenceRepositoryUrls(
+      replayRepository(
         tenantRow.evidence.source_data,
         tenantFinding.findingArn,
         target,
       ),
-    ).toEqual([tenantA]);
+    ).toMatchObject({ url: tenantA });
     expect(() => normalize([tenantFinding], tenantB, target)).toThrow(
       "does not match",
     );
     expect(() =>
-      inspectorEvidenceRepositoryUrls(
+      replayRepository(
         { ...tenantRow.evidence.source_data, sourceRepositoryUrl: tenantB },
         tenantFinding.findingArn,
         target,
@@ -674,7 +688,7 @@ test("GitHub project slugs cannot identify a host; without a map, each destinati
         "native repository URL",
       );
       expect(() =>
-        inspectorEvidenceRepositoryUrls(
+        replayRepository(
           { ...slugData, sourceRepositoryUrl: source },
           slug.findingArn,
           target,
@@ -739,20 +753,12 @@ test("self-managed GitLab mappings require native host evidence and are local on
   });
   const row = normalize([native], host, "local").findings[0]!;
   expect(
-    inspectorEvidenceRepositoryUrls(
-      row.evidence.source_data,
-      native.findingArn,
-      "local",
-    ),
-  ).toEqual([host]);
+    replayRepository(row.evidence.source_data, native.findingArn, "local"),
+  ).toMatchObject({ url: host });
   expect(() => normalize([native], alias, "local")).toThrow("does not match");
   expect(() => normalize([native], host, "cloud")).toThrow("local only");
   expect(() =>
-    inspectorEvidenceRepositoryUrls(
-      row.evidence.source_data,
-      native.findingArn,
-      "cloud",
-    ),
+    replayRepository(row.evidence.source_data, native.findingArn, "cloud"),
   ).toThrow("local only");
 
   const slug = projectFinding({
@@ -764,7 +770,7 @@ test("self-managed GitLab mappings require native host evidence and are local on
       "native repository URL",
     );
     expect(() =>
-      inspectorEvidenceRepositoryUrls(
+      replayRepository(
         {
           ...row.evidence.source_data,
           sourceRepositoryUrl: source,
@@ -865,22 +871,8 @@ test("compares exact native resource IDs and never treats opaque slash strings a
 
 test("exposes GitHub remote semantics only from the validated native repository provider", () => {
   const inspectorEvidencePlatform = (
-    source_data: Record<string, unknown> | undefined,
-  ) =>
-    inspectorReportRepositories(
-      [
-        {
-          source_finding_id:
-            source_data?.["format"] === "aws-inspector2-list-findings/v1"
-              ? inspectorPackageFinding().findingArn
-              : "test",
-          evidence: { title: "test", severity: "unknown", source_data },
-        },
-      ],
-      "local",
-    )
-      .values()
-      .next().value?.platform;
+    source: Record<string, unknown> | undefined,
+  ) => replayRepository(source)?.platform;
   const host = "https://git.example.test/example/project";
   const known = projectFinding({ projectName: host });
   const raw = normalize([known], host, "local").findings[0]!.evidence
@@ -983,21 +975,21 @@ test("retained Inspector evidence rechecks its own binding instead of trusting t
   const native = inspectorPackageFinding();
   const raw = normalize([native]).findings[0]!.evidence.source_data!;
   for (const target of ["cloud", "local"] as const) {
-    expect(
-      inspectorEvidenceRepositoryUrls(raw, native.findingArn, target),
-    ).toEqual([inspectorRepositoryUrl]);
+    expect(replayRepository(raw, native.findingArn, target)).toMatchObject({
+      url: inspectorRepositoryUrl,
+    });
     expect(() =>
-      inspectorEvidenceRepositoryUrls(raw, codeFinding().findingArn, target),
+      replayRepository(raw, codeFinding().findingArn, target),
     ).toThrow("finding ARN");
     expect(() =>
-      inspectorEvidenceRepositoryUrls(
+      replayRepository(
         { ...raw, finding: codeFinding() },
         native.findingArn,
         target,
       ),
     ).toThrow("finding ARN");
     expect(() =>
-      inspectorEvidenceRepositoryUrls(
+      replayRepository(
         {
           ...raw,
           sourceRepositoryUrl: "https://git.example.test/example/project",
@@ -1007,25 +999,25 @@ test("retained Inspector evidence rechecks its own binding instead of trusting t
       ),
     ).toThrow("does not match");
   }
-  expect(inspectorEvidenceRepositoryUrls(undefined)).toEqual([]);
-  expect(inspectorEvidenceRepositoryUrls({ finding: "opaque" })).toEqual([]);
+  expect(replayRepository(undefined)).toBeUndefined();
+  expect(replayRepository({ finding: "opaque" })).toBeUndefined();
   expect(() =>
-    inspectorEvidenceRepositoryUrls({ ...raw, sourceRepositoryUrl: undefined }),
+    replayRepository({ ...raw, sourceRepositoryUrl: undefined }),
   ).toThrow();
   expect(() =>
-    inspectorEvidenceRepositoryUrls({
+    replayRepository({
       ...raw,
       sourceRepositoryUrl: "https://github.com/other/project",
     }),
   ).toThrow("does not match");
   expect(() =>
-    inspectorEvidenceRepositoryUrls({
+    replayRepository({
       ...raw,
       finding: projectFinding({ projectName: "other/project" }),
     }),
   ).toThrow("does not match");
   expect(() =>
-    inspectorEvidenceRepositoryUrls({
+    replayRepository({
       ...raw,
       finding: { ...codeFinding(), resources: [] },
     }),
