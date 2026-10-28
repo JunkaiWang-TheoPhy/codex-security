@@ -20,6 +20,7 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
+import { hasBlackDuckEvidence } from "./blackduck-findings.js";
 import { parseGitRemote } from "./git-remote.js";
 import {
   boundScannerRepositories,
@@ -401,6 +402,7 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  nativeSources: ReadonlySet<string>,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -454,27 +456,35 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const identity = (value: string, platform: Provider) =>
-    remoteRepository(value, platform, provider === "inspector");
+  const identity = (
+    source: ExternalSourceRepository,
+    platform: Provider,
+    url = source.url,
+  ) =>
+    remoteRepository(
+      url,
+      platform,
+      provider === "inspector" || nativeSources.has(source.url),
+    );
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
-      const key = identity(source.url, "github")?.key;
+      const key = identity(source, "github")?.key;
       return key === undefined ? [] : [key];
     }),
   );
   for (const source of sources) {
-    const githubKey = identity(source.url, "github")?.key;
+    const githubKey = identity(source, "github")?.key;
     const sourceProvider =
       source.platform === "github" ||
       (githubKey !== undefined && githubRepositories.has(githubKey))
         ? "github"
         : provider;
     const targets = remotes.flatMap(
-      (remote) => identity(remote, sourceProvider) ?? [],
+      (remote) => identity(source, sourceProvider, remote) ?? [],
     );
     if (!targets.length) continue;
-    const target = identity(source.url, sourceProvider);
+    const target = identity(source, sourceProvider);
     if (
       !target ||
       !targets.some(
@@ -587,17 +597,22 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  for (const finding of current.findings) {
-    const url = finding.evidence.details?.repository?.url;
+  const bound = boundScannerRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    options.inspectorProjectMap,
+  );
+  const nativeSources = new Set<string>();
+  for (const { source_finding_id: id, evidence } of current.findings) {
+    const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    const source = bound.get(id);
+    if (source && hasBlackDuckEvidence(evidence.source_data))
+      nativeSources.add(source.url);
   }
   for (const source of [
-    ...boundScannerRepositories(
-      options.provider,
-      current.findings,
-      "local",
-      options.inspectorProjectMap,
-    ).values(),
+    ...bound.values(),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
     // A reader's platform must not loosen an operator-supplied Inspector map.
@@ -611,6 +626,7 @@ export async function prepareLocalImport(
     repository,
     options.provider,
     [...sources.values()],
+    nativeSources,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

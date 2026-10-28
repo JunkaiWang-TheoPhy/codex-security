@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -75,13 +76,6 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
       },
       assessment: { state: "not_assessed" },
     });
-    await expect(
-      prepareLocalExternalImport(
-        path,
-        { ...options, sourceRepositoryUrl: "https://github.com/example/other" },
-        dependencies,
-      ),
-    ).rejects.toThrow(/remote|repository/i);
     const mixed = structuredClone(first.preview);
     mixed.findings.push(
       ...normalizeBlackDuckFindings(
@@ -101,6 +95,13 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
     await expect(
       prepareNormalizedLocalImport(altered, options, dependencies),
     ).rejects.toThrow(/retained scanner repository/i);
+    const remote = sourceRepositoryUrl + "?repo=other";
+    execFileSync("git", ["remote", "set-url", "origin", remote], {
+      cwd: fixture.repository,
+    });
+    await expect(
+      prepareNormalizedLocalImport(first.preview, options, dependencies),
+    ).rejects.toThrow(/does not match a configured remote/);
   } finally {
     await fixture.dispose();
   }

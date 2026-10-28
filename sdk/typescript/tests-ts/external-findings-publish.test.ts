@@ -1197,6 +1197,28 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     selected,
     correct.deps,
   );
+
+  const summary = normalized.findings[0]!;
+  delete summary.evidence.source_data;
+  summary.evidence.details = {
+    kind: "sast",
+    repository: { url: selected.sourceRepositoryUrl },
+  };
+  const prepareSummary = () =>
+    prepareNormalizedExternalPublication(normalized, selected, correct.deps);
+  const prepared = await prepareSummary();
+  const expected = JSON.stringify(prepared.preview.requests[0]);
+  correct.state.loseResponse = true;
+  await expect(prepared.publish()).rejects.toThrow("resume the saved request");
+  const posted = correct.posts.length;
+  correct.state.repositoryUrl = foreign.state.repositoryUrl;
+  await expect(prepareSummary()).rejects.toThrow(/does not match/);
+  expect(correct.posts).toHaveLength(posted);
+  correct.state.repositoryUrl = selected.sourceRepositoryUrl;
+  const resumed = await prepareSummary();
+  expect(resumed.preview.resumed).toBe(true);
+  await resumed.publish();
+  expect(correct.posts.slice(-2)).toEqual([expected, expected]);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

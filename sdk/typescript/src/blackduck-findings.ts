@@ -84,7 +84,12 @@ export function blackDuckReportRepositories(
   let repository: string | undefined;
   for (const { source_finding_id: id, evidence } of findings) {
     const retained = retainedRepository(evidence.source_data, id, target);
-    if (!retained) continue;
+    const declared = evidence.details?.repository?.url;
+    if (!retained) {
+      if (target === "cloud" && declared)
+        repositories.set(id, { url: declared });
+      continue;
+    }
     if (retained.projectVersion) {
       if (
         scope &&
@@ -96,7 +101,6 @@ export function blackDuckReportRepositories(
       scope = retained.projectVersion;
       repository = key(retained.url);
     }
-    const declared = evidence.details?.repository?.url;
     if (declared && key(declared) !== key(retained.url))
       throw new Error(
         "Retained scanner repository does not match the normalized evidence repository.",

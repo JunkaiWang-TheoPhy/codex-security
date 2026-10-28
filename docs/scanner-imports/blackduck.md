@@ -82,6 +82,8 @@ while True:
         seen.add(digest)
     items.extend(batch)
     if len(items) == total:
+        if any(link.get("rel") == "next" for link in page["_meta"].get("links", [])):
+            raise ValueError("Final page has a next link; retry the export")
         break
     if not batch or len(items) > total:
         raise ValueError("Incomplete or inconsistent Black Duck collection")
@@ -109,6 +111,19 @@ without `--dry-run`. Reuse the source key for later exports from this deployment
 project and version. For Cloud, select an authorized GitHub repository with
 `--to cloud` on a deployment that accepts `blackduck`. Reading a saved report
 requires no Black Duck login. Local imports also require no Cloud login.
+
+If an interrupted Cloud upload reports `result.savedSubmission`, retry with the
+same build and input. Repeat the CLI command with the original raw export, or
+pass the original normalized `ExternalFindings` input to
+`prepareNormalizedExternalPublication`. Leave the checkpoint in place for the SDK
+to find. When `preview.resumed` is false, review and approve the fresh preview.
+A different payload prepares a new upload.
+
+Cloud checks retained and declared source repository URLs against the selected
+repository. Local imports compare them when the checkout has a comparable Git
+remote. Select the `blackduck` provider for retained Black Duck BOM
+records. Caller-authored text and opaque IDs alone cannot establish repository
+ownership.
 
 Each occurrence is identified by its project version, component version, origin,
 advisory source and advisory name. Reimporting updates the occurrence when its
