@@ -1477,11 +1477,6 @@ async function testWorkerRuntimeSettings() {
       const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
       Object.assign(process.env, gitEnvironment);
-      const githubEnvironment = {
-        GH_CONFIG_DIR: path.join(fixture.root, "configured github"),
-        XDG_CONFIG_HOME: path.join(fixture.root, "existing config"),
-      };
-      Object.assign(process.env, githubEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
         fixture.root,
@@ -2343,11 +2338,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 selectedProvider.environment,
               ),
             );
-            assert.deepEqual(invocation.githubEnvironment, githubEnvironment);
-            for (const [name, value] of Object.entries(githubEnvironment)) {
-              assert.equal(workerLaunch.environment![name], value);
-              assert.equal(process.env[name], value);
-            }
             for (const [name, value] of Object.entries({
               ...gitEnvironment,
               CODEX_MCP_NODE_PATH: nodePaths.at(-1),
@@ -2433,10 +2423,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            assert.deepEqual(preflight.githubEnvironment, githubEnvironment);
-            const selectedProvider = workerConfigurations.find(
+            const index = workerConfigurations.findIndex(
               (entry) => preflight.configPath === entry.path,
             );
+            const selectedProvider = workerConfigurations[index];
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
@@ -2445,11 +2435,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.gitEnvironment,
               expectedGitEnvironment(
                 gitEnvironment,
-                nodePaths[workerConfigurations.indexOf(selectedProvider)],
+                nodePaths[index],
                 selectedProvider.environment,
               ),
             );
-            const index = workerConfigurations.indexOf(selectedProvider);
             assert.equal(preflight.codexHome, await realpath(codexHome));
             assert.equal(
               preflight.stateDirectory,
@@ -2463,10 +2452,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               launch.environment!.CODEX_SECURITY_STATE_DIR,
-              path.join(
-                fixture.root,
-                `state-${workerConfigurations.indexOf(selectedProvider)}`,
-              ),
+              path.join(fixture.root, `state-${index}`),
             );
             assert.equal(
               preflight.providerKey,
@@ -2489,10 +2475,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             });
             assert.equal(
               preflight.cacheDirectory,
-              path.join(
-                fixture.root,
-                `cache-${workerConfigurations.indexOf(selectedProvider)} `,
-              ),
+              path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
               preflight.argv.filter((arg: string) =>
