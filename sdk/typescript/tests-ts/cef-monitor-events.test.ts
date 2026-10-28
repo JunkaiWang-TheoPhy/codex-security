@@ -15,7 +15,7 @@ const records = readFileSync(
   "utf8",
 )
   .trimEnd()
-  .split("\n");
+  .split(/\r?\n/);
 
 function reviewer() {
   const evidence: SecurityEventBatch[] = [];
