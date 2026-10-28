@@ -68,6 +68,7 @@ def register_cli_scan(
     scan_dir: Path,
     *,
     scan_target: dict[str, Any] | None = None,
+    custom_validation: bool = False,
 ) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
@@ -84,6 +85,7 @@ def register_cli_scan(
                 "mode": "standard",
                 "repository": str(target),
                 "target": scan_target or {"kind": "repository", "paths": []},
+                **({"validationMode": "custom"} if custom_validation else {}),
             }
         ),
     )
@@ -1227,25 +1229,25 @@ def test_completion_requires_evidence_and_keeps_the_scan_repairable(
     assert result["scan"]["findingCount"] == 1
 
 
-@pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath"])
-@pytest.mark.parametrize("explicit_complete", [False, True])
-@pytest.mark.parametrize("custom_validation", [False, True])
-def test_discovery_handoff_requires_evidence_before_acceptance(
-    tmp_path: Path, field: str, explicit_complete: bool, custom_validation: bool
-) -> None:
-    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
-    documents = {
+def _discovery_draft(state_dir: Path, scan_dir: Path) -> dict[str, Any]:
+    return {
         "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
         "findings": json.loads((scan_dir / "findings.json").read_text()),
         "reviewState": read_review_state(state_dir, scan_dir),
     }
+
+
+@pytest.mark.parametrize("field", ["codeEvidence", "rootCause", "attackPath", "validation"])
+@pytest.mark.parametrize("explicit_complete", [False, True])
+def test_discovery_handoff_requires_evidence_before_acceptance(
+    tmp_path: Path, field: str, explicit_complete: bool
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    documents = _discovery_draft(state_dir, scan_dir)
     scan = documents["manifest"]["scan"]
-    if custom_validation:
-        scan["scope"]["validationMode"] = "custom_pending"
+    scan["scope"]["validationMode"] = "custom_pending"
     scan["complete"] = False
     finding = documents["findings"]["findings"][0]
-    if custom_validation:
-        finding.pop("validation")  # Independent validation has not happened yet.
     saved = finding.pop(field)
     drafts = scan_dir / "drafts"
     drafts.mkdir(exist_ok=True)
@@ -1270,10 +1272,50 @@ def test_discovery_handoff_requires_evidence_before_acceptance(
     finding[field] = saved
     staged.write_text(json.dumps(documents))
     assert run_workbench(state_dir, *args)["status"] == "draft_written"
-    assert (
-        "validation" not in json.loads((scan_dir / "findings.json").read_text())["findings"][0]
-    ) is custom_validation
     assert "sealedAt" not in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "custom_pending", "accepted"),
+    [
+        ("standard", True, False),
+        ("diff", True, False),
+        ("custom", False, False),
+        ("custom", True, True),
+    ],
+)
+def test_sdk_discovery_handoff_uses_registered_validation_mode(
+    tmp_path: Path, recipe: str, custom_pending: bool, accepted: bool
+) -> None:
+    if recipe == "diff":
+        state_dir, _, scan = _start_diff_scan_with_draft(tmp_path, "range")
+        scan_dir = Path(scan["scanDir"])
+    else:
+        target = tmp_path / "target"
+        target.mkdir()
+        state_dir, scan_dir = tmp_path / "state", tmp_path / "scan"
+        scan = register_cli_scan(state_dir, target, scan_dir, custom_validation=recipe == "custom")
+        write_completed_contract(scan_dir, scan["scanId"], target)
+
+    draft = _discovery_draft(state_dir, scan_dir)
+    if custom_pending:
+        draft["manifest"]["scan"]["scope"]["validationMode"] = "custom_pending"
+    del draft["findings"]["findings"][0]["validation"]
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(draft))
+    result = run_workbench(
+        state_dir,
+        "write-scan-draft",
+        "--scan-id",
+        scan["scanId"],
+        "--draft-path",
+        str(staged),
+        check=False,
+    )
+    assert (result["returncode"] == 0) is accepted, result["stderr"]
+    if not accepted:
+        assert "validation" in result["stderr"]
 
 
 def test_stopped_scan_preserves_findings_with_incomplete_evidence(tmp_path: Path) -> None:

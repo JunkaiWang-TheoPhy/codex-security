@@ -1404,7 +1404,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         admitted_input = None
         checkpoint = manifest["scan"]
         if checkpoint.get("complete") is not False and not binding.get("imported"):
-            source_only = checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
+            source_only = (
+                binding.get("customValidation", False)
+                and checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
+            )
             for index, finding in enumerate(findings["findings"]):
                 _validate_finding_evidence(finding, index, source_only=source_only)
         checkpoint_contents = None

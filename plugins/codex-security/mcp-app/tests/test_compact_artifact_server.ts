@@ -91,8 +91,8 @@ try {
       await testReducerWorkerToolList(bundle);
     });
   }
-  await test("shipped: custom discovery evidence handoff", () =>
-    testCustomDiscoveryHandoff(shipped, "shipped"));
+  await test("shipped: plugin-owned drafts require validation evidence", () =>
+    testPluginDraftEvidence(shipped));
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
   await test("shipped: semantic scan draft completion", () =>
@@ -216,6 +216,21 @@ async function testLargeScanDraftCheckpoints(
   }
 }
 
+function commitFixture(repoRoot: string, message: string) {
+  const git = (...args: string[]) => gitText(args, { cwd: repoRoot }).trim();
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.com",
+    "commit",
+    "-qm",
+    message,
+  );
+  return git("rev-parse", "HEAD");
+}
+
 async function testCompactDiffScanCompletion(
   bundle: string,
   runtimeLabel: string,
@@ -223,28 +238,13 @@ async function testCompactDiffScanCompletion(
   const { repoRoot, environment } = await createScanFixture(
     `compact-diff-${runtimeLabel}`,
   );
-  const git = (...arguments_: string[]) =>
-    gitText(
-      [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.com",
-        ...arguments_,
-      ],
-      { cwd: repoRoot },
-    ).trim();
-  git("init", "-q");
+  gitText(["init", "-q"], { cwd: repoRoot });
   await writeFile(path.join(repoRoot, "src", "guard.py"), "allowed = True\n");
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 1\n");
-  git("add", ".");
-  git("commit", "-qm", "base");
-  const baseRevision = git("rev-parse", "HEAD");
+  const baseRevision = commitFixture(repoRoot, "base");
   await rm(path.join(repoRoot, "src", "guard.py"));
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 2\n");
-  git("add", ".");
-  git("commit", "-qm", "selected changes");
-  const headRevision = git("rev-parse", "HEAD");
+  const headRevision = commitFixture(repoRoot, "selected changes");
 
   const client = await startClient(bundle, environment);
   const ownerThread = `compact-diff-owner-${runtimeLabel}`;
@@ -460,12 +460,9 @@ async function testCompactDiffScanCompletion(
   }
 }
 
-async function testCustomDiscoveryHandoff(
-  bundle: string,
-  runtimeLabel: string,
-) {
+async function testPluginDraftEvidence(bundle: string) {
   for (const mode of ["standard", "diff"] as const) {
-    const label = `custom-discovery-${mode}-${runtimeLabel}`;
+    const label = `plugin-draft-evidence-${mode}`;
     const { repoRoot, environment } = await createScanFixture(label);
     const sourceLine = "return request.value";
     await writeFile(path.join(repoRoot, "src", "fixture.py"), sourceLine);
@@ -475,31 +472,16 @@ async function testCustomDiscoveryHandoff(
       mode,
     };
     if (mode === "diff") {
-      const git = (...args: string[]) =>
-        gitText(
-          [
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.com",
-            ...args,
-          ],
-          { cwd: repoRoot },
-        ).trim();
-      git("init", "-q");
-      git("add", ".");
-      git("commit", "-qm", "base");
-      const baseRevision = git("rev-parse", "HEAD");
+      gitText(["init", "-q"], { cwd: repoRoot });
+      const baseRevision = commitFixture(repoRoot, "base");
       await writeFile(
         path.join(repoRoot, "src", "fixture.py"),
         `${sourceLine}\n`,
       );
-      git("add", ".");
-      git("commit", "-qm", "selected changes");
       selection.diffTarget = {
         kind: "range",
         baseRevision,
-        headRevision: git("rev-parse", "HEAD"),
+        headRevision: commitFixture(repoRoot, "selected changes"),
       };
     }
     const client = await startClient(bundle, environment);
@@ -518,17 +500,11 @@ async function testCustomDiscoveryHandoff(
           owner: `${label}: attach owner`,
         },
       );
-      const progress = async () =>
-        requireSuccessfulTool<ScanResult>(
-          await call("get_codex_security_scan_context", {
-            scanId,
-            handoffClaimToken,
-          }),
-        ).scan.progress;
-      await progress();
+      const { validation, ...sourceEvidence } =
+        completedFindingEvidence("src/fixture.py");
       const provisional = {
         ...finding("custom-discovery", "src/fixture.py"),
-        extensions: { customValidationSurfaceIds: ["surface-custom"] },
+        ...sourceEvidence,
       };
       const draft = {
         scanId,
@@ -554,66 +530,37 @@ async function testCustomDiscoveryHandoff(
         }),
         `${label}: retain incomplete source discovery`,
       );
+      const before = await snapshotScanDraft(scanDir);
+      const checkpointPath = path.join(scanDir, "checkpoint-head.json");
+      const checkpoint = await readFile(checkpointPath, "utf8");
+      const directory = path.join(scanDir, "checkpoints");
+      const checkpoints = await readdir(directory);
       for (const completion of [{ complete: true }, {}]) {
-        const before = await snapshotScanDraft(scanDir);
-        const checkpoint = await readFile(
-          path.join(scanDir, "checkpoint-head.json"),
-          "utf8",
-        );
-        const checkpoints = await readdir(path.join(scanDir, "checkpoints"));
         requireToolError(
           await call("record_codex_security_scan_draft", {
             ...draft,
             ...completion,
           }),
-          /codeEvidence/,
-          `${label}: reject incomplete source proof before custom validation`,
+          /validation/,
+          `${label}: an authored marker cannot defer validation`,
         );
-        assert.deepEqual(await snapshotScanDraft(scanDir), before);
-        assert.equal(
-          await readFile(path.join(scanDir, "checkpoint-head.json"), "utf8"),
-          checkpoint,
-        );
-        assert.deepEqual(
-          await readdir(path.join(scanDir, "checkpoints")),
-          checkpoints,
-          `${label}: a rejected final draft must not publish a recovery checkpoint`,
-        );
-        requireSuccessfulTool(
-          await call("record_codex_security_scan_draft", {
-            ...draft,
-            complete: false,
-          }),
-          `${label}: continue incomplete discovery after a rejected final draft`,
-        );
-        assert.equal(
-          (await readJson(scanDir, "scan-manifest.json")).scan.complete,
-          false,
-        );
-        assert.equal((await progress()).status, "running");
       }
-      const { validation: _validation, ...sourceEvidence } =
-        completedFindingEvidence("src/fixture.py");
-      const repaired = { ...provisional, ...sourceEvidence };
-      for (const completion of [{ complete: true }, {}]) {
-        requireSuccessfulTool(
-          await call("record_codex_security_scan_draft", {
-            ...draft,
-            ...completion,
-            findings: [repaired],
-          }),
-          `${label}: accept repaired source proof without claiming validation`,
-        );
-        const manifest = await readJson(scanDir, "scan-manifest.json");
-        assert.equal(manifest.scan.complete, undefined);
-        assert.equal(manifest.scan.sealedAt, undefined);
-        assert.equal(manifest.scan.scope.validationMode, "custom_pending");
-        assert.equal(
-          (await readJson(scanDir, "findings.json")).findings[0].validation,
-          undefined,
-        );
-        assert.equal((await progress()).status, "running");
-      }
+      assert.deepEqual(await snapshotScanDraft(scanDir), before);
+      assert.equal(await readFile(checkpointPath, "utf8"), checkpoint);
+      assert.deepEqual(await readdir(directory), checkpoints);
+
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...draft,
+          scope: {},
+          findings: [{ ...provisional, validation }],
+        }),
+        `${label}: repair the rejected finding`,
+      );
+      assert.deepEqual(
+        (await readJson(scanDir, "findings.json")).findings[0].validation,
+        validation,
+      );
     } finally {
       await client.close();
     }
