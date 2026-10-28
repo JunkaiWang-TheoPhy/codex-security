@@ -30,6 +30,8 @@ import { escapeControls } from "./helpers/json.js";
 import {
   SealedContractError as ContractValidationError,
   SealedContractSchemaError as ContractSchemaError,
+  DEFERRED_PATH_LOCATION,
+  SEALED_DEFERRED_PATH_RULE,
   deriveFindingIdentity,
   hasRequiredFindingText,
   safeScopePath,
@@ -51,9 +53,10 @@ type ScanRoot = {
   profile: ContractProfile;
 };
 export interface LoadedSealedContract {
+  mode: NonNullable<ScanManifest["scan"]["mode"]>;
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review: NonNullable<ScanManifest["scan"]["review"]>;
 }
 
 export async function loadSealedContract(
@@ -87,19 +90,36 @@ export async function loadSealedContract(
   try {
     const documentDigests = new Map<string, string>();
     const payloads: Record<string, unknown> = {};
-    for (const filename of Object.keys(DOCUMENTS)) {
+    const manifestFile = "scan-manifest.json";
+    const rawManifest = await readScanJson(
+      scanRoot,
+      manifestFile,
+      documentDigests,
+      options.signal,
+    );
+    payloads[manifestFile] = rawManifest;
+    const hasCoverage =
+      isRecord(rawManifest["scan"]) &&
+      rawManifest["scan"]["coverageRef"] !== undefined;
+    for (const filename of ["findings.json", "coverage.json"] as const) {
+      if (filename === "coverage.json" && !hasCoverage) continue;
       payloads[filename] = await readScanJson(
         scanRoot,
-        filename as keyof typeof DOCUMENTS,
+        filename,
         documentDigests,
         options.signal,
-        profile,
       );
     }
     throwIfAborted(options.signal);
 
     for (const { filename, schemaName, validate } of validators) {
       let payload = payloads[filename];
+      if (filename === "coverage.json" && !hasCoverage) {
+        if (profile === "sdk") continue;
+        payload = trackingReviewState(
+          (payloads[manifestFile] as ScanManifest).scan,
+        );
+      }
       if (profile === "tracking" && filename === "findings.json") {
         // The tracking reader historically validates the normalized legacy view.
         // Seals continue to bind the original bytes read above.
@@ -135,7 +155,15 @@ export async function loadSealedContract(
     }
     const manifest = payloads["scan-manifest.json"] as ScanManifest;
     const findings = payloads["findings.json"] as FindingsDocument;
-    const coverage = payloads["coverage.json"] as CoverageDocument;
+    const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
+    const mode = coverage?.mode ?? manifest.scan.mode!;
+    const review = coverage
+      ? {
+          excludedPaths: (coverage.explicitExclusions ?? []).map(
+            (entry) => entry.pattern,
+          ),
+        }
+      : manifest.scan.review!;
     if (
       options.expectedScanId !== undefined &&
       manifest.scan.id !== options.expectedScanId
@@ -146,18 +174,24 @@ export async function loadSealedContract(
     }
     if (
       findings.scanId !== manifest.scan.id ||
-      coverage.scanId !== manifest.scan.id
+      (coverage !== undefined && coverage.scanId !== manifest.scan.id)
     ) {
       throw new ContractValidationError(
         "Canonical contract scan IDs do not match.",
       );
     }
-    if (!sameArray(coverage.includePaths, manifest.scan.scope.includePaths)) {
+    if (
+      coverage !== undefined &&
+      !sameArray(coverage.includePaths, manifest.scan.scope.includePaths)
+    ) {
       throw new ContractValidationError(
         "Coverage include paths do not match the manifest scope.",
       );
     }
-    if (!sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)) {
+    if (
+      coverage !== undefined &&
+      !sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)
+    ) {
       throw new ContractValidationError(
         "Coverage exclude paths do not match the manifest scope.",
       );
@@ -172,18 +206,43 @@ export async function loadSealedContract(
       coverage,
       documentDigests,
       options.signal,
-      profile === "sdk",
     );
     if (profile === "tracking")
       await checkScanFile(scanRoot, "report.md", "report.md", options.signal);
     await verifyScanRoot(scanRoot, options.signal);
     return {
-      contract: { manifest, findings, coverage },
+      contract: { mode, manifest, findings, review },
       scanDirectory: scanRoot.path,
     };
   } finally {
     scanRoot.reader.close();
   }
+}
+
+/** The Python tracking preflight validates this materialized coverage view for current manifests. */
+function trackingReviewState(scan: ScanManifest["scan"]) {
+  const mode = scan.mode ?? "repository";
+  return {
+    surfaces: [],
+    deferred: [],
+    explicitExclusions: (scan.review?.excludedPaths ?? []).map((pattern) => ({
+      pattern,
+      reason: "Excluded from review",
+    })),
+    ...scan.reviewState,
+    documentType: "codex-security.coverage",
+    schemaVersion: "1.0",
+    scanId: scan.id,
+    mode,
+    inventoryStrategy:
+      mode === "scoped_path"
+        ? mode
+        : ["diff", "commit", "branch_diff", "working_tree"].includes(mode)
+          ? "diff"
+          : "repository",
+    includePaths: scan.scope.includePaths,
+    excludePaths: scan.scope.excludePaths,
+  };
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
@@ -224,10 +283,11 @@ function normalizeTrackingCoverage(payload: unknown): unknown {
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
-  coverage: CoverageDocument,
+  coverage: CoverageDocument | undefined,
   profile: ContractProfile,
 ): void {
   const requireText = (value: string | undefined, context: string) => {
+    if (profile === "sdk" && value === undefined) return;
     if (!hasRequiredFindingText(value ?? "")) {
       throw new ContractValidationError(
         `${context}: expected a non-empty string.`,
@@ -235,19 +295,21 @@ function validateCanonicalContract(
     }
   };
   const scan = manifest.scan;
+  for (const [context, value] of [
+    ["manifest.scan.id", scan.id],
+    ["manifest.scan.producer.name", scan.producer.name],
+    ["manifest.scan.producer.version", scan.producer.version],
+    ["scan.target.targetId", scan.target.targetId],
+    ["scan.target.displayName", scan.target.displayName],
+  ] as const)
+    requireText(value, context);
+  if (scan.target.kind === "git_revision")
+    requireText(scan.target.revision, "scan.target.revision");
+  else if (scan.target.snapshotDigest !== undefined)
+    requireText(scan.target.snapshotDigest, "scan.target.snapshotDigest");
+  if (coverage?.inventoryStrategy !== undefined)
+    requireText(coverage.inventoryStrategy, "coverage.inventoryStrategy");
   if (profile === "tracking") {
-    for (const [context, value] of [
-      ["manifest.scan.id", scan.id],
-      ["manifest.scan.producer.name", scan.producer.name],
-      ["manifest.scan.producer.version", scan.producer.version],
-      ["scan.target.targetId", scan.target.targetId],
-      ["scan.target.displayName", scan.target.displayName],
-    ] as const) {
-      requireText(value, context);
-    }
-    if (scan.target.kind === "git_revision") {
-      requireText(scan.target.revision, "scan.target.revision");
-    }
     for (const [index, artifact] of scan.artifacts.entries()) {
       requireText(
         artifact.mediaType,
@@ -262,8 +324,7 @@ function validateCanonicalContract(
     )?.[1];
     if (
       remote.includes("\\") ||
-      (profile === "tracking" &&
-        /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote)) ||
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote) ||
       authority === undefined
     ) {
       throw new ContractValidationError(
@@ -318,7 +379,7 @@ function validateCanonicalContract(
     for (const [index, value] of manifest.scan.scope[field].entries()) {
       try {
         if (profile === "tracking")
-          safeContractPath(value, "manifest scope path", profile, true);
+          safeRelativePath(value, "manifest scope path", true);
         else safeScopePath(value);
       } catch (error) {
         throw new ContractValidationError(
@@ -329,26 +390,18 @@ function validateCanonicalContract(
     }
   }
 
-  if (profile === "tracking") {
-    const surfaceIds = new Set<string>();
-    for (const [index, surface] of coverage.surfaces.entries()) {
-      const context = `coverage.surfaces[${index}]`;
-      requireText(surface.id, `${context}.id`);
-      requireText(surface.label, `${context}.label`);
-      if (surfaceIds.has(surface.id)) {
-        throw new ContractValidationError(
-          `${context}.id: duplicate surface id.`,
-        );
-      }
-      surfaceIds.add(surface.id);
+  const surfaceIds = new Set<string>();
+  for (const [index, surface] of (coverage?.surfaces ?? []).entries()) {
+    const context = `coverage.surfaces[${index}]`;
+    requireText(surface.id, `${context}.id`);
+    requireText(surface.label, `${context}.label`);
+    if (profile === "tracking" && surfaceIds.has(surface.id)) {
+      throw new ContractValidationError(`${context}.id: duplicate surface id.`);
     }
+    surfaceIds.add(surface.id);
   }
   const activeDeferredIds = new Set<string>();
-  const deferredWork =
-    profile === "tracking" && coverage.deferred === undefined
-      ? []
-      : coverage.deferred;
-  for (const [index, deferred] of deferredWork.entries()) {
+  for (const [index, deferred] of (coverage?.deferred ?? []).entries()) {
     activeDeferredIds.add(deferred.id);
     if (typeof deferred["candidateId"] === "string") {
       activeDeferredIds.add(deferred["candidateId"]);
@@ -356,7 +409,7 @@ function validateCanonicalContract(
     for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
       const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
       try {
-        safeContractPath(path, context, profile, true);
+        safeRelativePath(path, context, true);
       } catch (error) {
         throw new ContractValidationError(
           `${context}: expected a safe repository-relative POSIX path.`,
@@ -368,7 +421,7 @@ function validateCanonicalContract(
   if (profile === "tracking") {
     const resolvedDeferredIds = new Set<string>();
     for (const [index, resolved] of (
-      coverage.resolvedDeferred ?? []
+      coverage?.resolvedDeferred ?? []
     ).entries()) {
       const context = `coverage.resolvedDeferred[${index}]`;
       requireText(resolved.id, `${context}.id`);
@@ -386,13 +439,15 @@ function validateCanonicalContract(
       resolvedDeferredIds.add(resolved.id);
     }
   }
-  const findingIds = new Set<string>();
+  const occurrenceIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
-    if (findingIds.has(finding.findingId)) {
-      throw new ContractValidationError(`${context}: duplicate finding id.`);
+    if (occurrenceIds.has(finding.occurrenceId)) {
+      throw new ContractValidationError(
+        `${context}: duplicate finding occurrence identity; use identity.instance to split siblings.`,
+      );
     }
-    findingIds.add(finding.findingId);
+    occurrenceIds.add(finding.occurrenceId);
     for (const [field, value] of [
       ["title", finding.title],
       ["summary", finding.summary],
@@ -402,18 +457,14 @@ function validateCanonicalContract(
       ["provenance.source", finding.provenance.source],
       ...(finding.severity.score === undefined
         ? []
-        : [["severity.scoringSystem", finding.severity.scoringSystem]]),
+        : [["severity.scoringSystem", finding.severity.scoringSystem ?? ""]]),
     ]) {
-      if (!hasRequiredFindingText(value ?? "")) {
-        throw new ContractValidationError(
-          `${context}.${field}: expected a non-empty string.`,
-        );
-      }
+      requireText(value, `${context}.${field}`);
     }
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
       try {
-        safeContractPath(location.path, `${locationContext}.path`, profile);
+        safeRelativePath(location.path, `${locationContext}.path`);
       } catch (error) {
         throw new ContractValidationError(
           `${locationContext}.path: expected a safe repository-relative POSIX path.`,
@@ -441,7 +492,7 @@ function validateCanonicalContract(
         evidenceIds.add(evidence.id);
       }
       try {
-        safeContractPath(evidence.path, `${evidenceContext}.path`, profile);
+        safeRelativePath(evidence.path, `${evidenceContext}.path`);
       } catch (error) {
         throw new ContractValidationError(
           `${evidenceContext}.path: expected a safe repository-relative POSIX path.`,
@@ -478,21 +529,6 @@ function validateCanonicalContract(
   }
 }
 
-function safeContractPath(
-  value: string,
-  context: string,
-  profile: ContractProfile,
-  allowDot = false,
-): string {
-  // The tracking producer rejects drive-like prefixes using Unicode letters.
-  if (profile === "tracking" && /^\p{L}:/u.test(value)) {
-    throw new ContractValidationError(
-      `${context}: expected a safe repository-relative POSIX path.`,
-    );
-  }
-  return safeRelativePath(value, context, allowDot);
-}
-
 function portableContractPath(
   value: string,
   context: string,
@@ -507,10 +543,9 @@ async function validateSeal(
   root: ScanRoot,
   manifest: ScanManifest,
   findings: FindingsDocument,
-  coverage: CoverageDocument,
+  coverage: CoverageDocument | undefined,
   documentDigests: ReadonlyMap<string, string>,
   signal?: AbortSignal,
-  requireDerivedFiles = true,
 ): Promise<void> {
   const scan = manifest.scan;
   if (scan.sealedAt !== scan.completedAt) {
@@ -568,7 +603,7 @@ async function validateSeal(
       );
     }
   };
-  for (const surface of coverage.surfaces) {
+  for (const surface of coverage?.surfaces ?? []) {
     if (root.profile === "tracking" && surface.receiptRefs === undefined)
       continue;
     for (const receipt of surface.receiptRefs) {
@@ -581,7 +616,7 @@ async function validateSeal(
     requireSealedReference(imported["sourceRef"], "Import source");
   }
 
-  if (!requireDerivedFiles) return;
+  if (root.profile === "tracking") return;
   for (const [index, finding] of findings.findings.entries()) {
     const writeup = finding.writeup;
     if (writeup === undefined) continue;
@@ -690,7 +725,7 @@ async function scanDirectoryIdentity(path: string) {
       widePath(path),
     );
   }
-  const metadata = await lstat(encodePosixPath(path));
+  const metadata = await lstat(encodePosixPath(path), { bigint: true });
   if (!metadata.isDirectory()) throw new Error("not a directory");
   return { dev: metadata.dev, ino: metadata.ino };
 }
@@ -764,6 +799,17 @@ function openHeldFile(
       throw Object.assign(new Error("missing file"), { code: "ENOENT" });
     return file;
   } catch (error) {
+    if (
+      root.profile === "sdk" &&
+      nodeErrorCode(error) === "EACCES" &&
+      error instanceof Error
+    )
+      throw new ContractValidationError(
+        `${context}: unable to open the checked regular file.`,
+        {
+          cause: Object.assign(error, { path: join(root.path, normalized) }),
+        },
+      );
     throw new ContractValidationError(
       `${context}: expected a file inside the scan directory. ${filesystemErrorMessage(error)}`,
       { cause: error },
@@ -811,14 +857,13 @@ async function readScanJson(
   relativePath: keyof typeof DOCUMENTS,
   documentDigests: Map<string, string>,
   signal?: AbortSignal,
-  profile: ContractProfile = "sdk",
 ): Promise<Record<string, unknown>> {
   const bytes = await readHeldFile(root, relativePath, relativePath, signal);
   documentDigests.set(relativePath, hash("sha256", bytes));
   return parseJson(
-    profile === "tracking" ? relativePath : join(root.path, relativePath),
+    root.profile === "tracking" ? relativePath : join(root.path, relativePath),
     bytes,
-    profile,
+    root.profile,
   );
 }
 
@@ -995,7 +1040,7 @@ async function loadContractValidators(
   // The plugin schemas are the immutable v0 contract. They are valid Draft
   // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
   // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
+  const ajv = new Ajv2020({ allErrors: false, strict: false, verbose: true });
   ajv.addFormat("date-time", {
     type: "string",
     validate:
@@ -1059,6 +1104,23 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
+  if (
+    filename === "coverage.json" &&
+    first?.keyword === "oneOf" &&
+    Array.isArray(first.schema) &&
+    first.schema.some(
+      (rule, index) =>
+        isRecord(rule) &&
+        rule["$comment"] === SEALED_DEFERRED_PATH_RULE &&
+        first.params["passingSchemas"]?.includes(index),
+    )
+  ) {
+    const match = DEFERRED_PATH_LOCATION.exec(first.instancePath);
+    if (match)
+      return new ContractValidationError(
+        `coverage.deferred[${match[1]}].paths[${match[2]}]: expected a safe repository-relative POSIX path.`,
+      );
+  }
   const location = first?.instancePath
     ? JSON.stringify(first.instancePath)
     : "<root>";

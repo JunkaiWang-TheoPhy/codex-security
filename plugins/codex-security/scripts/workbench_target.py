@@ -20,12 +20,19 @@ from typing import Any, BinaryIO, Callable
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
+
+
+class UnreadableLocalFile(SystemExit):
+    """Source contents are unavailable for an optional review cache."""
+
+
+class UnsupportedLocalFileType(SystemExit):
+    """An entry cannot be read as source content for a review cache."""
 
 
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
@@ -154,22 +161,29 @@ def _read_git_batch_samples(
     return samples
 
 
+def _is_binary_sample(data: bytes) -> bool:
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "\0" in data.decode("utf-16", errors="ignore")
+    return b"\0" in data
+
+
 def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
-    sample_size = min(size, DEFAULT_PREVIEW_READ_BYTES)
+    read_size = 64 * 1024
+    sample_size = min(size, read_size)
     sample = output.read(sample_size)
     if len(sample) != sample_size:
         raise ValueError("truncated blob")
-    binary = is_binary_sample(sample)
+    binary = _is_binary_sample(sample)
     bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
     remaining = size - sample_size
     while remaining:
-        chunk_size = min(remaining, DEFAULT_PREVIEW_READ_BYTES)
+        chunk_size = min(remaining, read_size)
         chunk = output.read(chunk_size)
         if len(chunk) != chunk_size:
             raise ValueError("truncated blob")
         # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
         if not binary:
-            binary = is_binary_sample(bom + chunk) if bom else b"\0" in chunk
+            binary = _is_binary_sample(bom + chunk) if bom else b"\0" in chunk
         remaining -= chunk_size
     if output.read(1) != b"\n":
         raise ValueError("missing blob terminator")
@@ -302,6 +316,71 @@ def git_command(
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
+def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    """Return changed regular files from the selected side of each change."""
+    result = git_command(
+        repo,
+        "diff",
+        "--ignore-submodules=all",
+        "--raw",
+        "-z",
+        "--diff-filter=ACMRDT",
+        *diff_args,
+        "--",
+        text=False,
+    )
+    result.check_returncode()
+    fields = result.stdout.split(b"\0")
+    if fields and not fields[-1]:
+        fields.pop()
+
+    changed: list[tuple[Path, str]] = []
+    index = 0
+    while index < len(fields):
+        metadata = fields[index].split()
+        status = chr(metadata[-1][0])
+        index += 1
+        if status in {"C", "R"}:
+            index += 1
+        path = repo / os.fsdecode(fields[index])
+        index += 1
+        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
+        if selected_mode.startswith(b"100"):
+            changed.append((path, status))
+    return changed
+
+
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+    if mode == "revisions":
+        return run_git_changed_paths(repo, [f"{base}..{head}"])
+    if mode == "local-patch":
+        unstaged = run_git_changed_paths(repo, [base])
+        staged = run_git_changed_paths(repo, ["--cached", base])
+        untracked = git_command(
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            text=False,
+        )
+        untracked.check_returncode()
+        combined = dict(staged)
+        combined.update(unstaged)
+        combined.update(
+            (repo / os.fsdecode(relative), "A")
+            for relative in untracked.stdout.split(b"\0")
+            if relative and not relative.endswith(b"/")
+        )
+        return sorted(
+            (path, status)
+            for path, status in combined.items()
+            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
+            and (status == "D" or (not path.is_symlink() and path.is_file()))
+        )
+    raise SystemExit(f"Unknown diff mode: {mode}")
+
+
 def candidate_source_lines(
     target: Path,
     diff_target: dict[str, str],
@@ -310,8 +389,6 @@ def candidate_source_lines(
     case_insensitive: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Resolve candidate sources in the same selected view as the diff inventory."""
-    from generate_rank_input import git_changed_paths
-
     base, head = diff_target["baseRevision"], diff_target["headRevision"]
     local = diff_target["kind"] == "working_tree"
     changed = {
@@ -422,21 +499,62 @@ def worktree_content_digest(target: Path) -> str:
 
 
 def remediation_checkout_snapshot(
-    scan: sqlite3.Row, *, expected_revision: str | None = None
+    scan: sqlite3.Row,
+    *,
+    expected_revision: str | None = None,
+    head_changed_message: str = (
+        "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
+    ),
 ) -> tuple[str, str | None]:
     target = require_scan_target_identity(scan)
     revision = git_revision(target)
     required_revision = expected_revision or scan["target_revision"]
     if revision != required_revision:
-        raise SystemExit(
-            "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
-        )
+        raise SystemExit(head_changed_message)
     content_digest = (
         worktree_content_digest(target)
         if revision != "unversioned"
         else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
     )
     return revision, content_digest
+
+
+def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
+    head_changed_message = "Repository HEAD changed. Run a new scan before validating its findings."
+    if (
+        scan["diff_target_kind"] not in {"working_tree", "commit", "range"}
+        and scan["target_snapshot_digest"] is None
+        and scan["mode"] != "diff"
+        and scan["target_revision"] != "unversioned"
+    ):
+        # Legacy Git records bind only the revision, not working-tree contents.
+        target = require_scan_target_identity(scan)
+        if git_revision(target) != scan["target_revision"]:
+            raise SystemExit(head_changed_message)
+        require_clean_submodule_worktrees(target)
+        return
+    _, current_digest = remediation_checkout_snapshot(
+        scan, head_changed_message=head_changed_message
+    )
+    if scan["diff_target_kind"] == "working_tree":
+        expected_digest = scan["diff_content_digest"]
+    elif scan["diff_target_kind"] in {"commit", "range"}:
+        tracked = git_bytes(Path(scan["target_path"]), "ls-files", "-t", "-z")
+        if tracked is None:
+            raise SystemExit("Could not inspect tracked files in the scan target.")
+        if any(entry.startswith(b"S ") for entry in tracked.split(b"\0")):
+            raise SystemExit(
+                "Committed-diff scans require a full repository checkout. "
+                "Sparse checkouts are not supported; materialize skipped tracked files and retry."
+            )
+        expected_digest = clean_worktree_content_digest()
+    else:
+        expected_digest = scan["target_snapshot_digest"]
+    if current_digest != expected_digest:
+        raise SystemExit(
+            "Scan target contents changed since the scan. "
+            "Run a new scan before validating its findings."
+        )
 
 
 def worktree_content_digest_for_context(
@@ -815,6 +933,7 @@ def source_directory_snapshot_paths(
     target: Path,
     excluded: tuple[Path, ...] = (),
     *,
+    include_git_metadata: bool = False,
     onerror: Callable[[OSError], None] | None = None,
 ) -> list[Path]:
     paths: list[Path] = []
@@ -824,7 +943,9 @@ def source_directory_snapshot_paths(
         parent = Path(directory)
         for name in directories[:]:
             path = parent / name
-            if name in SOURCE_METADATA_DIRECTORIES or path in excluded:
+            if (
+                name in SOURCE_METADATA_DIRECTORIES and not include_git_metadata
+            ) or path in excluded:
                 directories.remove(name)
                 continue
             paths.append(path)
@@ -834,7 +955,8 @@ def source_directory_snapshot_paths(
         paths.extend(
             parent / name
             for name in files
-            if name not in SOURCE_METADATA_DIRECTORIES and parent / name not in excluded
+            if (name not in SOURCE_METADATA_DIRECTORIES or include_git_metadata)
+            and parent / name not in excluded
         )
     return sorted(paths)
 
@@ -844,6 +966,7 @@ def directory_content_digest(
     *,
     excluded: tuple[Path, ...] = (),
     include_ignored: bool = False,
+    include_git_metadata: bool = False,
 ) -> str:
     def raise_walk_error(error: OSError) -> None:
         raise error
@@ -852,7 +975,9 @@ def directory_content_digest(
         path.relative_to(target) for path in excluded if path.is_relative_to(target)
     ]
     paths = (
-        source_directory_snapshot_paths(target, excluded, onerror=raise_walk_error)
+        source_directory_snapshot_paths(
+            target, excluded, include_git_metadata=include_git_metadata, onerror=raise_walk_error
+        )
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
@@ -867,7 +992,7 @@ def directory_content_digest(
         try:
             metadata = path.lstat()
         except OSError as exc:
-            raise SystemExit(f"Could not read local file: {relative_path}") from exc
+            raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
         mode = metadata.st_mode
         link_target = (
             os.readlink(path)
@@ -891,12 +1016,12 @@ def directory_content_digest(
                         content_digest.update(chunk)
                         content_size += len(chunk)
             except OSError as exc:
-                raise SystemExit(f"Could not read local file: {relative_path}") from exc
+                raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
             update_digest_field(digest, b"kind", b"file")
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
-            raise SystemExit(f"Unsupported local file type: {relative_path}")
+            raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

@@ -12,6 +12,8 @@ import type { NormalizedTarget, ScanMode } from "./targets.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
 export {
+  DEFERRED_PATH_LOCATION,
+  SEALED_DEFERRED_PATH_RULE,
   deriveFindingIdentity,
   hasRequiredFindingText,
 } from "./contract-values.js";
@@ -28,9 +30,10 @@ export interface ScanExpectation {
 }
 
 export interface LoadedContract {
+  mode: NonNullable<ScanManifest["scan"]["mode"]>;
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review: NonNullable<ScanManifest["scan"]["review"]>;
 }
 
 export class ContractSchemaError extends ContractValidationError {}
@@ -93,7 +96,7 @@ export async function loadContractWithScanDirectory(
     if (options.expectation !== undefined)
       validateExpectation(
         result.contract.manifest,
-        result.contract.coverage,
+        result.contract.mode,
         options.expectation,
         options.workbenchValidated === true,
       );
@@ -150,7 +153,7 @@ export function safeScopePath(value: string): string {
 
 function validateExpectation(
   manifest: ScanManifest,
-  coverage: CoverageDocument,
+  mode: LoadedContract["mode"],
   expectation: ScanExpectation,
   workbenchValidated = false,
 ): void {
@@ -170,9 +173,9 @@ function validateExpectation(
     expectation.target,
     expectation.mode,
   );
-  if (coverage.mode !== expectedMode) {
+  if (mode !== expectedMode) {
     throw new ContractValidationError(
-      `Coverage mode must be ${expectedMode}, got ${coverage.mode}.`,
+      `Coverage mode must be ${expectedMode}, got ${mode}.`,
     );
   }
 

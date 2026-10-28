@@ -83,6 +83,7 @@ impl ScanReadRootBackend {
 
     pub(crate) fn open_file(
         &self,
+        env: napi::Env,
         relative_path: &str,
     ) -> napi::Result<Option<ScanReadFileBackend>> {
         let root = self.root()?;
@@ -99,7 +100,16 @@ impl ScanReadRootBackend {
             directories.push(file);
         }
         path.push(parts[parts.len() - 1]);
-        let Some(file) = open_file(&path, false).map_err(native_error)? else {
+        let Some(file) = open_file(&path, false).map_err(|error| {
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+            {
+                crate::scan_read::access_denied(env, error)
+            } else {
+                native_error(error)
+            }
+        })?
+        else {
             return Ok(None);
         };
         verify_regular_file(&file, &path).map_err(native_error)?;

@@ -13,6 +13,9 @@ export class SealedContractError extends Error {
 
 export class SealedContractSchemaError extends SealedContractError {}
 
+export const SEALED_DEFERRED_PATH_RULE = "invalidSealedDeferredPath";
+export const DEFERRED_PATH_LOCATION = /^\/deferred\/(\d+)\/paths\/(\d+)$/u;
+
 /** Match the producer's Python str.strip without changing saved text. */
 export function hasRequiredFindingText(value: string): boolean {
   return !/^[\p{White_Space}\u001c-\u001f]*$/u.test(value);

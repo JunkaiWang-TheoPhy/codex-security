@@ -20,17 +20,13 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const fixtures = createApiTestFixtures("sealed-contract-validation-");
 afterEach(fixtures.cleanup);
-const { validateTrackingSource, loadSealedContract } = (
+const { validateTrackingSource } = (
   await import(pathToFileURL(join(PLUGIN_ROOT, "mcp", "helpers.mjs")).href)
 ).default as {
   validateTrackingSource(
     scanDir: string,
     options?: { pluginRoot: string },
   ): Promise<Finding[]>;
-  loadSealedContract(
-    scanDir: string,
-    options: { pluginRoot: string; profile: "tracking" },
-  ): Promise<{ contract: { coverage: CoverageDocument } }>;
 };
 
 type Documents = {
@@ -74,6 +70,31 @@ async function addArtifact(documents: Documents, path: string) {
   });
 }
 
+test("honors a custom SDK schema with an optional target display name", async () => {
+  const { scanDir, manifest } = await fixture();
+  Reflect.deleteProperty(manifest.scan.target, "displayName");
+  await writeJson(join(scanDir, "scan-manifest.json"), manifest);
+
+  const pluginRoot = await fixtures.temporaryDirectory();
+  await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+    recursive: true,
+  });
+  const schemaPath = join(pluginRoot, "schemas", "scan-manifest.schema.json");
+  const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+  const target = schema.properties.scan.properties.target;
+  target.required = target.required.filter(
+    (key: string) => key !== "displayName",
+  );
+  await writeJson(schemaPath, schema);
+
+  expect((await loadContract(scanDir, { pluginRoot })).manifest).toEqual(
+    manifest,
+  );
+  await expect(validateTrackingSource(scanDir, { pluginRoot })).rejects.toThrow(
+    "scan.target.displayName",
+  );
+});
+
 test.each(["receiptRefs", "deferred"] as const)(
   "preserves omitted tracking coverage %s when the selected schema permits it",
   async (field) => {
@@ -90,18 +111,6 @@ test.each(["receiptRefs", "deferred"] as const)(
       (required: string) => required !== field,
     );
     await writeJson(schemaPath, schema);
-
-    for (const selectedRoot of [PLUGIN_ROOT, pluginRoot]) {
-      const { contract } = await loadSealedContract(documents.scanDir, {
-        pluginRoot: selectedRoot,
-        profile: "tracking",
-      });
-      expect(contract.coverage).toEqual(documents.coverage);
-      expect(
-        (await loadContract(documents.scanDir, { pluginRoot: selectedRoot }))
-          .coverage,
-      ).toEqual(documents.coverage);
-    }
 
     const target =
       field === "receiptRefs"
@@ -125,25 +134,12 @@ test.each(["receiptRefs", "deferred"] as const)(
     await expect(
       loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow(field);
-    await expect(
-      loadContract(documents.scanDir, { pluginRoot }),
-    ).rejects.toThrow();
+    const sdk = loadContract(documents.scanDir, { pluginRoot });
+    if (field === "receiptRefs") await expect(sdk).rejects.toThrow();
+    else expect((await sdk).findings).toEqual(documents.findings);
     await expect(
       validateTrackingSource(documents.scanDir, { pluginRoot }),
     ).resolves.toEqual(documents.findings.findings);
-    const { contract } = await loadSealedContract(documents.scanDir, {
-      pluginRoot,
-      profile: "tracking",
-    });
-    expect(contract.coverage).toEqual(documents.coverage);
-    expect(
-      Object.hasOwn(
-        field === "receiptRefs"
-          ? contract.coverage.surfaces[0]!
-          : contract.coverage,
-        field,
-      ),
-    ).toBe(false);
     expect(await readFile(join(documents.scanDir, "coverage.json"))).toEqual(
       original,
     );
@@ -168,18 +164,8 @@ test.each([
     await expect(validateTrackingSource(documents.scanDir)).resolves.toEqual(
       documents.findings.findings,
     );
-    const { contract } = await loadSealedContract(documents.scanDir, {
-      pluginRoot: PLUGIN_ROOT,
-      profile: "tracking",
-    });
-    expect(contract.coverage.surfaces[0]!.receiptRefs).toEqual([
-      "artifacts/receipt.json",
-    ]);
     const sdk = loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT });
-    if (sdkAccepts)
-      expect((await sdk).coverage.surfaces[0]!.receiptRefs).toEqual([
-        reference,
-      ]);
+    if (sdkAccepts) expect((await sdk).findings).toEqual(documents.findings);
     else await expect(sdk).rejects.toThrow("coverage.json");
     expect(await readFile(join(documents.scanDir, "coverage.json"))).toEqual(
       original,
@@ -332,13 +318,6 @@ const invalidCases: Array<[string, (documents: Documents) => void, string]> = [
     "duplicate surface id",
   ],
   [
-    "blank coverage surface label",
-    ({ coverage }) => {
-      coverage.surfaces[0]!.label = " ";
-    },
-    ".label: expected a non-empty string",
-  ],
-  [
     "duplicate resolved work",
     ({ coverage }) => {
       coverage.resolvedDeferred = [
@@ -374,40 +353,11 @@ const invalidCases: Array<[string, (documents: Documents) => void, string]> = [
     ".reason: expected a non-empty string",
   ],
   [
-    "blank producer",
-    ({ manifest }) => {
-      manifest.scan.producer.name = " ";
-    },
-    ".producer.name: expected a non-empty string",
-  ],
-  [
-    "empty revision on a revision target",
-    ({ manifest }) => {
-      manifest.scan.target.kind = "git_revision";
-      manifest.scan.target.revision = "";
-    },
-    ".revision: expected a non-empty string",
-  ],
-  [
-    "remote control characters normalized by URL parsing",
-    ({ manifest }) => {
-      manifest.scan.target.remote = "https://example.com\t/repository";
-    },
-    "expected a sanitized canonical absolute URL",
-  ],
-  [
     "noncanonical fingerprint properties",
     ({ findings }) => {
       findings.findings[0]!.fingerprints["extra"] = "synthetic";
     },
     "does not match derived fingerprint",
-  ],
-  [
-    "Unicode drive-like repository paths",
-    ({ findings }) => {
-      findings.findings[0]!.locations[0]!.path = "é:file";
-    },
-    "safe repository-relative POSIX path",
   ],
   [
     "a threat model containing only a next-line character",
@@ -433,6 +383,66 @@ test.each(invalidCases)(
     );
   },
 );
+
+const invalidInBothProfiles: typeof invalidCases = [
+  [
+    "blank producer",
+    ({ manifest }) => {
+      manifest.scan.producer.name = " ";
+    },
+    ".producer.name: expected a non-empty string",
+  ],
+  [
+    "empty revision on a revision target",
+    ({ manifest }) => {
+      manifest.scan.target.kind = "git_revision";
+      manifest.scan.target.revision = "";
+    },
+    ".revision: expected a non-empty string",
+  ],
+  [
+    "remote control characters normalized by URL parsing",
+    ({ manifest }) => {
+      manifest.scan.target.remote = "https://example.com\t/repository";
+    },
+    "expected a sanitized canonical absolute URL",
+  ],
+  [
+    "blank coverage surface label",
+    ({ coverage }) => {
+      coverage.surfaces[0]!.label = " ";
+    },
+    ".label: expected a non-empty string",
+  ],
+];
+
+test.each(invalidInBothProfiles)(
+  "rejects %s",
+  async (_name, mutate, message) => {
+    const documents = await fixture();
+    mutate(documents);
+    await saveAndSeal(documents);
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(message);
+    await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow(
+      message,
+    );
+  },
+);
+
+test("accepts a Unicode repository path with a colon", async () => {
+  const documents = await fixture();
+  documents.findings.findings[0]!.locations[0]!.path = "é:helper.ts";
+  await saveAndSeal(documents);
+  expect(await validateTrackingSource(documents.scanDir)).toEqual(
+    documents.findings.findings,
+  );
+  expect(
+    (await loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }))
+      .findings,
+  ).toEqual(documents.findings);
+});
 
 const historicalTrackingCases: Array<
   [string, (documents: Documents) => void, string]

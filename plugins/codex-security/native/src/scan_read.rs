@@ -6,6 +6,11 @@ use crate::scan_read_unix::{ScanReadFileBackend, ScanReadRootBackend};
 #[cfg(windows)]
 use crate::scan_read_windows::{ScanReadFileBackend, ScanReadRootBackend};
 
+pub(super) fn access_denied(env: napi::Env, error: std::io::Error) -> napi::Error {
+    let error = napi::Error::new("EACCES", error.to_string());
+    napi::JsError::from(error).into_unknown(env).into()
+}
+
 #[napi]
 pub struct ScanReadRoot {
     backend: ScanReadRootBackend,
@@ -26,10 +31,14 @@ pub fn open_scan_read_root(path: Buffer) -> napi::Result<ScanReadRoot> {
 #[napi]
 impl ScanReadRoot {
     #[napi]
-    pub fn open_file(&self, relative_path: String) -> napi::Result<Option<ScanReadFile>> {
+    pub fn open_file(
+        &self,
+        env: napi::Env,
+        relative_path: String,
+    ) -> napi::Result<Option<ScanReadFile>> {
         Ok(self
             .backend
-            .open_file(&relative_path)?
+            .open_file(env, &relative_path)?
             .map(|backend| ScanReadFile {
                 backend: Some(backend),
             }))

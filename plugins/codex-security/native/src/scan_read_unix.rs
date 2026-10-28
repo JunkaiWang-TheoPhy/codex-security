@@ -78,6 +78,7 @@ impl ScanReadRootBackend {
 
     pub(crate) fn open_file(
         &self,
+        env: napi::Env,
         relative_path: &str,
     ) -> napi::Result<Option<ScanReadFileBackend>> {
         self.verify()?;
@@ -116,6 +117,9 @@ impl ScanReadRootBackend {
         ) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+                return Err(crate::scan_read::access_denied(env, error))
+            }
             Err(error) => return Err(failure("Cannot open scan file", error)),
         };
         if !file

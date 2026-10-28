@@ -90,7 +90,7 @@ async function reseal(f: Fixture, name: string): Promise<void> {
 }
 
 function run(
-  f: Fixture,
+  f: Pick<Fixture, "scanDir" | "root">,
   args: string[] = [],
   pluginRoot = PLUGIN_ROOT,
   env: NodeJS.ProcessEnv = {
@@ -637,22 +637,37 @@ assert.deepEqual(await validateTrackingSource(input.replacementPath), input.deco
     },
   );
 
-  test("uses the schemas explicitly selected by pluginRoot", async () => {
-    const f = await fixture();
-    const selectedPlugin = join(f.root, "selected plugin");
-    await cp(join(PLUGIN_ROOT, "schemas"), join(selectedPlugin, "schemas"), {
+  test("tracks a completed scan without coverage.json and validates the derived coverage", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
       recursive: true,
     });
-    const schemaPath = join(selectedPlugin, "schemas", "findings.schema.json");
+    if (process.platform !== "win32") await chmod(scanDir, 0o700);
+    const findings = await readJson<FindingsDocument>(
+      join(scanDir, "findings.json"),
+    );
+    const result = run({ root, scanDir });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(
+      findings.findings.map(({ findingId }) => findingId + "\n").join(""),
+    );
+
+    const pluginRoot = join(root, "selected plugin");
+    await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+      recursive: true,
+    });
+    const schemaPath = join(pluginRoot, "schemas", "coverage.schema.json");
     const schema = await readJson<Record<string, unknown>>(schemaPath);
     schema["maxProperties"] = 0;
     await writeJson(schemaPath, schema);
     await expect(
-      validateTrackingSource(f.scanDir, { pluginRoot: selectedPlugin }),
-    ).rejects.toThrow(/schema|maxProperties/iu);
-    expect(await validateTrackingSource(f.scanDir)).toEqual(
-      f.findings.findings,
-    );
+      validateTrackingSource(scanDir, { pluginRoot }),
+    ).rejects.toThrow(/coverage.json.*maxProperties/u);
+    const contract = await loadContract(scanDir, { pluginRoot });
+    expect(contract.findings).toEqual(findings);
+    expect(contract.mode).toBe("repository");
+    expect(contract.review).toEqual({ excludedPaths: [] });
   });
 
   test("runs a copied launcher with its own schemas and no Python or SDK source", async () => {
