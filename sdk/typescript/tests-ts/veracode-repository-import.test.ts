@@ -74,6 +74,7 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
       prepareNormalizedLocalImport(mixed, options, dependencies);
     const remote = (...args: string[]) =>
       execFileSync("git", ["-C", fixture.repository, "remote", ...args]);
+    await expect(prepareMixed()).rejects.toThrow(/configured remote/);
     remote("add", "mirror", "https://github.com/example/mirror");
     expect((await prepareMixed()).preview.findings).toHaveLength(2);
     const wrong = structuredClone(first.preview);
