@@ -2,7 +2,6 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { CodexSecurityError } from "./errors.js";
-import { parentDirectory } from "./windows-path.js";
 import { expandHome } from "./runtime.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
@@ -64,16 +63,6 @@ export async function readRegularInputFile(
   repository: string | readonly string[],
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
-  return (await readRegularInputBytes(path, repository, metadata)).toString(
-    "utf8",
-  );
-}
-
-export async function readRegularInputBytes(
-  path: string,
-  repository: string | readonly string[],
-  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
-): Promise<Buffer> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
@@ -84,7 +73,7 @@ export async function readRegularInputBytes(
   for (const repository of repositories) {
     const canonicalRepository = await realpath(repository);
     if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-      for (let ancestor = dirname(path); ;) {
+      for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
         if (
           !isOutsidePath(
             relative(canonicalRepository, await realpath(ancestor)),
@@ -94,9 +83,7 @@ export async function readRegularInputBytes(
             "Input files must not follow repository directory links outside the selected repository.",
           );
         }
-        const parent = parentDirectory(ancestor);
-        if (parent === ancestor) break;
-        ancestor = parent;
+        if (dirname(ancestor) === ancestor) break;
       }
     }
   }
@@ -115,7 +102,7 @@ export async function readRegularInputBytes(
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }
-    return await file.readFile();
+    return await file.readFile({ encoding: "utf8" });
   } finally {
     await file.close();
   }

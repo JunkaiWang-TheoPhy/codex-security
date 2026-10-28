@@ -72,8 +72,9 @@ function retainedRepository(
 }
 
 export const blackDuckReportRepositories = repositoryScopeValidator(
+  { provider: "blackduck", label: "Black Duck", scope: "project version" },
+  hasBlackDuckEvidence,
   retainedRepository,
-  "Black Duck occurrences must belong to the same project version and source repository.",
 );
 
 function apiResource(href: unknown, label: string) {

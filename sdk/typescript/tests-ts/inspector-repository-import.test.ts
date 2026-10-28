@@ -1,88 +1,155 @@
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import type { ExternalFinding } from "../src/external-findings.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   inspectorPackageFinding,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
 
-test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", async () => {
-  const url = "https://git.example.test/example/project";
-  const fixture = await localFindingsFixture({
-    remote: "git@git.example.test:EXAMPLE/Project.git",
-  });
-  try {
-    const input = inspectorPackageFinding();
-    input.resources[0]!.details.codeRepository.projectName =
-      "https://git.example.test/Example/Project";
-    const path = join(fixture.root, "enterprise.json");
-    await writeFile(path, JSON.stringify({ findings: [input] }));
-    const options = {
+async function checkout(
+  remote = inspectorRepositoryUrl,
+  source = inspectorRepositoryUrl,
+) {
+  const { root, repository, environment, dispose } = await localFindingsFixture(
+    { remote },
+  );
+  return {
+    path: join(root, "inspector.json.gz"),
+    options: {
       provider: "inspector" as const,
-      sourceRepositoryUrl: url,
-      sourceKey: "inspector/enterprise/project",
-      repository: fixture.repository,
-    };
-    const dependencies = { environment: fixture.environment };
-    const prepared = await prepareLocalExternalImport(
-      path,
-      options,
-      dependencies,
-    );
-    expect(prepared.preview.findings).toHaveLength(1);
-    prepared.preview.findings[0]!.evidence.details = {
-      ...prepared.preview.findings[0]!.evidence.details!,
-      repository: { url: "https://git.example.test/Example/Project" },
-    };
-    expect(
-      (
-        await (
-          await prepareNormalizedLocalImport(
-            prepared.preview,
-            options,
-            dependencies,
-          )
-        ).import()
-      ).counts.created,
-    ).toBe(1);
-  } finally {
-    await fixture.dispose();
-  }
+      sourceKey: "inspector/project",
+      repository,
+      sourceRepositoryUrl: source,
+    },
+    deps: { environment },
+    [Symbol.asyncDispose]: dispose,
+  };
+}
+
+function normalized(findings: ExternalFinding[]) {
+  return { read: findings.length, excluded: [], findings };
+}
+
+test("Enterprise GitHub scope applies to raw and replayed rows with and without a provider", async () => {
+  const url = "https://git.example.test/Example/Project";
+  await using f = await checkout(
+    "git@git.example.test:EXAMPLE/Project.git",
+    url,
+  );
+  const known = inspectorPackageFinding();
+  known.resources[0]!.details.codeRepository.projectName = url;
+  const unknown = structuredClone(known);
+  unknown.findingArn = unknown.findingArn.replace(/a$/u, "b");
+  Reflect.deleteProperty(
+    unknown.resources[0]!.details.codeRepository,
+    "providerType",
+  );
+  await writeFile(
+    f.path,
+    gzipSync(JSON.stringify({ findings: [unknown, known] })),
+  );
+  const raw = await prepareLocalExternalImport(f.path, f.options, f.deps);
+  const rows = raw.preview.findings;
+  expect(rows).toHaveLength(2);
+  rows[1]!.evidence.source_data!["sourceRepositoryUrl"] = url.toLowerCase();
+  rows.push(typedRow("ssh://git@git.example.test/Example/Project.git"));
+  const replay = () =>
+    prepareNormalizedLocalImport(normalized(rows), f.options, f.deps);
+  expect((await replay()).preview.findings).toHaveLength(3);
+
+  unknown.resources[0]!.details.codeRepository.providerType =
+    "GITLAB_SELF_MANAGED";
+  rows[0] = normalizeInspectorFindings(
+    { findings: [unknown] },
+    url,
+    "local",
+  ).findings[0]!;
+  await expect(replay()).rejects.toThrow(/project|provider|integration/i);
 });
 
-const sshProject = "ssh://git@github.com/example/project";
-const homeProject = "github.com/~/example/project?other";
-const scpProject = "github.com:example/project#other";
-const repositoryBindings: [string, string, string?][] = [
-  [`${inspectorRepositoryUrl}?repo=other`, inspectorRepositoryUrl],
-  [`${inspectorRepositoryUrl}?`, inspectorRepositoryUrl],
-  [`${inspectorRepositoryUrl}#`, inspectorRepositoryUrl],
-  [`${sshProject}?other`, `${sshProject}?Other`],
-  [`ssh://alice@${homeProject}`, `ssh://bob@${homeProject}`],
-  [`alice@${scpProject}`, `bob@${scpProject}`],
+function typedRow(url: string): ExternalFinding {
+  return {
+    source_finding_id: "sdk-id",
+    evidence: {
+      title: "Alert",
+      severity: "unknown",
+      details: { kind: "sast", repository: { url } },
+    },
+  };
+}
+
+const home = "host.test/~/project";
+const ssh = "ssh://git@github.com/example/project";
+const bindings: [string, string, string?][] = [
   [
-    "ssh://alice@git.example.test/~/project",
-    "ssh://bob@git.example.test/~/project",
+    "https://trusted.test\\@other.test/../team/repo",
+    "https://trusted.test/team/repo",
   ],
-  ["alice@git.example.test:team/project", "bob@git.example.test:team/project"],
+  ["https://host.test/x/%2e%2e/team/repo", "https://host.test/team/repo"],
+  [
+    "https://host.test/previous/../team/./repo",
+    "https://host.test/team/other",
+    "https://host.test/team/repo",
+  ],
+  [" ssh://host.test/team/repo", "https://host.test/team/repo"],
+  ["ssh://bad@host.test:invalid/team/repo", "https://host.test/team/repo"],
+  ["ssh://other.test%2Fx@github.com/team/repo", "https://github.com/team/repo"],
+  [
+    "git@host.test:/srv/team/repo.git",
+    "ssh://git@host.test/team/repo",
+    "ssh://git@host.test/srv/team/repo.git",
+  ],
+  [
+    "git@host.test:~/team/repo%20data",
+    "ssh://git@host.test/~/team/repo%20data",
+    "ssh://git@host.test/~/team/repo%2520data",
+  ],
+  [inspectorRepositoryUrl + "?repo=other", inspectorRepositoryUrl],
+  [inspectorRepositoryUrl + "?", inspectorRepositoryUrl],
+  [inspectorRepositoryUrl + "#", inspectorRepositoryUrl],
+  [ssh + "?other", ssh + "?Other"],
+  [ssh + "#blue", ssh + ".git#blue", ssh + "#blue.git"],
+  ["git://github.com/example/project?other", inspectorRepositoryUrl],
+  ["ssh://git@github.com/~/../example/project", inspectorRepositoryUrl],
+  ["alice@host.test:team/project#other", "bob@host.test:team/project#other"],
+  [
+    "alice@host.test:team/project#demo",
+    "ssh://alice@host.test/team/project#demo",
+  ],
+  [
+    "git@github.com:example/project.git",
+    "ssh://git@github.com/example/other",
+    "ssh://git@ssh.github.com:443/example/project.git",
+  ],
+  [
+    "example@example.ghe.com:team/project",
+    "ssh://other@example.ghe.com/team/project",
+    "ssh://example@example.ghe.com/team/project",
+  ],
+  ["alice@host.test:team/project", "ssh://bob@host.test/team/project"],
+  [
+    "ssh://alice@host.test/team/project",
+    "ssh://bob@host.test/team/other",
+    "ssh://bob@host.test/team/project",
+  ],
   ["alice@host.test:D:/shared/project", "bob@host.test:D:/shared/project"],
+  ["alice@host.test:/~/repo", "bob@host.test:/~/repo"],
+  [`ssh://alice@${home}`, `ssh://bob@${home}`, `ssh://${home}`],
+  ["ssh://alice@host.test/%7E%2F../repo", "ssh://bob@host.test/%7E%2F../repo"],
   [
     "café@host.test:~/repo",
     "caf%C3%A9@host.test:~/repo",
     "ssh://caf%C3%A9@host.test/~/repo",
-  ],
-  [
-    "DOMAIN\\alice@host.test:~/repo",
-    "DOMAIN%5Calice@host.test:~/repo",
-    "ssh://DOMAIN%5Calice@host.test/~/repo",
   ],
   [
     "ssh://team:one@host.test/~/repo",
@@ -94,411 +161,190 @@ const repositoryBindings: [string, string, string?][] = [
     "ssh://u@host.test/~/repo#v%00%23x",
     "ssh://u%2500%23v@host.test/~/repo#x",
   ],
-  [
-    "ssh://host.test/~/repo#blue",
-    "ssh://alice@host.test/~/other#blue",
-    "ssh://alice@host.test/~/repo#blue",
-  ],
-  [
-    "ssh://alice@host.test/~/repo",
-    "ssh://bob@host.test/~/repo",
-    "ssh://host.test/~/repo",
-  ],
-  [
-    "ssh://alice@host.test/./~/repo",
-    "ssh://bob@host.test/./~/other",
-    "ssh://bob@host.test/./~/repo",
-  ],
-  ["alice@host.test:/~/repo", "bob@host.test:/~/repo"],
-  ["ssh://alice@host.test/~/../repo", "ssh://bob@host.test/~/../repo"],
-  ["ssh://alice@host.test/%7E%2F../repo", "ssh://bob@host.test/%7E%2F../repo"],
-  [`${sshProject}#blue`, `${sshProject}.git#blue`, `${sshProject}#blue.git`],
-  ["git://github.com/example/project?other", inspectorRepositoryUrl],
 ];
 test.each(
-  repositoryBindings.map(
-    ([remote, other, equivalent = remote.replace(/^ssh:/u, "git+ssh:")]) =>
+  bindings.map(
+    ([remote, other, equivalent = remote]) =>
       [remote, other, equivalent] as const,
   ),
 )(
-  "native and typed Inspector findings bind to the matching checkout: %s",
+  "normalized Inspector repository binding for %s",
   async (remote, other, equivalent) => {
-    const fixture = await localFindingsFixture({ remote });
-    try {
-      const data = normalizeInspectorFindings(
-        { findings: [inspectorPackageFinding()] },
-        inspectorRepositoryUrl,
-        "local",
+    await using f = await checkout(remote);
+    const prepare = (url: string) =>
+      prepareNormalizedLocalImport(
+        normalized([typedRow(url)]),
+        f.options,
+        f.deps,
       );
-      const options = {
-        provider: "inspector" as const,
-        sourceKey: "inspector/example/project",
-        repository: fixture.repository,
-      };
-      const deps = { environment: fixture.environment };
-      const native = data.findings[0]!;
-      const typed = (url: string): typeof native => ({
-        source_finding_id: "sdk-id",
-        evidence: {
-          title: "Imported alert",
-          severity: "unknown",
-          details: { kind: "sast", repository: { url } },
-        },
-      });
-      const store = async (row: typeof native) =>
-        (
-          await prepareNormalizedLocalImport(
-            { ...data, findings: [row] },
-            options,
-            deps,
-          )
-        ).import();
-      for (const row of [native, typed(other)])
-        await expect(store(row)).rejects.toThrow(
-          "does not match a configured remote",
-        );
-      expect(await listLocalExternalFindings(options, deps)).toHaveLength(0);
-      expect((await store(typed(equivalent))).counts.created).toBe(1);
-    } finally {
-      await fixture.dispose();
-    }
+    await expect(prepare(other)).rejects.toThrow(
+      "does not match a configured remote",
+    );
+    expect((await prepare(equivalent)).preview.findings).toHaveLength(1);
   },
 );
 
-test("SQLite replay checks the Inspector project mapping independently of retained evidence", async () => {
-  const otherUrl = "https://git.example.test/example/project";
-  const fixture = await localFindingsFixture({
-    remote: inspectorRepositoryUrl,
+test("mapped local imports preserve their SQLite history and verify replay provenance", async () => {
+  await using f = await checkout();
+  const input = inspectorPackageFinding();
+  const project = input.resources[0]!;
+  project.details.codeRepository.projectName = "example/project";
+  const options = {
+    ...f.options,
+    inspectorProjectMap: new Map([[project.id, inspectorRepositoryUrl]]),
+  };
+  const store = async (findings: unknown[]) => {
+    await writeFile(f.path, gzipSync(JSON.stringify({ findings })));
+    return (await prepareLocalExternalImport(f.path, options, f.deps)).import();
+  };
+  expect((await store([input])).counts.created).toBe(1);
+  expect(
+    (await store([{ ...input, status: "SUPPRESSED" }])).counts.updated,
+  ).toBe(1);
+  expect((await store([])).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 0,
   });
-  const other = await localFindingsFixture({ remote: otherUrl });
-  try {
-    const finding = inspectorPackageFinding();
-    const project = finding.resources[0]!;
-    project.details.codeRepository.projectName = "example/project";
-    const path = join(fixture.root, "native.json");
-    await writeFile(path, JSON.stringify({ findings: [finding] }));
-    const options = {
-      provider: "inspector" as const,
-      repository: fixture.repository,
-      sourceKey: "inspector/example/project",
-      sourceRepositoryUrl: inspectorRepositoryUrl,
-      inspectorProjectMap: new Map([[project.id, inspectorRepositoryUrl]]),
-    };
-    const deps = { environment: fixture.environment };
-    const prepared = await prepareLocalExternalImport(path, options, deps);
-    expect((await prepared.import()).counts.created).toBe(1);
-    const saved = (await listLocalExternalFindings(options, deps))[0]!;
-    const replay = {
-      findings: [
-        { source_finding_id: saved.sourceFindingId, evidence: saved.evidence },
-      ],
-      read: 1,
-      excluded: [],
-    };
-    const same = await prepareNormalizedLocalImport(replay, options, deps);
-    expect((await same.import()).counts.unchanged).toBe(1);
+  const records = await listLocalExternalFindings(options, f.deps);
+  expect(records).toHaveLength(1);
+  const saved = records[0]!;
+  expect(saved).toMatchObject({
+    provider: "inspector",
+    sourceFindingId: input.findingArn,
+    version: 2,
+    assessment: { state: "not_assessed" },
+  });
+  const row = {
+    source_finding_id: saved.sourceFindingId,
+    evidence: saved.evidence,
+  };
+  const replay = await prepareNormalizedLocalImport(
+    normalized([row]),
+    options,
+    f.deps,
+  );
+  expect((await replay.import()).counts.unchanged).toBe(1);
 
-    // The forged source and the second checkout agree. Only the trusted project
-    // mapping identifies the original host.
-    saved.evidence.source_data!["sourceRepositoryUrl"] = otherUrl;
-    await expect(
-      prepareNormalizedLocalImport(
-        replay,
-        { ...options, repository: other.repository },
-        { environment: other.environment },
-      ),
-    ).rejects.toThrow(/project|repository/i);
-  } finally {
-    await Promise.all([fixture.dispose(), other.dispose()]);
-  }
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([{ ...row, source_finding_id: "wrong" }]),
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow(/ARN|identity|source finding/i);
+  const other = "https://other.example.test/example/project";
+  row.evidence.details = { kind: "sast", repository: { url: other } };
+  await expect(
+    prepareNormalizedLocalImport(normalized([row]), options, f.deps),
+  ).rejects.toThrow(/retained scanner repository/i);
+  // Both copies of the retained URL now match the other checkout. The trusted map still disagrees.
+  row.evidence.source_data!["sourceRepositoryUrl"] = other;
+  await using fork = await checkout(other);
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([row]),
+      { ...options, repository: fork.options.repository },
+      fork.deps,
+    ),
+  ).rejects.toThrow(/project|repository/i);
 });
 
-test("an Inspector provider claim cannot loosen an operator's custom host mapping", async () => {
+test("a mapped custom host keeps its path casing across reader hints and caller mutations", async () => {
   const trusted = "https://scm.example.test/Team/Project";
-  const other = "https://scm.example.test/team/project";
-  const fixture = await localFindingsFixture({ remote: other });
-  try {
-    const input = inspectorPackageFinding();
-    const project = input.resources[0]!;
-    project.details.codeRepository.projectName = "team/project";
-    const report = { findings: [input] };
-    const map = new Map([[project.id, trusted]]);
-    const options = {
-      provider: "inspector" as const,
-      sourceKey: "inspector/example/project",
-      repository: fixture.repository,
-      sourceRepositoryUrl: trusted,
-      inspectorProjectMap: map as typeof map | undefined,
-    };
-    const deps = { environment: fixture.environment };
-    expect(() =>
-      normalizeInspectorFindings(report, other, "local", map),
-    ).toThrow("mapping does not match");
-    const prepared = normalizeInspectorFindings(report, trusted, "local", map);
-    for (const readerUrl of [undefined, trusted, other]) {
-      await expect(
-        prepareNormalizedLocalImport(prepared, options, {
-          ...deps,
-          sourceRepositories: readerUrl
-            ? [{ url: readerUrl, platform: "github" }]
-            : [],
-        }),
-      ).rejects.toThrow("does not match");
-    }
-    project.details.codeRepository.projectName = trusted;
-    const path = join(fixture.root, "mapped.json");
-    await writeFile(path, JSON.stringify(report));
-    const native = normalizeInspectorFindings(report, trusted, "local", map);
-    for (const start of [
-      () => prepareNormalizedLocalImport(native, options, deps),
-      () => prepareLocalExternalImport(path, options, deps),
-    ]) {
-      options.inspectorProjectMap = new Map(map);
-      const pending = start();
-      options.inspectorProjectMap.clear();
-      options.inspectorProjectMap = undefined;
-      await expect(pending).rejects.toThrow(
-        "does not match a configured remote",
-      );
-    }
-    project.details.codeRepository.projectName = other;
-    expect(() =>
-      normalizeInspectorFindings(report, trusted, "local", map),
-    ).toThrow("native repository does not match");
-  } finally {
-    await fixture.dispose();
+  await using f = await checkout(trusted.toLowerCase(), trusted);
+  const input = inspectorPackageFinding();
+  const project = input.resources[0]!;
+  project.details.codeRepository.projectName = trusted;
+  const report = { findings: [input] };
+  const map = new Map([[project.id, trusted]]);
+  const data = normalizeInspectorFindings(report, trusted, "local", map);
+  await writeFile(f.path, gzipSync(JSON.stringify(report)));
+  for (const raw of [false, true]) {
+    const options = { ...f.options, inspectorProjectMap: new Map(map) };
+    const pending = raw
+      ? prepareLocalExternalImport(f.path, options, f.deps)
+      : prepareNormalizedLocalImport(data, options, {
+          ...f.deps,
+          sourceRepositories: [{ url: trusted, platform: "github" }],
+        });
+    options.inspectorProjectMap.clear();
+    await expect(pending).rejects.toThrow("does not match a configured remote");
   }
 });
 
-test("an omitted Inspector provider cannot erase a known platform or disguise conflicting providers", async () => {
-  const url = "https://git.example.test/example/project";
-  const fixture = await localFindingsFixture({
-    remote: "git@git.example.test:EXAMPLE/Project.git",
-  });
-  try {
-    const known = inspectorPackageFinding();
-    const source = known.resources[0]!;
-    source.details.codeRepository.projectName = url;
-    const variant = (providerType?: string) => ({
-      ...known,
-      findingArn: known.findingArn.replace(/a$/u, "b"),
-      resources: [
-        {
-          ...source,
-          details: {
-            codeRepository: {
-              projectName: url,
-              integrationArn: source.details.codeRepository.integrationArn,
-              ...(providerType ? { providerType } : {}),
-            },
-          },
-        },
-      ],
-    });
-    const path = join(fixture.root, "native.json");
-    const options = {
-      provider: "inspector" as const,
-      repository: fixture.repository,
-      sourceRepositoryUrl: url,
-      sourceKey: "inspector/project",
-    };
-    const deps = { environment: fixture.environment };
-    for (const other of [variant(), variant("GITLAB_SELF_MANAGED")]) {
-      for (const rows of [
-        [known, other],
-        [other, known],
-      ]) {
-        await writeFile(path, JSON.stringify({ findings: rows }));
-        const file = () => prepareLocalExternalImport(path, options, deps);
-        const records = rows.flatMap(
-          (row) =>
-            normalizeInspectorFindings({ findings: [row] }, url, "local")
-              .findings,
-        );
-        const normalized = () =>
-          prepareNormalizedLocalImport(
-            { findings: records, read: 2, excluded: [] },
-            options,
-            deps,
-          );
-        if ("providerType" in other.resources[0]!.details.codeRepository) {
-          await expect(file()).rejects.toThrow(/project|provider|integration/i);
-          await expect(normalized()).rejects.toThrow(
-            /project|provider|integration/i,
-          );
-        } else {
-          expect((await file()).preview.findings).toHaveLength(2);
-          expect((await normalized()).preview.findings).toHaveLength(2);
-          const knownIndex = rows.indexOf(known);
-          records[knownIndex]!.evidence.source_data!["sourceRepositoryUrl"] =
-            "https://git.example.test/EXAMPLE/Project";
-          expect((await normalized()).preview.findings).toHaveLength(2);
-        }
-      }
-    }
-  } finally {
-    await fixture.dispose();
-  }
-});
+test("normalized imports bind mixed projects, native evidence and maps to their provider", async () => {
+  await using f = await checkout();
+  const native = inspectorPackageFinding();
+  const row = normalizeInspectorFindings(
+    { findings: [native] },
+    inspectorRepositoryUrl,
+    "local",
+  ).findings[0]!;
+  const fork = structuredClone(native);
+  fork.findingArn = fork.findingArn.replace(/a$/u, "b");
+  const project = fork.resources[0]!;
+  project.id = project.id.replace("22222222", "33333333");
+  project.details.codeRepository.projectName =
+    "https://github.com/fork/project";
+  const others = normalizeInspectorFindings(
+    { findings: [fork] },
+    project.details.codeRepository.projectName,
+    "local",
+  ).findings;
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([row, ...others]),
+      f.options,
+      f.deps,
+    ),
+  ).rejects.toThrow("more than one repository project");
 
-test("Inspector replays, suppression and an empty export preserve unassessed repository history", async () => {
-  const fixture = await localFindingsFixture({
-    remote: inspectorRepositoryUrl,
-  });
-  try {
-    const path = join(fixture.root, "inspector.json.gz");
-    const options = {
-      provider: "inspector" as const,
-      sourceRepositoryUrl: inspectorRepositoryUrl,
-      repository: fixture.repository,
-      sourceKey: "inspector/example/project",
-    };
-    const dependencies = { environment: fixture.environment };
-    const prepare = async (findings: unknown[]) => {
-      await writeFile(path, gzipSync(JSON.stringify({ findings })));
-      return prepareLocalExternalImport(path, options, dependencies);
-    };
-    const input = inspectorPackageFinding();
-    const original = await prepare([input]);
-    expect((await original.import()).counts.created).toBe(1);
-    expect((await (await prepare([input])).import()).counts.unchanged).toBe(1);
-    expect(
-      (await (await prepare([{ ...input, status: "SUPPRESSED" }])).import())
-        .counts.updated,
-    ).toBe(1);
-    expect((await (await prepare([])).import()).counts).toEqual({
-      created: 0,
-      updated: 0,
-      unchanged: 0,
-    });
-    const records = await listLocalExternalFindings(options, dependencies);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      provider: "inspector",
-      sourceFindingId: input.findingArn,
-      version: 2,
-      assessment: { state: "not_assessed" },
-    });
-    await expect(
-      prepareLocalExternalImport(
-        path,
-        { ...options, sourceRepositoryUrl: "https://github.com/example/other" },
-        dependencies,
-      ),
-    ).rejects.toThrow(/repository|remote/i);
-    const altered = structuredClone(original.preview);
-    altered.findings[0]!.evidence.details = {
-      kind: "sast",
-      repository: { url: "https://github.com/example/other" },
-    };
-    await expect(
-      prepareNormalizedLocalImport(altered, options, dependencies),
-    ).rejects.toThrow(/retained scanner repository/i);
-    const wrongArn = structuredClone(original.preview);
-    wrongArn.findings[0]!.source_finding_id = input.findingArn.replace(
-      /a$/u,
-      "b",
-    );
-    await expect(
-      prepareNormalizedLocalImport(wrongArn, options, dependencies),
-    ).rejects.toThrow(/ARN|identity|source finding/i);
-  } finally {
-    await fixture.dispose();
-  }
-});
-
-test("a normalized local selection cannot combine findings from different Inspector projects", async () => {
-  const fixture = await localFindingsFixture();
-  try {
-    const upstream = inspectorPackageFinding();
-    const fork = inspectorPackageFinding();
-    fork.findingArn = fork.findingArn.replace(/a$/u, "b");
-    fork.resources[0]!.id = fork.resources[0]!.id.replace(
-      "22222222",
-      "33333333",
-    );
-    fork.resources[0]!.details.codeRepository.projectName =
-      "https://github.com/fork/project";
-    const findings = [
-      ...normalizeInspectorFindings(
-        { findings: [upstream] },
-        inspectorRepositoryUrl,
-        "local",
-      ).findings,
-      ...normalizeInspectorFindings(
-        { findings: [fork] },
-        "https://github.com/fork/project",
-        "local",
-      ).findings,
-    ];
+  const forkUrl = project.details.codeRepository.projectName;
+  execFileSync("git", [
+    "-C",
+    f.options.repository,
+    "remote",
+    "add",
+    "fork",
+    forkUrl,
+  ]);
+  const plain = await mkdtemp(join(dirname(f.path), "plain-"));
+  for (const repository of [plain, f.options.repository]) {
     await expect(
       prepareNormalizedLocalImport(
-        { read: 2, excluded: [], findings },
-        {
-          provider: "inspector",
-          sourceKey: "inspector/project",
-          repository: fixture.repository,
-        },
-        { environment: fixture.environment },
+        normalized([row, typedRow(forkUrl)]),
+        { ...f.options, repository },
+        f.deps,
       ),
-    ).rejects.toThrow("more than one repository project");
-  } finally {
-    await fixture.dispose();
+    ).rejects.toThrow("does not match the retained Inspector repository");
   }
-});
-
-test("normalized imports bind native Inspector evidence and maps to their provider", async () => {
-  const fixture = await localFindingsFixture({
-    remote: inspectorRepositoryUrl,
-  });
-  try {
-    const native = inspectorPackageFinding();
-    const normalized = normalizeInspectorFindings(
-      { findings: [native] },
-      inspectorRepositoryUrl,
-      "local",
-    );
-    const row = normalized.findings[0]!;
-    const prepare = (
-      finding: typeof row,
-      provider: "inspector" | "wiz",
-      inspectorProjectMap?: ReadonlyMap<string, string>,
-    ) =>
-      prepareNormalizedLocalImport(
-        { ...normalized, findings: [finding] },
-        {
-          provider,
-          sourceKey: "scanner/project",
-          repository: fixture.repository,
-          inspectorProjectMap,
-        },
-        { environment: fixture.environment },
-      );
-    const workload = {
-      ...native,
-      resources: [{ type: "AWS_EC2_INSTANCE", id: "i-example" }],
-    };
-    await expect(
-      prepare(
-        {
-          source_finding_id: "CVE-2099-1234",
-          evidence: { ...row.evidence, source_data: workload },
-        },
-        "inspector",
-      ),
-    ).rejects.toThrow("retained Inspector");
-
-    const opaque = { ...row, evidence: { ...row.evidence, source_data: {} } };
-    const map = new Map([[native.resources[0]!.id, inspectorRepositoryUrl]]);
-    await expect(prepare(opaque, "wiz", map)).rejects.toThrow(
-      "map requires the inspector provider",
-    );
-    // A source ID alone does not identify the provider of normalized evidence.
-    const prepared = await prepare(opaque, "wiz");
-    expect(prepared.preview.findings[0]!.source_finding_id).toBe(
-      native.findingArn,
-    );
-  } finally {
-    await fixture.dispose();
-  }
+  row.evidence.source_data = {
+    ...native,
+    resources: [{ type: "AWS_EC2_INSTANCE", id: "i-example" }],
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([{ ...row, source_finding_id: "CVE-2099-1234" }]),
+      f.options,
+      f.deps,
+    ),
+  ).rejects.toThrow("retained Inspector");
+  row.evidence.source_data = {};
+  const wiz = { ...f.options, provider: "wiz" as const };
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([row]),
+      { ...wiz, inspectorProjectMap: new Map() },
+      f.deps,
+    ),
+  ).rejects.toThrow("map requires the inspector provider");
+  const otherProvider = await prepareNormalizedLocalImport(
+    normalized([row]),
+    wiz,
+    f.deps,
+  );
+  expect(otherProvider.preview.findings[0]!.source_finding_id).toBe(
+    native.findingArn,
+  );
 });

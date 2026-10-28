@@ -353,6 +353,7 @@ test("prepared provenance binds the repository and native occurrence", () => {
   const data = first!.evidence.source_data;
   const retained = (source_data: typeof data, id = first!.source_finding_id) =>
     veracodeReportRepositories(
+      "veracode",
       [
         {
           source_finding_id: id,
@@ -383,7 +384,9 @@ test("prepared provenance binds the repository and native occurrence", () => {
   summary.source_finding_id = "sdk-id";
   delete summary.evidence.source_data;
   summary.evidence.details!.repository!.url = repository + "-other";
-  expect(veracodeReportRepositories([summary, first!], "cloud")).toEqual(
+  expect(
+    veracodeReportRepositories("veracode", [summary, first!], "cloud"),
+  ).toEqual(
     new Map([
       [summary.source_finding_id, { url: repository + "-other" }],
       [first!.source_finding_id, { url: repository }],

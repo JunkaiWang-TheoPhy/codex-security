@@ -7,9 +7,10 @@ import {
   forwardExternalImportSetting,
   requireExternalImports,
 } from "./external-imports-feature.js";
-import type {
-  ExternalFindings,
-  ExternalSourceRepository,
+import {
+  snapshotImportOptions,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -20,13 +21,16 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { parseGitRemote } from "./git-remote.js";
 import {
-  boundScannerRepositories,
-  repositoryBoundScanners,
-  snapshotImportOptions,
-} from "./scanner-repository-provenance.js";
-import { parentDirectory } from "./windows-path.js";
+  blackDuckReportRepositories,
+  hasBlackDuckEvidence,
+} from "./blackduck-findings.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import {
+  hasVeracodeEvidence,
+  veracodeReportRepositories,
+} from "./veracode-findings.js";
+import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -43,7 +47,6 @@ import {
   gitMarkerRoot,
   gitOutput,
   gitProtectionRoots,
-  hasGitCommonDirectoryLayout,
   normalizeRepository,
   nullIfMissingPath,
 } from "./targets.js";
@@ -110,35 +113,47 @@ function requireIdentity(
     );
 }
 
+const gitTransportPorts: Readonly<Record<string, string>> = {
+  "http:": "80",
+  "https:": "443",
+  "ssh:": "22",
+  "git+ssh:": "22",
+  "ssh+git:": "22",
+  "git:": "9418",
+  "ftp:": "21",
+  "ftps:": "990",
+};
+
 /** Compare transport forms without changing retained scanner evidence. */
 function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
-): { key: string; account?: string } | undefined {
+): { key: string; account?: string; homeRelative?: boolean } | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
+  const transport = bound
+    ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
+    : null;
+  const authority = transport?.[1];
+  const http = bound && /^https?:\/\//iu.test(value.trimStart());
+  // Git decodes the authority before locating its path. An encoded delimiter
+  // cannot prove a match to another spelling through WHATWG URL's hostname.
+  if (
+    authority &&
+    (/%2f|[?#]/iu.test(authority) ||
+      authority.slice(authority.lastIndexOf("@") + 1).includes("%"))
+  )
+    return { key: value };
   let remote;
   try {
     remote = parseGitRemote(value);
   } catch {
-    return undefined;
+    return transport || http ? { key: "\0" + value } : undefined;
   }
-  if (
-    !remote ||
-    ![
-      "http:",
-      "https:",
-      "ssh:",
-      "git:",
-      "ftp:",
-      "ftps:",
-      "git+ssh:",
-      "ssh+git:",
-    ].includes(remote.url.protocol)
-  )
+  if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
   const { url, path, scpStyle } = remote;
-  const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+  const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
     ssh &&
@@ -146,24 +161,35 @@ function remoteRepository(
     url.port === "443";
   const hostname = githubSshOverHttps ? "github.com" : url.hostname;
   const port =
-    githubSshOverHttps ||
-    (ssh && url.port === "22") ||
-    (url.protocol === "git:" && url.port === "9418") ||
-    (url.protocol === "ftp:" && url.port === "21") ||
-    (url.protocol === "ftps:" && url.port === "990")
+    githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
   const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  const address = `${protocol}//${hostname}${port ? `:${port}` : ""}/${path}`;
-  const suffix = bound ? /[?#].*$/su.exec(value)?.[0] : undefined;
-  // A Git URI's query and fragment are part of its upload-pack path.
-  const repository =
-    suffix && !scpStyle && (ssh || url.protocol === "git:")
-      ? key(address + suffix).split(/[?#]/u, 1)[0]!
-      : key(address);
-  // Git unescapes non-NUL URI bytes before upload-pack; SCP paths are literal.
+  const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
+  if (!bound) return { key: key(origin + path) };
+
+  if (!ssh && url.protocol !== "git:") {
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      // libcurl and WHATWG differ on backslashes and encoded dot segments.
+      const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
+        value,
+      );
+      if (!raw || /\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+        return { key: "\0" + value };
+    }
+    const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
+    // HTTP sends the query and omits fragment text from repository requests.
+    if (suffix && !["http:", "https:"].includes(url.protocol))
+      return { key: key(origin + path) + "\0" };
+    return {
+      key:
+        key(origin + path) + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
+    };
+  }
+
+  // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
   const literal = (raw: string) => {
     const bytes = Buffer.from(raw).toString("latin1");
     return scpStyle
@@ -172,69 +198,64 @@ function remoteRepository(
           String.fromCharCode(parseInt(hex, 16)),
         );
   };
-  // Git passes SSH paths to upload-pack before URL dot-segment normalization.
-  const sshPath = scpStyle ? path : value.replace(/^[^:]+:\/\/[^/]*/u, "");
+  if (!scpStyle && !transport) return { key: value };
+  const gitPath = literal(transport?.[2] ?? path);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
-    : /^[^:]+:\/\/([^/]*)@/u.exec(value)?.[1];
-  const account =
-    bound &&
-    ssh &&
-    login &&
-    (/^\/?~(?:\/|$)/u.test(literal(sshPath)) ||
-      (scpStyle && !/^[~/]/u.test(path)))
-      ? literal(login)
-      : undefined;
-  if (suffix === undefined) return { key: repository, account };
-  if (["http:", "https:"].includes(url.protocol)) {
-    // Git appends a slash to the URL and omits fragment text from HTTP requests.
-    return {
-      key: repository + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
-    };
-  }
-  if (!ssh && url.protocol !== "git:") return { key: `${repository}\0` };
+    : /^(.*)@/u.exec(authority ?? "")?.[1];
+  const homeRelative =
+    /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
+  const suffix = /[?#].*$/su.exec(gitPath);
+  // Express upload-pack bytes as a URL path for comparison with the HTTP source.
+  const name = gitPath
+    .slice(0, suffix?.index)
+    .replace(/^\//u, "")
+    .replace(
+      /[%\x00-\x20\x7f-\xff]/gu,
+      (byte) =>
+        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
+    );
+  const repository = suffix
+    ? key(origin + name + "?") +
+      "\0" +
+      suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
+    : key(origin + name);
   return {
-    account,
-    key: `${repository}\0${literal(suffix)
-      .replace(/\/$/u, "")
-      .replace(/\.git$/u, "")}`,
+    key: repository,
+    account: ssh && login ? literal(login) : undefined,
+    // GitHub serves the same repository path through its SCP and SSH URLs.
+    homeRelative:
+      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
+        ? homeRelative
+        : undefined,
   };
 }
 
-/** @internal */
-export async function bareMetadataRoots(
+async function bareMetadataRoots(
   repository: string,
   signal?: AbortSignal,
-  forCloudMap = false,
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
   for (;;) {
     signal?.throwIfAborted();
-    const present = async (name: string, kind: "isFile" | "isDirectory") => {
-      const entry = await abortable(
+    const present = async (name: string) =>
+      (await abortable(
         () => lstat(join(directory, name)).catch(nullIfMissingPath),
         signal,
-      );
-      return (
-        entry !== null &&
-        (!forCloudMap || entry[kind]() || entry.isSymbolicLink())
-      );
-    };
+      )) !== null;
     // Git also discovers bare repositories and linked metadata without .git.
     const head = await abortable(
       () => lstat(join(directory, "HEAD")).catch(nullIfMissingPath),
       signal,
     );
     if (
-      (forCloudMap && (await hasGitCommonDirectoryLayout(directory))) ||
-      ((head?.isFile() || head?.isSymbolicLink()) &&
-        ((await present("commondir", "isFile")) ||
-          ((await present("objects", "isDirectory")) &&
-            (await present("refs", "isDirectory")))))
+      (head?.isFile() || head?.isSymbolicLink()) &&
+      ((await present("commondir")) ||
+        ((await present("objects")) && (await present("refs"))))
     )
       roots.push(directory);
-    const parent = parentDirectory(directory);
+    const parent = dirname(directory);
     if (parent === directory) return roots;
     directory = parent;
   }
@@ -376,7 +397,7 @@ async function localGitProtectionRoots(
           ))
             roots.add(associated);
       }
-      const parent = parentDirectory(directory);
+      const parent = dirname(directory);
       if (parent === directory) break;
       directory = parent;
     }
@@ -488,9 +509,13 @@ async function requireMatchingRepository(
     if (
       !target ||
       !targets.some(
-        ({ key, account }) =>
+        ({ key, account, homeRelative }) =>
           key === target.key &&
-          (account === undefined ||
+          (homeRelative === undefined ||
+            target.homeRelative === undefined ||
+            homeRelative === target.homeRelative) &&
+          ((homeRelative === false && target.homeRelative === false) ||
+            account === undefined ||
             target.account === undefined ||
             account === target.account),
       )
@@ -597,23 +622,48 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  const bound = boundScannerRepositories(
+  const blackDuck = blackDuckReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+  );
+  const veracode = veracodeReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+  );
+  const nativeSources = new Set<string>();
+  for (const { source_finding_id: id, evidence } of current.findings) {
+    const url = evidence.details?.repository?.url;
+    if (url) sources.set(url, { url });
+    const source = blackDuck.get(id) ?? veracode.get(id);
+    if (
+      source &&
+      (hasBlackDuckEvidence(evidence.source_data) ||
+        hasVeracodeEvidence(evidence.source_data, id))
+    )
+      nativeSources.add(source.url);
+  }
+  const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
     "local",
     options.inspectorProjectMap,
   );
-  const isNative = repositoryBoundScanners[options.provider]?.hasEvidence;
-  const nativeSources = new Set<string>();
-  for (const { source_finding_id: id, evidence } of current.findings) {
-    const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
-    const source = bound.get(id);
-    if (source && isNative?.(evidence.source_data, id))
-      nativeSources.add(source.url);
+  if (inspector) {
+    const platform = inspector.platform ?? options.provider;
+    const native = remoteRepository(inspector.url, platform, true);
+    for (const url of sources.keys()) {
+      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
+        );
+    }
   }
   for (const source of [
-    ...bound.values(),
+    ...(inspector ? [inspector] : []),
+    ...blackDuck.values(),
+    ...veracode.values(),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
     // A reader's platform must not loosen an operator-supplied Inspector map.

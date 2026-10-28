@@ -11,8 +11,9 @@ import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
-import { repositoryBoundScanners } from "./scanner-repository-provenance.js";
-import { readScannerJson } from "./scanner-import.js";
+import { readVeracodeFindings } from "./veracode-findings.js";
+import { readBlackDuckFindings } from "./blackduck-findings.js";
+import { readInspectorFindings } from "./inspector-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -118,18 +119,26 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  const scanner = repositoryBoundScanners[options.provider];
-  if (scanner) {
+  if (
+    options.provider === "inspector" ||
+    options.provider === "blackduck" ||
+    options.provider === "veracode"
+  ) {
     const url = options.sourceRepositoryUrl ?? "";
-    return {
-      findings: scanner.normalize(
-        await readScannerJson(path),
-        url,
-        target,
-        options.inspectorProjectMap,
-      ),
-      sourceRepositories: [{ url }],
-    };
+    const read =
+      options.provider === "veracode"
+        ? readVeracodeFindings
+        : readBlackDuckFindings;
+    const findings =
+      options.provider === "inspector"
+        ? await readInspectorFindings(
+            path,
+            url,
+            target,
+            options.inspectorProjectMap,
+          )
+        : await read(path, url, target);
+    return { findings, sourceRepositories: [{ url }] };
   }
   const publication = await readVendorFindingsForPublication(path, target);
   // Raw package exports keep repository-branch URLs in retained source data.

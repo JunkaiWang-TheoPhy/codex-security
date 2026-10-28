@@ -33,7 +33,7 @@ Local records remain unassessed source evidence, separate from `findings list` a
 
 ## Amazon Inspector repository findings
 
-Use `--provider inspector` for a complete Inspector2 ListFindings JSON export from one Code Security repository. Supply `--source-repository-url`. If the export identifies the repository by its project ARN and name, supply `--inspector-project-map FILE` with an operator-verified binding from that full ARN to the canonical repository URL. For local imports, keep the map outside the selected repository and any checkout containing that repository or the report. For Cloud, store it outside all Git checkouts. The CLI also rejects paths through recognizable Git metadata. Supply it again on replay. A matching native repository URL also supports import without a map. Preview repository package and code findings with a stable source key for the account, Region and repository. Self-managed GitLab imports use the local destination.
+Use `--provider inspector` and `--source-repository-url` with a complete Inspector2 ListFindings export for one Code Security repository. If it contains only a project ARN and name, pass the full `--inspector-project-arn ARN` verified for that Git URL in the SCM integration. Supply the same ARN when resuming a pending Cloud submission. Self-managed GitLab is supported locally.
 
 ## Black Duck SCA project-version vulnerabilities
 

@@ -1,3 +1,5 @@
+import { CodexSecurityError } from "./errors.js";
+import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
@@ -50,18 +52,31 @@ export function declaredScannerRepositoryUrl(
 
 /** A native application or project version maps to one source repository per report. */
 export function repositoryScopeValidator(
+  scanner: { provider: Provider; label: string; scope: string },
+  hasEvidence: (data: unknown, id: string) => boolean,
   retainedRepository: (
     data: unknown,
     id: string,
     target: ExternalImportTarget,
   ) => { url: string; scope?: string } | undefined,
-  scopeError: string,
 ) {
   return (
+    provider: Provider,
     findings: readonly ExternalFinding[],
     target: ExternalImportTarget,
   ): Map<string, ExternalSourceRepository> => {
     const repositories = new Map<string, ExternalSourceRepository>();
+    if (provider !== scanner.provider) {
+      if (
+        findings.some(({ evidence, source_finding_id }) =>
+          hasEvidence(evidence.source_data, source_finding_id),
+        )
+      )
+        throw new CodexSecurityError(
+          `Retained ${scanner.label} evidence requires the ${scanner.provider} provider.`,
+        );
+      return repositories;
+    }
     const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
     let scope: string | undefined;
     let repository: string | undefined;
@@ -76,7 +91,9 @@ export function repositoryScopeValidator(
       const repositoryKey = key(retained.url);
       if (retained.scope) {
         if (scope && (scope !== retained.scope || repository !== repositoryKey))
-          throw new Error(scopeError);
+          throw new Error(
+            `${scanner.label} occurrences must belong to the same ${scanner.scope} and source repository.`,
+          );
         scope = retained.scope;
         repository = repositoryKey;
       }

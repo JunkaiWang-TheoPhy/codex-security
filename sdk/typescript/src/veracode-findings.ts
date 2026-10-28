@@ -152,8 +152,9 @@ function retainedRepository(
 }
 
 export const veracodeReportRepositories = repositoryScopeValidator(
+  { provider: "veracode", label: "Veracode", scope: "application" },
+  hasVeracodeEvidence,
   retainedRepository,
-  "Veracode occurrences must belong to the same application and source repository.",
 );
 
 function selection(
