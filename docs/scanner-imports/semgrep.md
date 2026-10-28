@@ -1,7 +1,8 @@
 # Import Semgrep findings
 
 Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
-See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
+and [how saved scanner reports map to imported evidence](schema-guide.md).
 
 Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
@@ -121,8 +122,8 @@ Read back both with `codex-security findings imported . --format json` before
 selecting evidence for assessment. A current checkout does not establish the
 report's revision or branch.
 
-The adapter accepts SAST only. Select SAST rules or a Code-only CI scan, since
-SARIF may omit enough product metadata to distinguish Secrets. Identifiable
+CLI JSON and SARIF imports accept SAST only. Select SAST rules or a Code-only CI
+scan, since SARIF may omit enough product metadata to distinguish Secrets. Identifiable
 Supply Chain and Secrets records are excluded. Reports with scan errors,
 unsuccessful SARIF invocations or scan-error notifications are rejected. The
 preview reports invalid findings and duplicate source identities before import.
