@@ -25,7 +25,7 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { parseGitRemote } from "./git-remote.js";
+import { normalizeGitRepositoryUrl, parseGitRemote } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -553,7 +553,7 @@ export async function prepareNormalizedLocalImport(
     // A hosted project identifies one repository even when the checkout has multiple remotes.
     const expected = repositoryUrlKey(hostedRepository);
     for (const url of sources.keys())
-      if (repositoryUrlKey(url) !== expected)
+      if (repositoryUrlKey(normalizeGitRepositoryUrl(url)) !== expected)
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );

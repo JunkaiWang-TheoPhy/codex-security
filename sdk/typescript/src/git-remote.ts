@@ -53,11 +53,13 @@ export function normalizeGitRepositoryUrl(
   if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
     return `https://${scp[2]}/${scp[3]}`;
   // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
+  const ssh = /^ssh:\/\/([^/]+)@[^/]+(\/.*)$/u.exec(repository);
   if (ssh) {
     // Git retains these bytes, but URL parsing would erase them from the alias.
     if (/[\t\r\n]/u.test(repository)) return repository;
     const url = new URL(repository);
+    // Git sends the literal SSH path, including dot segments, query and fragment.
+    if (url.pathname !== ssh[2]) return repository;
     const hostname = url.hostname.toLowerCase();
     const githubSsh =
       isGitHubSshUser(ssh[1]!, hostname) &&

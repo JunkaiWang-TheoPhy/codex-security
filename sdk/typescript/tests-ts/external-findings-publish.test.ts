@@ -1068,6 +1068,22 @@ test.each(["semgrep", "snyk"] as const)(
       provider === "semgrep"
         ? normalizeSemgrepPlatformFindings(platformReport())
         : normalizeSnykIssues(snykRestFixture("code", { sourceRepositoryUrl }));
+    const local = await localFindingsFixture({ remote: sourceRepositoryUrl });
+    cleanups.push(local.dispose);
+    const alias = structuredClone(input.findings[0]!);
+    alias.source_finding_id = "typed-only";
+    delete alias.evidence.source_data;
+    alias.evidence.details!.repository!.url =
+      provider === "snyk"
+        ? "git@github.com:example/project.git"
+        : "ssh://git@github.com/example/project.git";
+    const localOptions = { ...options, provider, repository: local.repository };
+    const localDeps = { environment: local.environment };
+    const mixed = { ...input, read: 2, findings: [...input.findings, alias] };
+    expect(
+      (await prepareNormalizedLocalImport(mixed, localOptions, localDeps))
+        .preview.findings,
+    ).toHaveLength(2);
     input.findings[0]!.evidence.details!.repository!.url = foreign;
     const cloud = await fixture([], foreign);
     await expect(
@@ -1078,8 +1094,7 @@ test.each(["semgrep", "snyk"] as const)(
       ),
     ).rejects.toThrow("does not match");
     expect(cloud.posts).toHaveLength(0);
-    const local = await localFindingsFixture({ remote: sourceRepositoryUrl });
-    cleanups.push(local.dispose);
+
     await promisify(execFile)("git", [
       "-C",
       local.repository,
@@ -1093,8 +1108,8 @@ test.each(["semgrep", "snyk"] as const)(
       await expect(
         prepareNormalizedLocalImport(
           input,
-          { ...options, provider, repository },
-          { environment: local.environment },
+          { ...localOptions, repository },
+          localDeps,
         ),
       ).rejects.toThrow("does not match");
   },

@@ -205,13 +205,8 @@ function checkRemote(remote: unknown, selected: Scope, github: boolean) {
     url,
     github ? selected.sourceRepositoryUrl : undefined,
   );
-  // A URL parser collapses dot segments which Git sends literally to upload-pack.
-  const sshPath = /^ssh:\/\/[^/]+(\/.*)$/u.exec(url)?.[1];
   if (
     /[?#]/u.test(url) ||
-    (sshPath !== undefined &&
-      normalized !== url &&
-      new URL(normalized).pathname !== sshPath) ||
     repositoryUrlKey(normalized) !==
       repositoryUrlKey(selected.sourceRepositoryUrl)
   )
