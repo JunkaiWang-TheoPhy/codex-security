@@ -34,7 +34,10 @@ import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import { boundScannerRepositories } from "./scanner-repository-provenance.js";
+import {
+  boundScannerRepositories,
+  repositoryBoundScanners,
+} from "./scanner-repository-provenance.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -888,10 +891,10 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    // Inspector requests must keep the ARN and host binding validated above,
-    // including when an SDK caller edits the preview before publishing.
-    preview:
-      options.provider === "inspector" ? structuredClone(preview) : preview,
+    // Keep validated repository bindings intact if the caller edits the preview.
+    preview: repositoryBoundScanners[source.provider]
+      ? structuredClone(preview)
+      : preview,
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
