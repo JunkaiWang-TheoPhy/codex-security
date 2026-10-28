@@ -262,6 +262,7 @@ export class DeepScanWorkerRunner {
     );
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
+      repairEvidence: request.repairEvidence,
       id: reducerId,
       scanId: run.scanId,
       workerIds,

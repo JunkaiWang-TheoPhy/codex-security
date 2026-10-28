@@ -5,9 +5,14 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
 import { buildServer, applicationRoot } from "./build-server.ts";
-import { importModule } from "./import-module.ts";
 import { FakeExecutor } from "./deep_scan_coordinator_fixture.ts";
-import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
+import {
+  createScanArtifactContext,
+  DeepScanCoordinator,
+  readFixtureCoverage,
+  recordCodexSecurityScanDraftViaWorkbench,
+  WorkbenchDeepScanStore,
+} from "./deep_scan_coverage_fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { startMcpClient } from "./support/mcp-client.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -63,38 +68,6 @@ await buildServer(serverPath, {
     },
   ],
 });
-const {
-  WorkbenchDeepScanStore,
-  DeepScanCoordinator,
-  createScanArtifactContext,
-  recordCodexSecurityScanDraftViaWorkbench,
-} = (await importModule({
-  stdin: {
-    contents: `
-      export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
-      export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";
-      export { createScanArtifactContext } from "./src/artifact-context.ts";
-      export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";
-    `,
-    resolveDir: applicationRoot,
-  },
-  loader: { ".md": "text" },
-})) as Pick<
-  typeof import("../src/deep-scan/store.ts"),
-  "WorkbenchDeepScanStore"
-> &
-  Pick<
-    typeof import("../src/deep-scan/coordinator.ts"),
-    "DeepScanCoordinator"
-  > &
-  Pick<
-    typeof import("../src/artifact-context.ts"),
-    "createScanArtifactContext"
-  > &
-  Pick<
-    typeof import("../src/artifact-scan-draft.ts"),
-    "recordCodexSecurityScanDraftViaWorkbench"
-  >;
 
 for (const { route, saturated, lateFailure } of [
   { route: "plugin", saturated: false, lateFailure: false },
@@ -359,6 +332,29 @@ for (const { route, saturated, lateFailure } of [
         });
         assert.notEqual(result.isError, true, JSON.stringify(result));
       };
+    }
+    if (route === "plugin" && !saturated) {
+      const source = path.join(targetPath, "fixture.py");
+      const selectedSource = await readFile(source);
+      const selectedManifest = await readFile(manifestPath);
+      await writeFile(source, "connection.close()\n");
+      await assert.rejects(
+        resume({ scanId: run.scanId }),
+        /Scan target contents changed/,
+      );
+      const unchanged = await store.get(run.scanId, owner);
+      assert.equal(unchanged.status, "succeeded");
+      assert.equal(
+        unchanged.coordinatorGeneration,
+        before.coordinatorGeneration,
+      );
+      assert.deepEqual(unchanged.persistedWorkers, before.persistedWorkers);
+      assert.deepEqual(
+        (await readJson(parentFindingsPath)).findings,
+        originalFindings,
+      );
+      assert.deepEqual(await readFile(manifestPath), selectedManifest);
+      await writeFile(source, selectedSource);
     }
     await resume(
       route === "headless continuation"

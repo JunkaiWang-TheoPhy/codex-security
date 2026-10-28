@@ -18,9 +18,10 @@ import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import _validate_finding_evidence, manifest_is_sealed
 from workbench.handoff import require_current_continuation
+from workbench.saved_sources import selected_reducer_result_path
 from workbench.storage import create_private_directory
 from workbench_source_scopes import capture_source_scopes
-from workbench_target import directory_snapshot_regular_file_count
+from workbench_target import directory_snapshot_regular_file_count, require_scan_target_unchanged
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
@@ -92,6 +93,7 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     claim_deep_dedup.add_argument("--prompt-path", required=True)
     claim_deep_dedup.add_argument("--artifact-dir", required=True)
     claim_deep_dedup.add_argument("--input-worker-id", action="append", default=[])
+    claim_deep_dedup.add_argument("--check-target", action="store_true")
     claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
 
     commit_deep_dedup = subparsers.add_parser("commit-deep-scan-dedup")
@@ -426,12 +428,27 @@ def selected_evidence_repair_required(scan: sqlite3.Row, run: sqlite3.Row) -> bo
         return False
     if manifest_is_sealed(manifest["scan"]):
         return False
+    return findings_need_evidence_repair(draft["findings"])
+
+
+def findings_need_evidence_repair(findings: list[dict[str, Any]]) -> bool:
     try:
-        for index, finding in enumerate(draft["findings"]):
+        for index, finding in enumerate(findings):
             _validate_finding_evidence(finding, index)
     except saved_results.ContractError:
         return True
     return False
+
+
+def require_selected_repair_target(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+    # A complete reducer can republish saved evidence without opening the checkout.
+    if result_path := selected_reducer_result_path(connection, scan["id"]):
+        scan_dir = Path(scan["scan_dir"])
+        reducer, _, _ = saved_results._read_saved_result(
+            scan_dir, Path(result_path).relative_to(scan_dir).as_posix(), scan["id"], kind="dedup"
+        )
+        if findings_need_evidence_repair(reducer["findings"]):
+            require_scan_target_unchanged(scan)
 
 
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
@@ -1081,6 +1098,7 @@ def claim_deep_scan_coordinator_locked(
         if selected_evidence_repair_required(scan, run):
             if args.coordinator_generation is not None:
                 require_current_coordinator(run, args)
+            require_selected_repair_target(connection, scan)
             # Keep the selected artifacts, stopping reason and discovery accounting.
             # The reason preserves saturation omissions across repair and crashes.
             # A new generation fences the previous publisher before repair can write.
@@ -1105,11 +1123,15 @@ def claim_deep_scan_coordinator_locked(
                 **deep_scan_result(connection, scan_id),
                 "coordinatorDisposition": "observing",
             }
+        elif run["coordinator_generation"] > 1 or run["phase"] != "setup":
+            disposition = "adopted"
         else:
-            adopted = run["coordinator_generation"] > 1 or run["phase"] != "setup"
-            if adopted:
-                recover_expired_coordinator(connection, run, timestamp)
-            disposition = "adopted" if adopted else "claimed"
+            disposition = "claimed"
+
+        if run["manifest_path"] and run["completed_at"]:
+            require_selected_repair_target(connection, scan)
+        if disposition == "adopted":
+            recover_expired_coordinator(connection, run, timestamp)
 
         connection.execute(
             """
@@ -1516,6 +1538,8 @@ def claim_deep_scan_dedup(
     with connection:
         run, scan = require_running_deep_scan(connection, scan_id)
         require_current_coordinator(run, args)
+        if args.check_target:
+            require_scan_target_unchanged(scan)
         prompt_path = deep_scan_path(scan, args.prompt_path, "Dedup prompt path", kind="file")
         artifact_dir = deep_scan_path(
             scan, args.artifact_dir, "Dedup artifact directory", kind="directory"
