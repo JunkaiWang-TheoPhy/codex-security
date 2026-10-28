@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Amazon Inspector, Black Duck SCA, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Amazon Inspector, Black Duck SCA, Veracode, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
 ---
 
 # Publish external findings
@@ -38,6 +38,10 @@ Use `--provider inspector` for a complete Inspector2 ListFindings JSON export fr
 ## Black Duck SCA project-version vulnerabilities
 
 Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.
+
+## Veracode Static Analysis policy findings
+
+Use `--provider veracode` with all Findings API pages for one application’s STATIC policy findings. Verify that the application maps to the repository named by `--source-repository-url`. Keep the source key stable for that application and preview the import before writing.
 
 ## Endor Labs findings
 
