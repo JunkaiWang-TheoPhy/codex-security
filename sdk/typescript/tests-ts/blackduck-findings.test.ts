@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
-  blackDuckEvidenceRepositoryUrls,
+  blackDuckReportRepositories,
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
 } from "../src/blackduck-findings.js";
@@ -14,6 +14,22 @@ import {
 } from "./support/blackduck-import-fixtures.js";
 
 const repository = "https://vcs.example.test/team/application";
+
+function retainedUrl(
+  source_data: Record<string, unknown> | undefined,
+  source_finding_id = "sdk-key",
+) {
+  const repositories = blackDuckReportRepositories(
+    [
+      {
+        source_finding_id,
+        evidence: { title: "Example", severity: "unknown", source_data },
+      },
+    ],
+    "cloud",
+  );
+  return repositories.get(source_finding_id)?.url;
+}
 
 test("retains the complete BOM row, project version and caller's repository, not a fix or assessment", () => {
   const row = {
@@ -68,13 +84,6 @@ test("retains the complete BOM row, project version and caller's repository, not
     row: original,
   });
   expect(evidence.details).toBeUndefined();
-  evidence.details = {
-    kind: "sast",
-    repository: { url: "https://vcs.example.test/team/elsewhere" },
-  };
-  expect(blackDuckEvidenceRepositoryUrls(evidence.source_data)).toEqual([
-    repository,
-  ]);
   row.vulnerabilityWithRemediation.extension.values.push(99);
   expect(evidence.source_data?.["row"]).toEqual(original);
 });
@@ -371,48 +380,38 @@ test.each([
   expect(() =>
     normalizeBlackDuckFindings(blackDuckBomReport([]), source),
   ).toThrow(/source-repository-url/);
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls({ sourceRepositoryUrl: source }),
-  ).toThrow(/source-repository-url/);
+  expect(() => retainedUrl({ sourceRepositoryUrl: source })).toThrow(
+    /source-repository-url/,
+  );
 });
 
 test("accepts a nested repository URL and retains it independently of the mutable evidence projection", () => {
   const url =
     "http://vcs.example.test:8080/org/subgroup/Example%20Repository.git/";
-  const data = normalizeBlackDuckFindings([blackDuckBomRow()], url).findings[0]!
-    .evidence.source_data;
-  expect(blackDuckEvidenceRepositoryUrls(data)).toEqual([url]);
+  const finding = normalizeBlackDuckFindings([blackDuckBomRow()], url)
+    .findings[0]!;
+  const data = finding.evidence.source_data;
+  expect(retainedUrl(data, finding.source_finding_id)).toBe(url);
   const otherComponent = blackDuckBomRow();
   otherComponent.componentVersion = otherComponent.componentVersion.replace(
     "component-a",
     "component-b",
   );
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls({ ...data, row: otherComponent }),
-  ).toThrow(/contradicts/);
-  // SDK callers may store project metadata without supplying a native BOM record.
-  expect(
-    blackDuckEvidenceRepositoryUrls({
-      projectVersionUrl: data?.["projectVersionUrl"],
-    }),
-  ).toEqual([]);
-  expect(
-    blackDuckEvidenceRepositoryUrls(
-      {
-        sourceRepositoryUrl: url,
-        projectVersionUrl: data?.["projectVersionUrl"],
-      },
-      "sdk-key",
-    ),
-  ).toEqual([url]);
-  expect(blackDuckEvidenceRepositoryUrls({ arbitrary: "value" })).toEqual([]);
-  expect(blackDuckEvidenceRepositoryUrls(undefined)).toEqual([]);
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls({ row: blackDuckBomRow() }),
-  ).toThrow(/source-repository-url/);
+  expect(() => retainedUrl({ ...data, row: otherComponent })).toThrow(
+    /contradicts/,
+  );
+  const projectVersionUrl = data?.["projectVersionUrl"];
+  expect(retainedUrl({ projectVersionUrl })).toBeUndefined();
+  expect(retainedUrl({ sourceRepositoryUrl: url, projectVersionUrl })).toBe(
+    url,
+  );
+  expect(retainedUrl(undefined)).toBeUndefined();
+  expect(() => retainedUrl({ row: blackDuckBomRow() })).toThrow(
+    /source-repository-url/,
+  );
   const row = blackDuckBomRow();
   expect(() =>
-    blackDuckEvidenceRepositoryUrls({
+    retainedUrl({
       sourceRepositoryUrl: repository,
       projectVersionUrl:
         "https://scanner.example.test/api/projects/project-a/versions/release-b",
@@ -431,27 +430,16 @@ test("normalized input cannot relabel one native occurrence with another finding
     repository,
   ).findings;
   const data = first!.evidence.source_data;
-  expect(
-    blackDuckEvidenceRepositoryUrls(data, first!.source_finding_id),
-  ).toEqual([repository]);
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls(data, second!.source_finding_id),
-  ).toThrow(/source finding ID/);
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls(
-      { ...data, row: null },
-      second!.source_finding_id,
-    ),
-  ).toThrow();
-  expect(() =>
-    blackDuckEvidenceRepositoryUrls(
-      { arbitrary: true },
-      second!.source_finding_id,
-    ),
-  ).toThrow();
-  expect(
-    blackDuckEvidenceRepositoryUrls({ arbitrary: true }, "sdk-id"),
-  ).toEqual([]);
+  expect(retainedUrl(data, first!.source_finding_id)).toBe(repository);
+  expect(() => retainedUrl(data, second!.source_finding_id)).toThrow(
+    /source finding ID/,
+  );
+  for (const incomplete of [{ ...data, row: null }, { arbitrary: true }]) {
+    expect(() => retainedUrl(incomplete, first!.source_finding_id)).toThrow(
+      /retained Black Duck/,
+    );
+  }
+  expect(retainedUrl({ arbitrary: true })).toBeUndefined();
 });
 
 test("reads JSON and gzip by content and rejects a truncated collection in either target", async () => {

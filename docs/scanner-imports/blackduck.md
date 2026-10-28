@@ -1,34 +1,28 @@
 # Import Black Duck SCA repository vulnerabilities
 
-Use `--provider blackduck` for vulnerable BOM components from **one Black Duck
-SCA project version that represents one source repository**. Confirm that
-mapping in your scan configuration first: the Black Duck project name, version
-name, API host, and component download URL are not Git repository identities.
-Do not import an aggregate product BOM, an image-only scan, license violations,
-or a global advisory catalog as repository findings.
+Use `--provider blackduck` to import vulnerable BOM components from one Black Duck
+SCA project version. Check the scan configuration to confirm which Git repository
+the project version represents. Project names, API hosts and component download
+URLs cannot establish that mapping. Aggregate product BOMs, image-only scans,
+license violations and global advisory catalogs are outside this import.
 
-## Acquire a complete selection
+## Export a complete collection
 
-Use a read-only Black Duck SCA token and your deployment's API documentation.
-The project version's `vulnerable-components` relation resolves to
-`/api/projects/{projectId}/versions/{versionId}/vulnerable-bom-components`.
-Request **BOM-6**: `application/vnd.blackducksoftware.bill-of-materials-6+json`.
-Do not substitute BOM-8 or a generic inventory: those row shapes are not
-supported. If the deployment cannot serve BOM-6, stop rather than treating
-excluded rows as an empty vulnerability backlog. The official
-Python package is `blackduck`, not the Detect scan launcher. Fetching this
-collection does not start a scan. Treat the export as sensitive.
+Use a read-only token and request the project version’s `vulnerable-components`
+relation with media type `application/vnd.blackducksoftware.bill-of-materials-6+json`.
+The importer requires BOM-6. If the deployment serves only BOM-8 or another
+inventory format, stop the export.
 
-The following Python example uses the vendor client. Set `BLACKDUCK_URL` to
-your trusted HTTPS deployment, `BLACKDUCK_TOKEN` in a private environment,
-and `BLACKDUCK_PROJECT_ID` and `BLACKDUCK_VERSION_ID` to the two UUIDs.
-Install the vendor client in a trusted virtual environment outside the checkout.
-Save the example as a private script there and run it with the environment's
-interpreter in isolated mode, for example
-`/path/to/venv/bin/python -I /private/path/export.py`. This keeps checkout
-modules and `PYTHONPATH` off the import path while the token is available.
-Capture stdout to a private temporary file outside the checkout and rename it
-only after success.
+Install the vendor’s `blackduck` Python client in a trusted virtual environment
+outside the checkout. Set `BLACKDUCK_URL` to the deployment’s HTTPS URL,
+`BLACKDUCK_TOKEN` to the read-only token and `BLACKDUCK_PROJECT_ID` and
+`BLACKDUCK_VERSION_ID` to the two UUIDs. The client exchanges the token before
+reading the collection, so disable redirects for the entire session.
+
+Save the script outside the checkout and run it with
+`/path/to/venv/bin/python -I /private/path/export.py` to keep checkout modules
+and `PYTHONPATH` off the import path. Redirect stdout to a private temporary file
+and rename it after the script succeeds.
 
 ```python
 import json
@@ -94,17 +88,10 @@ while True:
 print(json.dumps({"_meta": {"href": url}, "totalCount": total, "items": items}))
 ```
 
-Keep the original rows. Never change `totalCount` to the number on the first
-page or import the output of a failed fetch. Offset pagination is not an atomic
-snapshot: if a BOM is changing during collection, export again after the scan
-settles. A deliberately selected array of native rows is also supported when
-each row identifies the same project version. An array says nothing about the
-rest of the backlog.
-
-Use the canonical HTTPS deployment URL, not a redirector. The vendor client
-exchanges its API token for a bearer token before reading the collection.
-Disabling redirects on the entire session also protects that authentication
-exchange; disabling them on only the collection GET is not sufficient.
+Keep the original rows and collection total. If the BOM changes during offset
+pagination, export it again after the scan finishes. To import only selected
+occurrences, supply an array of native rows that each identify the same project
+version.
 
 ## Preview and repeat
 
@@ -117,27 +104,20 @@ codex-security publish findings blackduck.json \
   --dry-run --format json
 ```
 
-Review the source, destination and exclusions; remove `--dry-run` to import.
-Use the same source key for subsequent exports from this deployment, project
-and version. A key does not filter exports or prove the Git mapping. Local
-imports require no Black Duck or Codex Cloud login. To publish, select an
-authorized GitHub repository with `--to cloud` on a deployment that accepts
-the `blackduck` source provider.
+Check the source, destination and excluded rows before repeating the command
+without `--dry-run`. Reuse the source key for later exports from this deployment,
+project and version. For Cloud, select an authorized GitHub repository with
+`--to cloud` on a deployment that accepts `blackduck`. Reading a saved report
+requires no Black Duck login. Local imports also require no Cloud login.
 
-| Source evidence                                                     | What Codex Security tracks                                                                                                                                 |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Project version, component version/origin, advisory source and name | A package vulnerability occurrence. Different origins and advisories must not collapse into a CVE-only record.                                             |
-| Component origin and native package coordinates                     | A supported package URL or origin coordinate supplies the package identity. With no supported coordinate, display metadata stays in the title and raw row. |
-| Advisory identifiers                                                | The reported advisory name and its distinct `relatedVulnerability` alias when present. The raw row retains the advisory source.                            |
-| Vendor severity and remediation status                              | Unassessed source evidence. A status such as `MITIGATED` is not a verified fix, a fixed package version, or a reason to delete the finding.                |
-| Matched-files link and BOM metadata                                 | Raw evidence. The importer does not follow links, fabricate file/line locations, or infer reachability from BOM membership.                                |
+Each occurrence is identified by its project version, component version, origin,
+advisory source and advisory name. Reimporting updates the occurrence when its
+evidence changes. Rows absent from a later export remain open.
 
-Replaying an occurrence retains its identity and updates changed evidence.
-The original vendor row retains the CWE and remediation status. The project
-version identifies the BOM and supplies no Git commit evidence.
-Missing rows in a later export do not close findings. For large backlogs, scope
-upstream to a single repository project version and keep the export for replay.
-No licensed tenant or hosted MCP is needed to read a previously saved report.
+Supported package URLs and origin coordinates supply the package identity. The
+importer retains the advisory name, any distinct related advisory and the native
+row, including its CWE, matched-files link and remediation status. It leaves the
+finding unassessed and does not infer a fix, Git revision or source location.
 
 References: [official Python REST client](https://github.com/blackducksoftware/hub-rest-api-python),
 [vendor example of vulnerable BOM components](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json).
