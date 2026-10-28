@@ -1,10 +1,58 @@
-import { lstat, realpath } from "node:fs/promises";
-import { relative } from "node:path";
+import { isUtf8 } from "node:buffer";
+import { lstat, readlink, realpath, stat } from "node:fs/promises";
+import { format, isAbsolute, parse, relative, sep } from "node:path";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
+import { parentDirectory } from "./windows-path.js";
 import { readRegularInputBytes } from "./prompt-files.js";
 import { isRecord } from "./record.js";
-import { gitProtectionRoots, relativePathIsOutside } from "./targets.js";
+import {
+  gitMarkerRoot,
+  nullIfMissingPath,
+  relativePathIsOutside,
+} from "./targets.js";
+
+// A directory link can enter a checkout below its root, and a second link can
+// leave it before the final report or map is reached.
+async function directoriesAlongPath(input: string, signal: AbortSignal) {
+  const paths = new Map([[input, input]]);
+  const directories = new Set<string>();
+  const visited = new Set<string>();
+  for (const [path, link] of paths) {
+    const metadata = await lstat(path).catch(nullIfMissingPath);
+    if (!metadata) {
+      // Open file descriptors can name an anonymous pipe or a deleted file.
+      await stat(link);
+      paths.set(parentDirectory(path), link);
+      continue;
+    }
+    directories.add(
+      await realpath(metadata.isDirectory() ? path : parentDirectory(path)),
+    );
+    for (
+      let ancestor = path;
+      !visited.has(ancestor);
+      ancestor = parentDirectory(ancestor)
+    ) {
+      visited.add(ancestor);
+      // A trailing separator makes lstat follow the link. Keep ".." intact.
+      const entry = format(parse(ancestor));
+      signal.throwIfAborted();
+      if (!(await lstat(entry)).isSymbolicLink()) continue;
+      const parent = await realpath(parentDirectory(entry));
+      directories.add(parent);
+      const bytes = await readlink(entry, { encoding: "buffer" });
+      if (!isUtf8(bytes))
+        throw new CodexSecurityError(
+          "Inspector project-map discovery requires UTF-8 symlink targets.",
+        );
+      const target = bytes.toString("utf8");
+      const raw = isAbsolute(target) ? target : `${parent}${sep}${target}`;
+      paths.set(raw, entry);
+    }
+  }
+  return directories;
+}
 
 /** Read an operator mapping independently of the report and local checkout. */
 export async function readInspectorProjectMap(
@@ -14,17 +62,26 @@ export async function readInspectorProjectMap(
   signal: AbortSignal,
 ): Promise<ReadonlyMap<string, string>> {
   const metadata = await lstat(path, { bigint: true });
-  const roots = await gitProtectionRoots(report, signal);
-  if (localRepository)
-    roots.push(
-      await realpath(localRepository),
-      ...(await gitProtectionRoots(localRepository, signal)),
-    );
-  const canonical = await realpath(path);
-  if (roots.some((root) => !relativePathIsOutside(relative(root, canonical)))) {
-    throw new CodexSecurityError(
-      "--inspector-project-map must be outside the selected repository and any checkout containing the repository or report.",
-    );
+  const protectedRoots = new Set<string>();
+  if (localRepository !== undefined)
+    protectedRoots.add(await realpath(localRepository));
+  for (const source of localRepository === undefined
+    ? [report]
+    : [report, localRepository]) {
+    for (const directory of await directoriesAlongPath(source, signal)) {
+      const checkout = await gitMarkerRoot(directory, signal, "outermost");
+      if (checkout !== null) protectedRoots.add(checkout);
+    }
+  }
+  const roots = [...protectedRoots];
+  if (roots.length) {
+    for (const directory of await directoriesAlongPath(path, signal))
+      if (
+        roots.some((root) => !relativePathIsOutside(relative(root, directory)))
+      )
+        throw new CodexSecurityError(
+          "--inspector-project-map must be outside the selected repository and any checkout containing the repository or report.",
+        );
   }
   const bytes = await readRegularInputBytes(path, roots, metadata);
   let data: unknown;

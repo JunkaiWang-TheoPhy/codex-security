@@ -1,19 +1,17 @@
 # Import Amazon Inspector repository vulnerabilities
 
-Use `--provider inspector` for findings from **Amazon Inspector Code Security**.
-It is not an importer for the EC2, ECR, or Lambda vulnerability inventory. A
-CVE on a running instance, an image tag matching a repository name, or a Lambda
-code finding does not establish that a source checkout contains vulnerable code.
+Use `--provider inspector` to import package and code vulnerabilities from one
+**Amazon Inspector Code Security** repository. The importer excludes EC2, ECR,
+Lambda and network findings.
 
 ## Export one repository
 
-First confirm that Inspector Code Security covers the repository in the intended
-AWS account and Region. Use a read-only principal with `inspector2:ListFindings`.
-The following example is for GitHub; substitute the account ID and repository
-resource ID from Inspector coverage. The resource ID
-distinguishes integrations that report the same project name. Keep the raw JSON
-outside the checkout. It may include source
-paths, account and integration identifiers, and other sensitive evidence.
+Confirm that Inspector covers the repository in the intended AWS account and
+Region. Use a read-only principal with `inspector2:ListFindings`. In this
+GitHub example, replace the account and repository resource IDs with values
+from Inspector coverage. The resource ID distinguishes integrations with the
+same project name. Save the export outside the checkout because it can contain
+source paths and account or integration identifiers.
 
 ```bash
 set -eu
@@ -30,12 +28,12 @@ AWS_PAGER="" aws inspector2 list-findings --region "$AWS_REGION" \
 mv "$out/inspector.json.tmp" "$out/inspector.json"
 ```
 
-Start at the first page and leave automatic pagination enabled. Do not use
-`--starting-token`, `--no-paginate`, `--max-items`, or a `--query` that drops
-continuation information. A response carrying a continuation token is
-incomplete; a response **without** a token can still be just the final page.
-The optional project-name filter is mutable after a rename. A narrower, intentional selection
-(for example, just active findings) is not a complete account history.
+Start at the first page and leave automatic pagination enabled. Omit
+`--starting-token`, `--no-paginate`, `--max-items` and any `--query` that
+drops continuation information. The importer rejects responses with a token,
+but the final page alone has no token. Prefer the resource ID over a project
+name that can change. Additional filters such as status limit which findings
+the export includes.
 
 ## Preview and import
 
@@ -43,8 +41,13 @@ Inspector can identify a repository by an opaque project ARN and a name such as
 `example/project`. That name can exist on several Git hosts. For these exports,
 maintain a JSON map keyed by the full Inspector project ARN. Verify each URL
 against the SCM repository connected to that project during integration setup.
-Keep the map in an operator-controlled location outside the checkout and the
-scanner export. A synthetic example is shown below.
+Keep the map outside any checkout containing the report, including directory
+links along the map path. For local imports, also keep it outside the selected
+repository and any enclosing checkout. You can store the map in a separate
+trusted configuration checkout and run the CLI from there.
+When a Cloud report comes from outside the source checkout, its repository URL
+does not identify the source checkout on disk. Verify that the map comes from
+a source you control independently of the scanned repository.
 
 ```json
 {
@@ -62,24 +65,30 @@ codex-security publish findings "$out/inspector.json" \
   --dry-run --format json
 ```
 
-Check the selected repository, finding IDs and exclusions. Remove `--dry-run`
-to approve the import. Keep the source key stable across repeated exports from
-the same account, Region and repository; it is a namespace, not a filter. Local
-import requires no AWS credentials or Codex Cloud login. For Cloud, use
-`--to cloud` and an authorized GitHub repository as `--repository`; the
-deployment must accept the `inspector` provider. A self-managed GitLab
-repository is not a substitute for a GitHub Cloud destination.
+Check the selected repository, finding IDs and exclusions, then remove
+`--dry-run` to import. Reuse the source key for exports from the same account,
+Region and repository, even if you change the filters. Local import requires
+no AWS credentials or Codex Cloud login. For Cloud, use `--to cloud` with an
+authorized GitHub repository and a deployment that accepts `inspector`. Use
+`--to local` for self-managed GitLab.
 
 When you supply `--inspector-project-map`, the selected project must have an
 entry. Its URL must agree with the declared source, any native URL, and the
-Cloud destination or configured local Git remote. Supply the trusted mapping again on replay,
-including when resuming a pending Cloud submission. SDK callers can pass the
-same bindings as an `inspectorProjectMap` option of type
-`ReadonlyMap<string, string>` when preparing a raw or normalized import.
+Cloud destination or configured local Git remote. On custom hosts, use the path casing in the map
+for the declared source and any native repository URL. Cloud matches its
+authorized GitHub or GitHub Enterprise destination using GitHub’s
+case-insensitive owner and repository names. Supply the mapping again when
+replaying an import or resuming a pending Cloud submission. SDK callers can pass the
+same bindings in the `inspectorProjectMap` option of type
+`ReadonlyMap<string, string>` when preparing a raw or normalized Inspector
+import. Other providers reject this option. Normalized imports retain their
+selected provider even when a source ID happens to match an Inspector ARN.
 
 You can omit the map for exports that already contain a matching native
 repository URL. Rows in the same verified project can supply the native URL
-and provider for rows that omit them. Keep each export scoped to one project.
+and provider for rows that omit them. On a custom GitHub Enterprise host,
+Cloud needs at least one row identifying the provider as GitHub. Keep each
+export scoped to one project.
 
 ## What gets tracked
 
@@ -99,11 +108,9 @@ or IaC when the report does not distinguish them.
 
 Reimporting an ARN under the same source key updates that occurrence. Findings
 omitted from a later selection are not deleted or marked fixed. For large
-backlogs, use nonoverlapping source filters, keep the original export, and
-review the preview before publication. Keep the same source key for selections
-from the same source; changing it creates a separate history.
-An empty local export is a no-op. Cloud does not submit a request for an
-empty or entirely excluded selection.
+backlogs, use nonoverlapping filters and keep the original export. An empty
+export leaves local history unchanged. Cloud skips publication when a
+selection is empty or all its findings are excluded.
 
 References: [AWS CLI: inspector2 list-findings](https://docs.aws.amazon.com/cli/latest/reference/inspector2/list-findings.html),
 [ListFindings API](https://docs.aws.amazon.com/inspector/v2/APIReference/API_ListFindings.html),

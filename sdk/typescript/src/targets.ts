@@ -18,7 +18,7 @@ import {
   resolveTrustedExecutable,
   type TrustedExecutable,
 } from "./trusted-executable.js";
-import { windowsUnsafePathComponent } from "./windows-path.js";
+import { parentDirectory, windowsUnsafePathComponent } from "./windows-path.js";
 
 import type { ScanMode } from "./scan-modes.js";
 export type { ScanMode } from "./scan-modes.js";
@@ -841,7 +841,7 @@ export async function gitMarkerRoot(
         !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
       )
         throw error;
-      const parent = dirname(candidate);
+      const parent = parentDirectory(candidate);
       if (parent === candidate) throw error;
       candidate = parent;
     }
@@ -883,7 +883,7 @@ async function walkGitMarkers(
       )
         throw error;
     }
-    const parent = dirname(current);
+    const parent = parentDirectory(current);
     if (parent === current) return root;
     current = parent;
   }

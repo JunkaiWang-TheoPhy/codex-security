@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -217,19 +218,17 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
   const map = join(f.root, "projects.json");
   await writeFile(map, mapping);
+  const command = (mapPath: string) => [
+    ...f.command.map((value) => (value === "wiz" ? "inspector" : value)),
+    "--source-repository-url",
+    inspectorRepositoryUrl,
+    "--inspector-project-map",
+    mapPath,
+    "--dry-run",
+  ];
   const run = async (path: string) => {
     const cli = createCliTest(main);
-    const code = await cli.runCli(
-      [
-        ...f.command.map((value) => (value === "wiz" ? "inspector" : value)),
-        "--source-repository-url",
-        inspectorRepositoryUrl,
-        "--inspector-project-map",
-        path,
-        "--dry-run",
-      ],
-      f.deps,
-    );
+    const code = await cli.runCli(command(path), f.deps);
     return { code, stdout: cli.stdout.text(), stderr: cli.stderr.text() };
   };
   const preview = await run("projects.json");
@@ -238,6 +237,24 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
     findings: [{ source_finding_id: report.findings[0]!.findingArn }],
     dryRun: true,
   });
+
+  if (process.platform === "linux") {
+    const output = execFileSync(
+      "sh",
+      [
+        "-c",
+        'cat | exec "$@"',
+        "sh",
+        process.execPath,
+        fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+        ...command(map).map((value) =>
+          value === "selected.json" ? "/dev/stdin" : value,
+        ),
+      ],
+      { cwd: f.root, env: f.deps.environment, input: JSON.stringify(report) },
+    );
+    expect(JSON.parse(output.toString()).findings).toHaveLength(1);
+  }
 
   const checkoutMap = join(f.repository, "projects.json");
   await writeFile(checkoutMap, mapping);
@@ -248,6 +265,19 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
     expect(rejected.code).not.toBe(0);
     expect(rejected.stderr).toContain("outside the selected repository");
   }
+  // A plain source directory can still own a link between two outside paths.
+  await rm(join(f.repository, ".git"), { recursive: true });
+  const config = join(f.root, "config");
+  execFileSync("git", ["init", "--quiet", config]);
+  await writeFile(join(config, "projects.json"), mapping);
+  const bridge = join(f.repository, "maps");
+  await symlink(config, bridge, "junction");
+  const view = join(f.root, "config-view");
+  await symlink(bridge, view, "junction");
+  expect((await run(join(config, "projects.json"))).code).toBe(0);
+  expect((await run(join(view, "projects.json"))).stderr).toContain(
+    "outside the selected repository",
+  );
   for (const contents of [
     Buffer.of(0xff),
     "[]",
@@ -261,27 +291,35 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   }
 });
 
-test("Cloud excludes maps from the report checkout even through directory links", async () => {
+test("Cloud permits a trusted configuration checkout and rejects maps controlled by the report checkout", async () => {
   const f = await fixture();
   const report = inspectorReport();
   const resource = report.findings[0]!.resources[0]!;
   resource.details.codeRepository.projectName = "example/project";
-  await writeFile(join(f.repository, "report.json"), JSON.stringify(report));
-  const linked = join(f.root, "linked-checkout");
-  await symlink(f.repository, linked, "junction");
+  const reportInSource = join(f.repository, "report.json");
+  await writeFile(reportInSource, JSON.stringify(report));
+  await writeFile(f.file, JSON.stringify(report));
   const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
-  await writeFile(join(f.repository, "map.json"), mapping);
-  const operator = join(f.root, "operator-config");
-  await mkdir(operator);
-  execFileSync("git", ["init", "--quiet", operator]);
-  await writeFile(join(operator, "map.json"), mapping);
-  const run = async (map: string) => {
+  const config = join(f.root, "config");
+  execFileSync("git", ["init", "--quiet", config]);
+  for (const directory of [f.root, f.repository, config])
+    await writeFile(join(directory, "projects.json"), mapping);
+  // This external alias enters the checkout and follows a second link back out.
+  const bridge = join(f.repository, "maps");
+  await symlink(f.root, bridge, "junction");
+  const alias = join(f.root, "alias");
+  await symlink(bridge, alias, "junction");
+  const run = async (
+    directory: string,
+    cwd = f.repository,
+    reportFile = reportInSource,
+  ) => {
     const cli = createCliTest(main);
     await cli.runCli(
       [
         "publish",
         "findings",
-        join(linked, "report.json"),
+        reportFile,
         "--provider",
         "inspector",
         "--to",
@@ -293,20 +331,45 @@ test("Cloud excludes maps from the report checkout even through directory links"
         "--source-key",
         "inspector/example/project",
         "--inspector-project-map",
-        map,
+        join(directory, "projects.json"),
         "--dry-run",
       ],
-      f.deps,
+      { ...f.deps, currentDirectory: () => cwd },
     );
     return cli.stderr.text();
   };
-  expect(await run(join(linked, "map.json"))).toContain(
-    "outside the selected repository",
-  );
-  // Only the independent map can pass normalization and reach Cloud configuration.
-  expect(await run(join(operator, "map.json"))).toContain(
+  if (process.platform !== "win32") {
+    const external = join(f.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "projects.json"), mapping);
+    const repeated = join(f.root, "repeated-separators");
+    await symlink(`${bridge}//external`, repeated);
+    expect(await run(repeated)).toContain("outside the selected repository");
+
+    const replacement = join(f.root, "\uFFFD");
+    const validAlias = join(f.root, "valid-alias");
+    await symlink(f.root, replacement);
+    await symlink(replacement, validAlias);
+    expect(await run(validAlias)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  }
+  if (process.platform === "linux") {
+    // The kernel traverses this checkout even though the target cannot round-trip through UTF-8.
+    const rawName = Buffer.concat([Buffer.from(f.root + "/"), Buffer.of(0xff)]);
+    await symlink(f.repository, rawName);
+    const rawAlias = join(f.root, "byte-alias");
+    await symlink(Buffer.concat([rawName, Buffer.from("/maps")]), rawAlias);
+    expect(await run(rawAlias)).toContain("UTF-8 symlink targets");
+  }
+  expect(await run(config)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  expect(await run(config, config, f.file)).toContain(
     "CODEX_SECURITY_CLOUD_BASE_URL",
   );
+  for (const directory of [f.repository, alias])
+    expect(await run(directory)).toContain("outside the selected repository");
+  // The report path enters the checkout and follows its "maps" link back out.
+  expect(
+    await run(f.repository, f.root, join(alias, "selected.json")),
+  ).toContain("outside the selected repository");
 });
 
 test("the Inspector map option cannot be used for other providers", async () => {
