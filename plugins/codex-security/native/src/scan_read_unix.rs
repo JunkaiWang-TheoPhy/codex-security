@@ -3,6 +3,7 @@ use std::{
     ffi::{CString, OsStr},
     fs::{self, File, Metadata},
     io::{self, Read},
+    mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -35,6 +36,41 @@ fn open_at(parent: RawFd, path: &OsStr, flags: i32) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+// Check the names against their held descriptors before returning the opened file.
+fn verify_components(
+    root: &File,
+    parts: &[&str],
+    directories: &[File],
+    file: &File,
+) -> io::Result<()> {
+    let mut parent = root;
+    for (part, held) in parts.iter().zip(directories.iter().chain([file])) {
+        let name = CString::new(*part)?;
+        let mut named = MaybeUninit::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                named.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let named = unsafe { named.assume_init() };
+        let held_metadata = held.metadata()?;
+        // dev_t and ino_t vary between Unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        if named.st_dev as u64 != held_metadata.dev() || named.st_ino as u64 != held_metadata.ino()
+        {
+            return Err(io::Error::other("Scan path changed while opening the file"));
+        }
+        parent = held;
+    }
+    Ok(())
 }
 
 impl ScanReadRootBackend {
@@ -93,15 +129,15 @@ impl ScanReadRootBackend {
                 "Expected a safe scan-relative POSIX path",
             ));
         }
-        let mut directory = self
+        let root = self
             .directory
             .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("Scan directory is closed"))?
-            .try_clone()
-            .map_err(|error| failure("Cannot hold scan directory", error))?;
+            .ok_or_else(|| napi::Error::from_reason("Scan directory is closed"))?;
+        let mut directories = Vec::new();
+        let mut parent = root.as_raw_fd();
         for part in &parts[..parts.len() - 1] {
-            directory = match open_at(
-                directory.as_raw_fd(),
+            let directory = match open_at(
+                parent,
                 OsStr::new(part),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             ) {
@@ -109,9 +145,11 @@ impl ScanReadRootBackend {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(failure("Cannot open scan file parent", error)),
             };
+            parent = directory.as_raw_fd();
+            directories.push(directory);
         }
         let file = match open_at(
-            directory.as_raw_fd(),
+            parent,
             OsStr::new(parts[parts.len() - 1]),
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         ) {
@@ -131,6 +169,8 @@ impl ScanReadRootBackend {
                 "Expected a regular non-symlink scan file",
             ));
         }
+        verify_components(root, &parts, &directories, &file)
+            .map_err(|error| failure("Cannot verify opened scan file", error))?;
         self.verify()?;
         Ok(Some(ScanReadFileBackend { file }))
     }
@@ -163,5 +203,39 @@ impl ScanReadRootBackend {
 impl ScanReadFileBackend {
     pub(crate) fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.file.read(buffer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifies_every_opened_component_including_the_leaf() -> io::Result<()> {
+        let scan =
+            std::env::temp_dir().join(format!("scan-read-components-{}", std::process::id()));
+        fs::create_dir(&scan)?;
+        let artifacts = scan.join("artifacts");
+        let moved = scan.join("moved");
+        fs::create_dir(&artifacts)?;
+        fs::write(artifacts.join("receipt"), "original")?;
+        let root = File::open(&scan)?;
+        let directories = [File::open(&artifacts)?];
+        let file = File::open(artifacts.join("receipt"))?;
+        let verify = || verify_components(&root, &["artifacts", "receipt"], &directories, &file);
+        verify()?;
+
+        fs::rename(&artifacts, &moved)?;
+        fs::create_dir(&artifacts)?;
+        fs::hard_link(moved.join("receipt"), artifacts.join("receipt"))?;
+        assert!(verify().is_err());
+
+        fs::remove_dir_all(&artifacts)?;
+        fs::rename(&moved, &artifacts)?;
+        fs::rename(artifacts.join("receipt"), artifacts.join("original"))?;
+        fs::write(artifacts.join("receipt"), "replacement")?;
+        assert!(verify().is_err());
+
+        fs::remove_dir_all(scan)
     }
 }
