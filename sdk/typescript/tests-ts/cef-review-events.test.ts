@@ -18,7 +18,7 @@ const records = readFileSync(
   "utf8",
 )
   .trimEnd()
-  .split("\n");
+  .split(/\r?\n/);
 const history = records[0]!;
 const fresh = records[1]!;
 const batch = JSON.parse(
