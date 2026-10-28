@@ -11,10 +11,8 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
-- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
-  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
-  SARIF is also supported. For hosted Open Source and Code, collect the
-  monitored project's REST issues. Neither workflow imports licenses, Container or IaC.
+- Import Snyk Open Source scans or collect existing Snyk Open Source, Snyk Code
+  and Semgrep Platform findings for local or Cloud import.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -647,9 +645,8 @@ for issue creation.
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
 to enable `publish findings`, `findings imported`, `import github-advisories`,
-`import snyk`, `import semgrep`, and
-the SDK's external publication, local import/readback, and hosted acquisition
-APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
+`import snyk` and `import semgrep`, and the SDK's external publication, local
+import/readback and hosted acquisition APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
 SDK callers can supply the flag through the existing per-call
 `dependencies.environment`. Pure normalizers and file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
@@ -726,7 +723,9 @@ reports carry this platform in their repository inventory. If you export only th
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
 
-Read existing [Snyk Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) with `collectSnykIssues`, or [Semgrep Platform findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) with `collectSemgrepPlatformFindings`. Save the completed report and reuse the same local or Cloud publish flow. Semgrep CLI/CI JSON and SARIF remain supported; individual REST pages and Guardian/MCP summaries are not complete reports.
+Use `collectSnykIssues` or `collectSemgrepPlatformFindings` to collect existing
+findings into a replayable report. See the [Snyk](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md)
+and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) guides for supported formats.
 
 ## Findings storage and deduplication
 

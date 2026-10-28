@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import {
@@ -9,6 +8,19 @@ import {
   platformRef,
   platformReport,
 } from "./support/semgrep-platform-fixtures.js";
+import {
+  organizationId,
+  projectId,
+  snykRestDocument,
+  snykRestProject,
+  sourceRepositoryUrl,
+} from "./support/snyk-rest-fixtures.js";
+
+const environment = {
+  CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+  SEMGREP_APP_TOKEN: "synthetic",
+  SNYK_TOKEN: "synthetic",
+};
 
 test("the Semgrep CLI emits a replayable report without a framework wrapper", async () => {
   const cli = createCliTest(main);
@@ -25,22 +37,13 @@ test("the Semgrep CLI emits a replayable report without a framework wrapper", as
       "json",
     ],
     {
-      ...dependencies({
-        environment: {
-          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-          SEMGREP_APP_TOKEN: "synthetic",
-        },
-      }),
-      collectSemgrepPlatformFindings: (options, hooks) =>
-        collectSemgrepPlatformFindings(options, {
-          ...hooks,
-          fetch: async (url) =>
-            Response.json(
-              url.pathname.includes("/projects/")
-                ? { project: platformProject }
-                : { findings: [platformFinding(12)] },
-            ),
-        }),
+      ...dependencies({ environment }),
+      hostedScannerFetch: async (url) =>
+        Response.json(
+          url.pathname.includes("/projects/")
+            ? { project: platformProject }
+            : { findings: [platformFinding(12)] },
+        ),
     },
   );
   expect({ code, stderr: cli.stderr.text() }).toEqual({ code: 0, stderr: "" });
@@ -51,42 +54,46 @@ test.each(["open-source", "code"])(
   "the Snyk CLI forwards the selected %s project and never emits a partial raw report",
   async (product) => {
     const cli = createCliTest(main);
-    let received: unknown;
+    const requests: URL[] = [];
     const code = await cli.runCli(
       [
         "import",
         "snyk",
-        "project-id",
+        projectId,
         "--snyk-org",
-        "organization-id",
+        organizationId,
         "--snyk-product",
         product,
         "--source-repository-url",
-        platformProject.url,
+        sourceRepositoryUrl,
         "--format",
         "json",
       ],
       {
-        ...dependencies({
-          environment: {
-            CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-            SNYK_TOKEN: "synthetic",
-          },
-        }),
-        collectSnykIssues: async (options) => {
-          received = options;
-          throw new Error("failed second page");
+        ...dependencies({ environment }),
+        hostedScannerFetch: async (url) => {
+          requests.push(url);
+          if (url.pathname.endsWith("/projects/" + projectId))
+            return Response.json(
+              snykRestDocument(
+                snykRestProject({
+                  manager: product === "code" ? "sast" : "npm",
+                }),
+              ),
+            );
+          throw new Error("failed issues page");
         },
       },
     );
-    expect(received).toMatchObject({
-      projectId: "project-id",
-      organizationId: "organization-id",
-      product,
-      sourceRepositoryUrl: platformProject.url,
-    });
+    expect(requests.map((url) => url.pathname)).toEqual([
+      `/rest/orgs/${organizationId}/projects/${projectId}`,
+      `/rest/orgs/${organizationId}/issues`,
+    ]);
+    expect(requests[1]?.searchParams.get("type")).toBe(
+      product === "code" ? "code" : "package_vulnerability",
+    );
     expect(code).toBe(2);
     expect(cli.stdout.text()).toBe("");
-    expect(cli.stderr.text()).toContain("failed second page");
+    expect(cli.stderr.text()).toContain("failed issues page");
   },
 );

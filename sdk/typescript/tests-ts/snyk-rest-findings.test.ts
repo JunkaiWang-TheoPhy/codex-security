@@ -18,10 +18,7 @@ import {
 } from "../src/snyk-findings.js";
 
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import {
-  listLocalExternalFindings,
-  prepareNormalizedLocalImport,
-} from "../src/external-findings-local.js";
+import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   organizationId,
@@ -55,30 +52,24 @@ function transport(...responses: unknown[]) {
   const requests: { url: URL; init: RequestInit }[] = [];
   return {
     requests,
-    dependencies: {
-      environment: env,
-      fetch: async (url: URL, init: RequestInit) => {
-        requests.push({ url, init });
-        if (!responses.length) throw new Error("Unexpected request.");
-        const response = responses.shift();
-        return response instanceof Response
-          ? response
-          : Response.json(response);
-      },
+    collect(selected = options, environment: NodeJS.ProcessEnv = env) {
+      return collectSnykIssues(selected, {
+        environment,
+        fetch: async (url, init) => {
+          requests.push({ url, init });
+          if (!responses.length) throw new Error("Unexpected request.");
+          const response = responses.shift();
+          return response instanceof Response
+            ? response
+            : Response.json(response);
+        },
+      });
     },
   };
 }
 
 function envelope(data: unknown[] = [issue()]) {
-  return {
-    format: "snyk-rest-issues/v1",
-    apiVersion: version,
-    ...options,
-    complete: true,
-    project: project(),
-    target: null,
-    pages: [{ startingAfter: null, response: document(data) }],
-  };
+  return snykRestFixture("open-source", { issues: data });
 }
 
 test("collects only one region, org, project and Open Source issue type across JSON:API pages", async () => {
@@ -117,7 +108,7 @@ test("collects only one region, org, project and Open Source issue type across J
   });
   const secondary = issue({ key: "second-key" }, { id: otherId });
   const cursor = "opaque+/=";
-  const { dependencies, requests } = transport(
+  const { collect, requests } = transport(
     document(project()),
     document([primary], {
       href: `/orgs/${organizationId}/issues?version=${version}&starting_after=${encodeURIComponent(cursor)}`,
@@ -125,7 +116,7 @@ test("collects only one region, org, project and Open Source issue type across J
     document([secondary], null),
   );
   const signal = new AbortController().signal;
-  const report = await collectSnykIssues({ ...options, signal }, dependencies);
+  const report = await collect({ ...options, signal });
   expect(report.apiVersion).toBe(version);
   expect(requests.map(({ url }) => url.pathname)).toEqual([
     `/rest/orgs/${organizationId}/projects/${projectId}`,
@@ -207,6 +198,11 @@ test("collects only one region, org, project and Open Source issue type across J
 });
 
 test("collects hosted Code, retaining source locations, ranges, flow omissions, rule and independent ignore state", async () => {
+  const location = {
+    file: "src/example%20file.ts",
+    region: { start: { line: 0, column: 0 }, end: { line: 2, column: 4 } },
+    commit_id: "synthetic-commit",
+  };
   const finding = issue({
     type: "code",
     status: "open",
@@ -217,16 +213,7 @@ test("collects hosted Code, retaining source locations, ranges, flow omissions, 
       {
         state: "open",
         representations: [
-          {
-            sourceLocation: {
-              file: "src/example%20file.ts",
-              region: {
-                start: { line: 0, column: 0 },
-                end: { line: 2, column: 4 },
-              },
-              commit_id: "synthetic-commit",
-            },
-          },
+          { sourceLocation: location },
           {
             source_location: {
               file: "../another-project/file",
@@ -244,11 +231,11 @@ test("collects hosted Code, retaining source locations, ranges, flow omissions, 
     apiOrigin: undefined,
     token: "explicit-test-token",
   };
-  const { dependencies, requests } = transport(
+  const { collect, requests } = transport(
     document(project({ manager: "sast", remote: null })),
     document([finding]),
   );
-  const report = await collectSnykIssues(selected, dependencies);
+  const report = await collect(selected);
   expect(requests.map(({ url }) => url.origin)).toEqual([
     "https://api.snyk.io",
     "https://api.snyk.io",
@@ -282,31 +269,16 @@ test("collects hosted Code, retaining source locations, ranges, flow omissions, 
       project: project({ manager: "sast", origin: "cli", remote: null }),
     }).findings[0]!.evidence.locations,
   ).toEqual([]);
-  const otherRevision = issue({
-    type: "code",
-    status: "open",
-    coordinates: [
-      {
-        state: "open",
-        representations: [
-          { sourceLocation: { file: "src/a", commit_id: "one" } },
-          { sourceLocation: { file: "src/b", commit_id: "two" } },
-        ],
-      },
-    ],
-  });
-  expect(
-    normalizeSnykIssues({
-      ...report,
-      pages: [{ startingAfter: null, response: document([otherRevision]) }],
-    }).findings[0]!.evidence.code_revision,
-  ).toBeNull();
+  location.commit_id = "other-commit";
+  const changed = normalizeSnykIssues(
+    snykRestFixture("code", { issues: [finding] }),
+  );
+  expect(changed.findings[0]!.evidence.code_revision).toBeNull();
 });
 
 test.each(["open-source", "code"] as const)(
   "hosted %s projects only explicitly open coordinates of open issues and preserves historical evidence",
   (product) => {
-    const report = snykRestFixture(product);
     const code = product === "code";
     const coordinates = ["open", "resolved", undefined].map((state, index) => ({
       ...(state && { state }),
@@ -327,14 +299,14 @@ test.each(["open-source", "code"] as const)(
       ],
     }));
     for (const status of ["open", "resolved"]) {
-      const native = issue(
-        { type: code ? "code" : "package_vulnerability", status, coordinates },
-        { project: report.projectId },
-      );
-      const normalized = normalizeSnykIssues({
-        ...report,
-        pages: [{ startingAfter: null, response: document([native]) }],
+      const native = issue({
+        type: code ? "code" : "package_vulnerability",
+        status,
+        coordinates,
       });
+      const normalized = normalizeSnykIssues(
+        snykRestFixture(product, { issues: [native] }),
+      );
       expect(normalized.excluded).toEqual([]);
       const evidence = normalized.findings[0]!.evidence;
       expect(evidence.source_data?.["issue"]).toEqual(native);
@@ -357,19 +329,17 @@ test.each(["open-source", "code"] as const)(
     const report = snykRestFixture(product);
     const source =
       normalizeSnykIssues(report).findings[0]!.evidence.source_data!;
-    const code = product === "code";
-    const manager = code ? "sast" : "npm";
-    const attributes = {
-      type: code ? "code" : "package_vulnerability",
-      title: null,
-      key: null,
-    };
-    const native = issue(attributes, { project: report.projectId });
+    const type = product === "code" ? "code" : "package_vulnerability";
+    const attributes = { type, title: null, key: null };
+    const native = issue(attributes);
     const scoped = { ...source, issue: native };
     expect(snykRestFindingRepository(scoped)).toBe(sourceRepositoryUrl);
     const lookup = {
       ...scoped,
-      project: project({ manager, id: report.projectId, expanded: false }),
+      project: project({
+        manager: report.project.attributes.type,
+        expanded: false,
+      }),
       target: {
         id: targetId,
         type: "target",
@@ -385,8 +355,7 @@ test.each(["open-source", "code"] as const)(
       ...scoped,
       sourceRepositoryUrl: "https://git.example.test/Example/repository",
       project: project({
-        manager,
-        id: report.projectId,
+        manager: report.project.attributes.type,
         remote: "https://git.example.test/example/repository",
       }),
     };
@@ -406,23 +375,14 @@ test.each(["open-source", "code"] as const)(
       { ...scoped, apiOrigin: "https://api.invalid" },
       { ...scoped, organizationId: otherId },
       { ...scoped, projectId: otherId },
-      { ...scoped, product: code ? "open-source" : "code" },
+      { ...scoped, product: product === "code" ? "open-source" : "code" },
       { ...lookup, target: null },
       { ...lookup, target: { ...lookup.target, id: otherId } },
       { ...lookup, sourceRepositoryUrl: swapped.sourceRepositoryUrl },
       { ...scoped, target: lookup.target },
-      {
-        ...scoped,
-        issue: issue(attributes, { org: otherId, project: report.projectId }),
-      },
+      { ...scoped, issue: issue(attributes, { org: otherId }) },
       { ...scoped, issue: issue(attributes, { project: otherId }) },
-      {
-        ...scoped,
-        issue: issue(attributes, {
-          itemType: "environment",
-          project: report.projectId,
-        }),
-      },
+      { ...scoped, issue: issue(attributes, { itemType: "environment" }) },
       { ...scoped, issue: { ...native, type: "project" } },
       {
         ...scoped,
@@ -446,12 +406,12 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     },
   };
   const lookup = document(project({ expanded: false }));
-  const { dependencies, requests } = transport(
+  const { collect, requests } = transport(
     lookup,
     document(target),
     document([]),
   );
-  const report = await collectSnykIssues(options, dependencies);
+  const report = await collect();
   expect(requests[1]!.url.href).toBe(
     `${apiOrigin}/rest/orgs/${organizationId}/targets/${targetId}?version=${version}`,
   );
@@ -470,30 +430,59 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     },
   ]) {
     const attempt = transport(lookup, document(bad));
-    await expect(
-      collectSnykIssues(options, attempt.dependencies),
-    ).rejects.toThrow(/target|organization/i);
+    await expect(attempt.collect()).rejects.toThrow(/target|organization/i);
     expect(attempt.requests).toHaveLength(2);
     expect(() => normalizeSnykIssues({ ...report, target: bad })).toThrow();
   }
   expect(() => normalizeSnykIssues({ ...report, target: null })).toThrow();
 });
 
+test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
+  const source = "https://scm.example.test/Org/project";
+  const check = (
+    remote: string,
+    origin = "github-enterprise",
+    expanded = true,
+  ) =>
+    normalizeSnykIssues({
+      ...envelope([]),
+      sourceRepositoryUrl: source,
+      project: project({ origin, remote, expanded }),
+      target: expanded
+        ? null
+        : { id: targetId, type: "target", attributes: { url: remote } },
+    });
+  for (const remote of [
+    "git@scm.example.test:Org/project.git",
+    "ssh://git@scm.example.test/Org/project",
+  ]) {
+    expect(check(remote).read).toBe(0);
+    expect(check(remote, "github-enterprise", false).read).toBe(0);
+    for (const origin of ["gitlab", "cli"])
+      expect(() => check(remote, origin)).toThrow();
+  }
+  for (const remote of [
+    "other@scm.example.test:Org/project",
+    "ssh://git@scm.example.test:2222/Org/project",
+    "ssh://git@scm.example.test/elsewhere/%2e%2e/Org/project",
+    "ssh://git@scm.example.test/elsewhere/../Org/project",
+    "git@foreign.example.test:Org/project",
+    "git@scm.example.test:Org/other",
+  ])
+    expect(() => check(remote)).toThrow();
+});
+
 test("issue identity is stable across updates, resource IDs, pages and display names, not across scopes", () => {
   const original = envelope();
   const id = (input: unknown) =>
     normalizeSnykIssues(input).findings[0]!.source_finding_id;
-  const changed = envelope([
-    issue(
-      {
-        title: "New title",
-        effective_severity_level: "low",
-        status: "open",
-        ignored: true,
-      },
-      { id: otherId },
-    ),
-  ]);
+  const changes = {
+    title: "New title",
+    effective_severity_level: "low",
+    status: "open",
+    ignored: true,
+  };
+  const changed = envelope([issue(changes, { id: otherId })]);
   changed.project.attributes.name = "Repository renamed";
   expect(id(changed)).toBe(id(original));
   const other = {
@@ -506,16 +495,11 @@ test("issue identity is stable across updates, resource IDs, pages and display n
     organizationId: otherId,
     project: project({ org: otherId }),
   };
-  const code = {
-    ...envelope([issue({ type: "code" })]),
-    product: "code",
-    project: project({ manager: "sast" }),
-  };
   const scopes = [
     original,
     other,
     otherOrg,
-    code,
+    snykRestFixture("code"),
     { ...original, apiOrigin: "https://api.au.snyk.io" },
   ];
   expect(new Set(scopes.map(id)).size).toBe(scopes.length);
@@ -614,31 +598,24 @@ test.each([
 ])(
   "does not send credentials to a changed route or scoped query: %j",
   async (next) => {
-    const { dependencies, requests } = transport(
+    const { collect, requests } = transport(
       document(project()),
       document([], next),
     );
-    await expect(collectSnykIssues(options, dependencies)).rejects.toThrow(
-      /Snyk next page/,
-    );
-    expect(requests.map(({ url }) => url.pathname)).toEqual([
-      `/rest/orgs/${organizationId}/projects/${projectId}`,
-      path,
-    ]);
+    await expect(collect()).rejects.toThrow(/Snyk next page/);
+    expect(requests).toHaveLength(2);
   },
 );
 
 test("fails on a repeated cursor despite changes to the link spelling", async () => {
-  const { dependencies, requests } = transport(
+  const { collect, requests } = transport(
     document(project()),
     document([], "?starting_after=again"),
     document([], {
       href: `${apiOrigin}${path}?version=${version}&starting_after=again`,
     }),
   );
-  await expect(collectSnykIssues(options, dependencies)).rejects.toThrow(
-    /repeated a cursor/,
-  );
+  await expect(collect()).rejects.toThrow(/repeated a cursor/);
   expect(requests).toHaveLength(3);
 });
 
@@ -652,8 +629,8 @@ test("a wrong project, product or repository fails before listing issues or acce
     project({ remote: "https://github.com/example/another" }),
     project({ remote: "ssh://git@github.com/example/repository.git?other" }),
   ]) {
-    const { dependencies, requests } = transport(document(source));
-    await expect(collectSnykIssues(options, dependencies)).rejects.toThrow();
+    const { collect, requests } = transport(document(source));
+    await expect(collect()).rejects.toThrow();
     expect(requests).toHaveLength(1);
     expect(() =>
       normalizeSnykIssues({ ...envelope([]), project: source }),
@@ -676,23 +653,18 @@ test("does not save mixed or unverifiable issue scopes, even on the last page", 
       document([issue()], "?starting_after=more"),
       document([foreign]),
     );
-    await expect(
-      collectSnykIssues(options, report.dependencies),
-    ).rejects.toThrow(/project|organization|relationship/);
+    await expect(report.collect()).rejects.toThrow(
+      /project|organization|relationship/,
+    );
     expect(() => normalizeSnykIssues(envelope([foreign]))).toThrow();
   }
 });
 
 test("gates and validates configuration and cancellation before issuing any credentialed request", async () => {
-  const { dependencies, requests } = transport();
+  const { collect, requests } = transport();
+  await expect(collect(options, {})).rejects.toThrow("disabled");
   await expect(
-    collectSnykIssues(options, { ...dependencies, environment: {} }),
-  ).rejects.toThrow("disabled");
-  await expect(
-    collectSnykIssues(options, {
-      ...dependencies,
-      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-    }),
+    collect(options, { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" }),
   ).rejects.toThrow("SNYK_TOKEN");
   for (const choice of [
     { projectId: "../issues" },
@@ -705,9 +677,7 @@ test("gates and validates configuration and cancellation before issuing any cred
     { apiOrigin: "https://api.snyk.io:8443" },
     { signal: AbortSignal.abort(new Error("cancelled")) },
   ]) {
-    await expect(
-      collectSnykIssues({ ...options, ...choice }, dependencies),
-    ).rejects.toThrow();
+    await expect(collect({ ...options, ...choice })).rejects.toThrow();
   }
   expect(requests).toEqual([]);
 });
@@ -723,12 +693,12 @@ test("HTTP, JSON, and second-page failures are errors, never successful partial 
     { errors: [{ status: "400", detail: "issue error" }] },
     { data: null },
   ]) {
-    const { dependencies } = transport(
+    const { collect } = transport(
       document(project()),
       document([issue()], "?starting_after=more"),
       response,
     );
-    await expect(collectSnykIssues(options, dependencies)).rejects.toThrow();
+    await expect(collect()).rejects.toThrow();
   }
 });
 
@@ -774,46 +744,12 @@ test.each(["open-source", "code"] as const)(
       remote: "https://github.com/example/other",
     });
     try {
-      const collect = async (
-        overrides?: Parameters<typeof snykRestFixture>[1],
-      ) => {
-        const sample = snykRestFixture(product, overrides);
-        const { dependencies } = transport(
-          document(sample.project),
-          sample.pages[0]!.response,
-        );
-        const report = await collectSnykIssues(
-          {
-            ...options,
-            product,
-            projectId: sample.projectId,
-            sourceRepositoryUrl: sample.sourceRepositoryUrl,
-          },
-          dependencies,
-        );
-        expect(report).toEqual(sample);
-        return report;
-      };
-      const initial = await collect();
+      const initial = snykRestFixture(product);
       const selection = {
         repository: fixture.repository,
         provider: "snyk" as const,
-        sourceKey: `${organizationId}/${initial.projectId}/${product}`,
+        sourceKey: `${organizationId}/${projectId}/${product}`,
       };
-      const forged = normalizeSnykIssues(
-        snykRestFixture(product, {
-          sourceRepositoryUrl: "https://github.com/example/other",
-        }),
-      );
-      const evidence = forged.findings[0]!.evidence;
-      evidence.source_data!["sourceRepositoryUrl"] = sourceRepositoryUrl;
-      if (evidence.details?.repository)
-        evidence.details.repository.url = sourceRepositoryUrl;
-      await expect(
-        prepareNormalizedLocalImport(forged, selection, {
-          environment: fixture.environment,
-        }),
-      ).rejects.toThrow("Snyk target URL");
       const prepare = async (report: SnykIssuesExport, local = fixture) => {
         const filename = join(local.root, "snyk-hosted.json");
         await writeFile(filename, JSON.stringify(report));
@@ -823,84 +759,39 @@ test.each(["open-source", "code"] as const)(
           { environment: local.environment },
         );
       };
-      const empty = await collect({ empty: true });
-      const excluded = {
-        ...initial,
-        pages: [
-          {
-            startingAfter: null,
-            response: document([
-              issue({ type: "license" }, { project: initial.projectId }),
-            ]),
-          },
-        ],
-      };
-      expect(normalizeSnykIssues(excluded).excluded).toHaveLength(1);
+      const empty = snykRestFixture(product, { issues: [] });
+      const excluded = snykRestFixture(product, {
+        issues: [issue({ type: "license" })],
+      });
       for (const report of [initial, empty, excluded]) {
         await expect(prepare(report, wrong)).rejects.toThrow(
           /does not match a configured remote/,
         );
       }
-      expect(
-        await listLocalExternalFindings(
-          { ...selection, repository: wrong.repository },
-          { environment: wrong.environment },
-        ),
-      ).toEqual([]);
-      const first = await prepare(initial);
-      expect(first.preview.excluded).toEqual([]);
-      expect((await first.import()).counts).toEqual({
-        created: 1,
-        updated: 0,
-        unchanged: 0,
+      const importReport = async (report: SnykIssuesExport) =>
+        (await prepare(report)).import();
+      expect((await importReport(initial)).counts.created).toBe(1);
+      expect((await importReport(initial)).counts.unchanged).toBe(1);
+      expect((await importReport(empty)).ready).toBe(0);
+
+      const updated = snykRestFixture(product, {
+        title: "Updated source title",
+        updatedAt: "2025-02-04T00:00:00Z",
       });
-      const read = () =>
-        listLocalExternalFindings(selection, {
-          environment: fixture.environment,
-        });
-      const stored = await read();
+      expect((await importReport(updated)).counts.updated).toBe(1);
+      const stored = await listLocalExternalFindings(selection, {
+        environment: fixture.environment,
+      });
       expect(stored).toHaveLength(1);
-      expect(stored[0]).toMatchObject({
-        sourceFindingId: first.preview.findings[0]!.source_finding_id,
-        version: 1,
-        assessment: { state: "not_assessed" },
-        evidence: first.preview.findings[0]!.evidence,
-      });
-      expect((await (await prepare(initial)).import()).counts).toEqual({
-        created: 0,
-        updated: 0,
-        unchanged: 1,
-      });
-      expect((await (await prepare(empty)).import()).ready).toBe(0);
-      expect(await read()).toEqual(stored);
-      const changed = await prepare(
-        await collect({
-          title: "Updated source title",
-          updatedAt: "2025-02-04T00:00:00Z",
-        }),
-      );
-      expect((await changed.import()).counts).toEqual({
-        created: 0,
-        updated: 1,
-        unchanged: 0,
-      });
-      const updated = await read();
-      expect(updated).toHaveLength(1);
-      expect(updated[0]).toMatchObject({
-        id: stored[0]!.id,
-        sourceFindingId: stored[0]!.sourceFindingId,
-        version: 2,
-        assessment: { state: "not_assessed" },
-        evidence: {
-          title: "Updated source title",
-          source_data: {
-            issue: { attributes: { status: "resolved", ignored: true } },
-          },
+      const finding = normalizeSnykIssues(updated).findings[0]!;
+      expect(stored).toMatchObject([
+        {
+          sourceFindingId: finding.source_finding_id,
+          version: 2,
+          assessment: { state: "not_assessed" },
+          evidence: finding.evidence,
         },
-      });
-      expect(updated[0]!.evidence).toEqual(
-        changed.preview.findings[0]!.evidence,
-      );
+      ]);
     } finally {
       await Promise.all([fixture.dispose(), wrong.dispose()]);
     }

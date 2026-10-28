@@ -23,6 +23,17 @@ const first = Array.from({ length: 100 }, (_, index) =>
   platformFinding(index + 1),
 );
 
+function collectPages(...pages: unknown[]) {
+  const responses = [{ project: platformProject }, ...pages];
+  return collectSemgrepPlatformFindings(options, {
+    environment,
+    fetch: async () => {
+      const page = responses.shift();
+      return page instanceof Response ? page : Response.json(page);
+    },
+  });
+}
+
 test("collects consecutive authenticated pages for exactly one project, ref and product", async () => {
   const pages: string[] = [];
   const report = await collectSemgrepPlatformFindings(options, {
@@ -95,82 +106,56 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
   await expect(
     collectSemgrepPlatformFindings(options, { environment: {}, fetch: never }),
   ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS");
-  await expect(
-    collectSemgrepPlatformFindings(
-      { ...options, signal: AbortSignal.abort(new Error("stopped")) },
-      { environment, fetch: never },
-    ),
-  ).rejects.toThrow("stopped");
-  await expect(
-    collectSemgrepPlatformFindings(
-      { ...options, signal: new AbortController().signal },
-      {
-        environment,
-        fetch: never,
-        signal: AbortSignal.abort(new Error("dependency canceled")),
-      },
-    ),
-  ).rejects.toThrow("dependency canceled");
-  for (const mode of ["repeat", "rate-limit", "malformed"]) {
-    const collect = collectSemgrepPlatformFindings(options, {
-      environment,
-      fetch: async (url) => {
-        if (url.pathname.includes("/projects/"))
-          return Response.json({ project: platformProject });
-        if (url.searchParams.get("page") === "0" || mode === "repeat")
-          return Response.json({ findings: first });
-        return mode === "rate-limit"
-          ? new Response("try later", {
-              status: 429,
-              headers: { "retry-after": "11" },
-            })
-          : Response.json({ error: "not a findings page" });
-      },
-    });
-    await expect(collect).rejects.toThrow(
-      mode === "repeat"
-        ? "repeated"
-        : mode === "rate-limit"
-          ? "Retry-After: 11"
-          : "must be an array",
+  const stopped = AbortSignal.abort(new Error("stopped"));
+  for (const [signal, dependencySignal] of [
+    [stopped],
+    [new AbortController().signal, stopped],
+  ]) {
+    await expect(
+      collectSemgrepPlatformFindings(
+        { ...options, signal },
+        { environment, signal: dependencySignal, fetch: never },
+      ),
+    ).rejects.toThrow("stopped");
+  }
+  for (const [response, error] of [
+    [Response.json({ findings: first }), "repeated"],
+    [
+      new Response("try later", {
+        status: 429,
+        headers: { "retry-after": "11" },
+      }),
+      "Retry-After: 11",
+    ],
+    [Response.json({ error: "not a findings page" }), "must be an array"],
+  ] as const) {
+    await expect(collectPages({ findings: first }, response)).rejects.toThrow(
+      error,
     );
   }
 });
 
 test("losslessly captures distinct int64 IDs and rejects a truncated saved report", async () => {
   const ids = ["9223372036854775806", "9223372036854775807"];
-  const report = await collectSemgrepPlatformFindings(options, {
-    environment,
-    fetch: async (url) => {
-      if (url.pathname.includes("/projects/"))
-        return Response.json({ project: platformProject });
-      const template = JSON.stringify(platformFinding(17)).replace(
-        '"id":17',
-        '"first_seen_scan_id":9007199254740993,"id":17',
-      );
-      return new Response(
-        '{"findings":[' +
-          ids.map((id) => template.replace('"id":17', '"id":' + id)).join(",") +
-          "]}",
-      );
-    },
-  });
+  const records = ids.map((id) => ({
+    ...platformFinding(17),
+    id,
+    first_seen_scan_id: "9007199254740993",
+  }));
+  // Emit int64 fields as JSON numbers without rounding them in the fixture.
+  const json = JSON.stringify({ findings: records }).replace(
+    /"(\d{16,19})"/gu,
+    "$1",
+  );
+  const report = await collectPages(new Response(json));
+  expect(report.findings).toEqual(records);
   const parsed = normalizeSemgrepPlatformFindings(
     JSON.parse(JSON.stringify(report)),
   );
-  expect(parsed.findings[0]?.evidence.source_data).toMatchObject({
-    finding: { first_seen_scan_id: "9007199254740993" },
-  });
-  expect(
-    parsed.findings.map(
-      ({ evidence }) =>
-        (evidence.source_data?.["finding"] as { id: string }).id,
-    ),
-  ).toEqual(ids);
-  expect(
-    new Set(parsed.findings.map(({ source_finding_id }) => source_finding_id))
-      .size,
-  ).toBe(2);
+  expect(parsed.findings).toHaveLength(2);
+  expect(parsed.findings[0]?.source_finding_id).not.toBe(
+    parsed.findings[1]?.source_finding_id,
+  );
   expect(() =>
     normalizeSemgrepPlatformFindings({
       ...report,
@@ -187,6 +172,14 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
       "https://github.com/other/project",
     ),
   ).toThrow("repository");
+  const ambiguousUrl = platformProject.url + "?";
+  const ambiguous = {
+    ...platformReport([]),
+    project: { ...platformProject, url: ambiguousUrl },
+  };
+  expect(() => normalizeSemgrepPlatformFindings(ambiguous)).toThrow(
+    "without credentials, query or fragment",
+  );
   for (const wrong of [
     { ...finding, id: null, ref: "main" },
     {

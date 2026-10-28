@@ -1,5 +1,5 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
+  type ExternalImportTarget,
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
@@ -8,8 +8,10 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import {
   combineHostedSignals,
   getHostedJson,
+  hostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
+import { position, weaknessIds } from "./native-json-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -52,12 +54,6 @@ export interface SemgrepPlatformReport {
   findings: unknown[];
 }
 
-function positiveId(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
-    throw new Error(`${label} must be a positive, safe integer.`);
-  return value;
-}
-
 function productType(value: unknown): Product {
   if (!SEMGREP_PLATFORM_PRODUCTS.some((product) => product === value))
     throw new Error("Select a Semgrep Platform product: sast, sca or ai_sast.");
@@ -71,7 +67,7 @@ function platformId(value: unknown, label: string): number | string {
     BigInt(value) <= 9223372036854775807n
   )
     return Number.isSafeInteger(Number(value)) ? Number(value) : value;
-  return positiveId(value, label);
+  return position(value, label);
 }
 
 function parsePlatformJson(body: string): unknown {
@@ -89,49 +85,36 @@ function parsePlatformJson(body: string): unknown {
   );
 }
 
-function repositoryUrl(value: unknown): string {
-  const raw = requiredText(value, "Semgrep project repository URL");
-  const url = new URL(raw);
-  if (
-    !["https:", "http:"].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    url.pathname === "/"
-  )
-    throw new Error(
-      "Use an HTTP(S) Semgrep repository URL without credentials, query or fragment.",
-    );
-  return raw;
-}
-
 function assertRepository(value: unknown, expected: string): void {
-  if (repositoryUrlKey(repositoryUrl(value)) !== repositoryUrlKey(expected))
+  const url = hostedRepositoryUrl(value, "Semgrep repository URL");
+  if (repositoryUrlKey(url) !== repositoryUrlKey(expected))
     throw new Error(
       "Semgrep Platform repository does not match the selected source repository.",
     );
 }
 
 function projectContext(value: unknown, declared?: string): Project {
-  const project = record(value, "Semgrep project");
-  const url = repositoryUrl(text(project["url"]) ?? declared);
+  const { id, name, url: nativeUrl } = record(value, "Semgrep project");
+  const url = hostedRepositoryUrl(
+    text(nativeUrl) ?? declared,
+    "Semgrep project repository URL",
+  );
   if (declared) assertRepository(declared, url);
   return {
-    id: platformId(project["id"], "Semgrep project ID"),
-    name: requiredText(project["name"], "Semgrep project name"),
+    id: platformId(id, "Semgrep project ID"),
+    name: requiredText(name, "Semgrep project name"),
     url,
   };
 }
 
-function checkScope(value: unknown, project: Project, ref: string): void {
+function scopedFinding(value: unknown, project: Project, ref: string) {
   const finding = record(value, "Semgrep Platform finding");
-  const repository = record(
+  const { url, name } = record(
     finding["repository"],
     "Semgrep finding repository",
   );
-  if (text(repository["url"])) assertRepository(repository["url"], project.url);
-  else if (repository["name"] !== project.name)
+  if (text(url)) assertRepository(url, project.url);
+  else if (name !== project.name)
     throw new Error(
       "Semgrep Platform finding lacks a matching source repository.",
     );
@@ -139,6 +122,7 @@ function checkScope(value: unknown, project: Project, ref: string): void {
     throw new Error(
       "Semgrep Platform finding does not match the selected ref.",
     );
+  return finding;
 }
 
 export async function collectSemgrepPlatformFindings(
@@ -165,16 +149,14 @@ export async function collectSemgrepPlatformFindings(
   const ref = requiredText(options.ref, "Semgrep ref");
   const product = productType(options.product ?? "sast");
   const base = `https://semgrep.dev/api/v1/deployments/${encodeURIComponent(deployment)}`;
-  const get = (url: URL) =>
-    getHostedJson(
-      url,
-      `Bearer ${token}`,
-      { ...dependencies, signal },
-      parsePlatformJson,
+  const http = { ...dependencies, signal };
+  const get = async (url: URL) =>
+    record(
+      await getHostedJson(url, `Bearer ${token}`, http, parsePlatformJson),
+      "Semgrep API response",
     );
-  const lookup = record(
-    await get(new URL(`${base}/projects/${encodeURIComponent(name)}`)),
-    "Semgrep project response",
+  const lookup = await get(
+    new URL(`${base}/projects/${encodeURIComponent(name)}`),
   );
   const project = projectContext(
     lookup["project"],
@@ -194,19 +176,15 @@ export async function collectSemgrepPlatformFindings(
   const fullPages = new Set<string>();
   for (let page = 0; ; page++) {
     url.searchParams.set("page", String(page));
-    const response = record(
-      await get(new URL(url)),
-      "Semgrep Platform findings response",
+    const response = await get(new URL(url));
+    const batch = array(response["findings"], "Semgrep Platform findings").map(
+      (row) => scopedFinding(row, project, ref),
     );
-    const batch = array(response["findings"], "Semgrep Platform findings");
-    for (const finding of batch) {
-      checkScope(finding, project, ref);
-      findings.push(finding);
-    }
+    for (const finding of batch) findings.push(finding);
     if (batch.length < 100) break;
     const fingerprint = stableId(
       "page",
-      batch.map((finding) => (isRecord(finding) ? finding["id"] : null)),
+      batch.map(({ id }) => id),
     );
     if (fullPages.has(fingerprint))
       throw new Error(
@@ -239,10 +217,11 @@ export function semgrepPlatformRepository(
 }
 
 export function semgrepPlatformFindingRepository(
-  input: Record<string, unknown>,
-): string {
+  input: unknown,
+): string | undefined {
+  if (!isSemgrepPlatformReport(input)) return undefined;
   const project = projectContext(input["project"]);
-  checkScope(
+  scopedFinding(
     input["finding"],
     project,
     requiredText(input["ref"], "Semgrep ref"),
@@ -266,11 +245,10 @@ export function normalizeSemgrepPlatformFindings(
     throw new Error(
       "Incomplete Semgrep Platform export: finding count does not match.",
     );
-  for (const finding of findings) checkScope(finding, project, ref);
+  const context = { format, deployment, project, ref, product };
   return normalizeRecords(
-    findings,
-    (value, id) => {
-      const finding = record(value, "Semgrep Platform finding");
+    findings.map((finding) => scopedFinding(finding, project, ref)),
+    (finding, id) => {
       const location = record(
         finding["location"] ?? {},
         "Semgrep finding location",
@@ -278,113 +256,95 @@ export function normalizeSemgrepPlatformFindings(
       const path = relativePath(location["file_path"]);
       const line =
         path && location["line"] != null
-          ? positiveId(location["line"], "Semgrep starting line")
+          ? position(location["line"], "Semgrep starting line")
           : null;
       const rule = record(finding["rule"] ?? {}, "Semgrep rule");
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
       const severity = text(finding["severity"]);
-      const sourceData = structuredClone({
-        format,
-        deployment,
-        project,
-        ref,
-        product,
-        finding,
-      });
-      const common = {
-        description: text(rule["message"]) ?? text(finding["rule_message"]),
-        severity: ["critical", "high", "medium", "low"].includes(severity ?? "")
-          ? severity
-          : "unknown",
-        locations: path ? [{ path, line }] : [],
-        branch: ref,
-        source_data: sourceData,
-      };
+      let productEvidence;
       if (product === "sca") {
-        const dependency = record(
-          finding["found_dependency"],
-          "Semgrep found dependency",
-        );
-        const packageName = requiredText(
-          dependency["package"],
-          "Semgrep package name",
-        );
+        const {
+          package: pkg,
+          ecosystem,
+          version,
+        } = record(finding["found_dependency"], "Semgrep found dependency");
+        const packageName = requiredText(pkg, "Semgrep package name");
         const advisory = text(finding["vulnerability_identifier"]);
-        return {
-          source_finding_id: id,
-          evidence: validateExternalEvidence(
+        const fixes = array(
+          finding["fix_recommendations"] ?? [],
+          "Semgrep fix recommendations",
+        );
+        productEvidence = {
+          title: name ?? advisory ?? packageName,
+          advisory_ids: advisory ? [advisory] : [],
+          packages: [
             {
-              ...common,
-              title: name ?? advisory ?? packageName,
-              advisory_ids: advisory ? [advisory] : [],
-              packages: [
-                {
-                  name: packageName,
-                  ecosystem: text(dependency["ecosystem"]),
-                  installed_version: text(dependency["version"]),
-                  fixed_versions: array(
-                    finding["fix_recommendations"] ?? [],
-                    "Semgrep fix recommendations",
-                  ).flatMap((item) =>
-                    isRecord(item) && item["package"] === packageName
-                      ? strings([item["version"]])
-                      : [],
-                  ),
-                },
-              ],
+              name: packageName,
+              ecosystem: text(ecosystem),
+              installed_version: text(version),
+              fixed_versions: strings(
+                fixes.flatMap((fix) =>
+                  isRecord(fix) && fix["package"] === packageName
+                    ? [fix["version"]]
+                    : [],
+                ),
+              ),
             },
-            target,
-          ),
+          ],
+        };
+      } else {
+        if (
+          finding["found_dependency"] != null ||
+          finding["vulnerability_identifier"] != null
+        )
+          throw new Error(
+            "Supply Chain evidence is not a Semgrep Code finding.",
+          );
+        const ruleName = requiredText(name, "Semgrep rule name");
+        productEvidence = {
+          title: ruleName,
+          details: {
+            kind: "sast",
+            repository: { url: project.url },
+            scanner_origin: "Semgrep",
+            rule: { id: ruleName },
+            source_status: text(finding["status"]),
+            weakness_ids: weaknessIds(rule["cwe_names"]),
+            code: {
+              end_line:
+                line !== null && location["end_line"] != null
+                  ? position(location["end_line"], "Semgrep ending line")
+                  : null,
+            },
+          },
         };
       }
-      if (
-        finding["found_dependency"] != null ||
-        finding["vulnerability_identifier"] != null
-      )
-        throw new Error("Supply Chain evidence is not a Semgrep Code finding.");
-      const ruleName = requiredText(name, "Semgrep rule name");
-      const end =
-        line !== null && location["end_line"] != null
-          ? positiveId(location["end_line"], "Semgrep ending line")
-          : null;
-      if (line && end && end < line)
-        throw new Error("Semgrep source range ends before it starts.");
       return {
         source_finding_id: id,
         evidence: validateExternalEvidence(
           {
-            ...common,
-            title: ruleName,
-            details: {
-              kind: "sast",
-              repository: { url: project.url },
-              scanner_origin: "Semgrep",
-              rule: { id: ruleName },
-              source_status: text(finding["status"]),
-              weakness_ids: [
-                ...new Set(
-                  strings(rule["cwe_names"]).flatMap(
-                    (label) => /^CWE-\d+(?=:|$)/u.exec(label)?.[0] ?? [],
-                  ),
-                ),
-              ],
-              code: { end_line: end },
-            },
+            description: text(rule["message"]) ?? text(finding["rule_message"]),
+            severity: ["critical", "high", "medium", "low"].includes(
+              severity ?? "",
+            )
+              ? severity
+              : "unknown",
+            locations: path ? [{ path, line }] : [],
+            branch: ref,
+            source_data: structuredClone({ ...context, finding }),
+            ...productEvidence,
           },
           target,
         ),
       };
     },
-    (value) =>
+    ({ id }) =>
       stableId("semgrep-platform", [
         deployment,
         project.id,
         product,
         ref,
-        platformId(
-          record(value, "Semgrep finding")["id"],
-          "Semgrep finding ID",
-        ),
+        platformId(id, "Semgrep finding ID"),
       ]),
     target,
   );

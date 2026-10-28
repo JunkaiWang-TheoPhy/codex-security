@@ -4,119 +4,46 @@ Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPOR
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
 and [how saved scanner reports map to imported evidence](schema-guide.md).
 
-For an existing Snyk project, collect hosted Open Source or Code issues with the
-REST API. For a fresh local Open Source scan, use the plugin, native CLI JSON,
-or Open Source SARIF. Neither publication nor offline replay starts a scan.
-
 ## Hosted Open Source and Code
 
-Select **one organization UUID, project UUID, product and source repository**.
-Supply a region-specific `SNYK_TOKEN` through the environment, not a command
-argument or saved report. Snyk documents [Enterprise API access and token
-authentication](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api);
-use a read-authorized service account for automation. The Issues endpoint
-requires `org.read`, `org.project.read` and `org.project.snapshot.read`.
-This collector uses `Authorization: token`, not Snyk Apps OAuth.
+Read issues from one monitored project with a regional `SNYK_TOKEN` in the
+environment. Snyk requires Enterprise API access and the token permissions
+`org.read`, `org.project.read` and `org.project.snapshot.read`.
+[API authentication](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
+and [Issues API](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
 
-Set the placeholders to the selected project's IDs. Save the entire JSON
-envelope and publish **only after successful collection**:
-
-```sh
-codex-security import snyk "$SCA_PROJECT_UUID" --snyk-org "$ORG_UUID" \
-  --snyk-product open-source --source-repository-url https://github.com/example/project \
-  --format json > snyk-hosted-oss.json &&
-codex-security publish findings snyk-hosted-oss.json --provider snyk --to local \
-  --repository ./project --source-key "$ORG_UUID/$SCA_PROJECT_UUID/hosted-oss" --dry-run
-```
-
-For hosted Code, select the **Code project's** UUID (project type `sast`), not
-an Open Source manifest project in the same repository:
+Set `ORG_UUID` and `PROJECT_UUID` to the selected IDs. For Open Source, choose
+the manifest project. For Code, choose the `sast` project and set
+`product=code` below. Use the project's canonical HTTP(S) Git URL.
 
 ```sh
-codex-security import snyk "$CODE_PROJECT_UUID" --snyk-org "$ORG_UUID" \
-  --snyk-product code --source-repository-url https://github.com/example/project \
-  --format json > snyk-hosted-code.json &&
-codex-security publish findings snyk-hosted-code.json --provider snyk --to cloud \
-  --repository https://github.com/example/project \
-  --source-key "$ORG_UUID/$CODE_PROJECT_UUID/hosted-code" --dry-run
+product=open-source
+codex-security import snyk "$PROJECT_UUID" --snyk-org "$ORG_UUID" \
+  --snyk-product "$product" --source-repository-url https://github.com/example/project \
+  --format json > snyk-hosted.json &&
+codex-security publish findings snyk-hosted.json --provider snyk --to local \
+  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/$product" --dry-run
 ```
 
-Either envelope works with either destination. For another region, set
-`--snyk-api-origin` to its [documented HTTPS API origin](https://docs.snyk.io/developer-tools/snyk-api/rest-api/about-the-rest-api#api-urls):
-`https://api.snyk.io` (default), `https://api.us.snyk.io`,
-`https://api.eu.snyk.io` or `https://api.au.snyk.io`. No custom proxy URL,
-organization-wide export, group search or write-back is used.
+The defaults are `open-source` and `https://api.snyk.io`. Use `--snyk-api-origin`
+for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
+The collector checks the selected repository URL against the project target
+when Snyk supplies one. For GitHub SCM projects, a standard SSH target can match
+the selected GitHub Enterprise HTTPS URL. Other custom-host mappings require
+matching repository URLs.
 
-The three REST GET routes return `application/vnd.api+json`, which the client
-advertises in `Accept`. They have no request body. Snyk's [Content-Type
-requirement](https://docs.snyk.io/developer-tools/snyk-api/rest-api/about-the-rest-api#jsonapi-content-type-header)
-applies to requests that send data.
+The collector uses Snyk REST version `2026-03-25` and reads every page of open
+and resolved issues for that project and product, including ignored issues.
+Only publish a successful collection. The SDK's `collectSnykIssues` returns the
+same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
+can replay it offline. Keep the same source key across exports. The importer
+uses Snyk's issue key within the API origin, organization, project and product
+to identify updates. Duplicate keys in one export are excluded.
 
-**What is collected.** The SDK's `collectSnykIssues(options, dependencies?)`
-uses version `2026-03-25`, which supports coordinate state and
-[Code flows](https://docs.snyk.io/developer-tools/snyk-api/changelog).
-It reads the [selected project](https://docs.snyk.io/developer-tools/snyk-api/reference/projects)
-at `GET /rest/orgs/{org_id}/projects/{project_id}?expand=target` and checks its
-organization, [project type](https://docs.snyk.io/developer-tools/snyk-api/api-endpoints-index-and-tips/project-type-responses-from-the-api)
-and target. The repository claim is `relationships.target.data.attributes.url`.
-For ID-only linkage it reads the [single target](https://docs.snyk.io/developer-tools/snyk-api/reference/targets)
-by ID and checks `data.attributes.url`. A null or empty URL uses the caller's
-explicit mapping; a conflicting URL stops collection. Target display names
-and project names are not VCS URLs. Supply an HTTP(S) repository URL without
-credentials, query or fragment. A standard public GitHub SSH target can match
-its HTTPS repository; do not assume an alias for a private host.
-
-The [organization Issues endpoint](https://docs.snyk.io/developer-tools/snyk-api/reference/issues),
-`GET /rest/orgs/{org_id}/issues`, is filtered by `scan_item.type=project`,
-`scan_item.id={project_id}`, and either `type=package_vulnerability` or
-`type=code`. Both open and resolved statuses are requested, without filtering
-on ignore state. The collector checks every issue's organization and scan item,
-and follows [forward cursors](https://docs.snyk.io/developer-tools/snyk-api/rest-api/about-the-rest-api#pagination)
-only on the selected Issues route. It never fetches a URL from an issue or a
-relationship link. License, Container, IaC, Secrets and unrecognized project
-types are not imported as Open Source or Code.
-
-**Replay and evidence.** The `snyk-rest-issues/v1` envelope records the
-selection, project, target lookup (if needed) and the completed page sequence.
-`normalizeSnykIssues` and `readSnykFindings` replay it without credentials.
-Each finding retains its own native issue and project context, not its
-neighbors. Fresh imports of normalized findings recheck the native project,
-target and issue linkage; the outer repository URL cannot override a
-conflicting native target URL. Stable IDs use the API origin, organization, project, product and
-the opaque `attributes.key` that Snyk defines across tests within a project.
-Keep a separate source key per selection. A duplicate key excludes **every**
-collision; unsupported issue types and malformed finding fields are reported
-by position. A completed empty response has zero records and still identifies
-the mapped repository. A missing page, repeated cursor, scope mismatch, API
-error (including rate limiting), or interrupted request is **not** an empty
-result. Retry collection; do not publish partial output.
-
-- Open Source uses the documented [Issues field mapping](https://docs.snyk.io/developer-tools/snyk-api/api-end-of-life-eol-process-and-migration-guides/guides-to-migration/v1-reporting-issues-and-v1-aggregated-issues-apis-to-rest-issues-api-migration-guide):
-  problems, weakness classes, dependency representations, effective severity
-  and available coordinate remedies. The opaque key is not parsed as a package
-  coordinate. A sparse issue need not have a package or dependency path.
-  An observed package vulnerability is not a published advisory disclosure:
-  package fields are projected, while status, ignored state, classes and
-  remedy details remain on the native issue. No advisory detail kind is assigned.
-- Code retains [source locations and regions](https://docs.snyk.io/developer-tools/snyk-api/api-endpoints-index-and-tips#issues)
-  and requests `include_code_flows=true`. Flows depend on tenant support and
-  Snyk can omit oversized flows. A [target's root depends on its origin](https://docs.snyk.io/scan-fix-and-prevent/scan-with-snyk/snyk-projects#target):
-  safe file paths on repository-backed SCM projects can be projected as
-  repository paths. CLI/API target paths, including Open Source target files,
-  have no proven Git-root offset and stay in native evidence.
-  Raw regions (which allow zero) and columns are retained without assuming a
-  one-based line. Conflicting location commits do not become one revision;
-  a project's target reference alone is not a branch or scanned commit.
-- Typed packages, source locations and their revision describe active
-  coordinates only: both the issue's `status` and the coordinate's `state`
-  must be `open`. Resolved or unclassified coordinates remain on the native
-  issue. A resolved issue retains its full evidence but projects no active
-  packages or locations.
-- `status` is vendor state; `ignored`, resolution details and fixability remain
-  source evidence. Neither resolution nor disappearance marks anything fixed
-  or assessed by Codex. Completeness means all pages returned for this
-  selection, not an atomic snapshot, historical archive, or detailed scan of
-  every dependency path. Synthetic contract tests do not verify tenant access.
+Native evidence retains issue status, ignored state and coordinates. Package
+versions or Code locations are projected only when the issue and coordinate
+are both open. Code regions retain Snyk's original line numbering. Missing
+records on a later import leave earlier occurrences in place.
 
 ## Local Open Source scans
 

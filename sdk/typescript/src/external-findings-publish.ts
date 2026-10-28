@@ -14,10 +14,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
 import { abortable } from "./targets.js";
-import {
-  isSemgrepPlatformReport,
-  semgrepPlatformFindingRepository,
-} from "./semgrep-platform-findings.js";
+import { semgrepPlatformFindingRepository } from "./semgrep-platform-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -751,10 +748,9 @@ async function preparePublicationInput(
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
-        ...(options.provider === "semgrep" &&
-        isSemgrepPlatformReport(finding.evidence.source_data)
-          ? [semgrepPlatformFindingRepository(finding.evidence.source_data)]
-          : []),
+        options.provider === "semgrep"
+          ? semgrepPlatformFindingRepository(finding.evidence.source_data)
+          : undefined,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),

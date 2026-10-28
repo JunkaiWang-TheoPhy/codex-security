@@ -2,12 +2,11 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
-import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
 import {
-  isSemgrepPlatformReport,
-  semgrepPlatformFindingRepository,
-} from "./semgrep-platform-findings.js";
+  SNYK_REST_ISSUES_FORMAT,
+  snykRestFindingRepository,
+} from "./snyk-rest-findings.js";
+import { semgrepPlatformFindingRepository } from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -532,24 +531,32 @@ export async function prepareNormalizedLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
+  let hostedRepository: string | undefined;
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
+    const data = evidence.source_data;
+    let native: string | undefined;
     if (
       options.provider === "snyk" &&
-      evidence.source_data?.["format"] === SNYK_REST_ISSUES_FORMAT
+      data?.["format"] === SNYK_REST_ISSUES_FORMAT
     )
-      for (const hostedUrl of snykRepositoryUrls(evidence.source_data, {
-        normalizeGitRemote: false,
-      }))
-        sources.set(hostedUrl, { url: hostedUrl });
-    if (
-      options.provider === "semgrep" &&
-      isSemgrepPlatformReport(evidence.source_data)
-    ) {
-      const hostedUrl = semgrepPlatformFindingRepository(evidence.source_data);
-      sources.set(hostedUrl, { url: hostedUrl });
+      native = snykRestFindingRepository(data);
+    if (options.provider === "semgrep")
+      native = semgrepPlatformFindingRepository(data);
+    if (native) {
+      hostedRepository = native;
+      sources.set(native, { url: native });
     }
+  }
+  if (hostedRepository) {
+    // A hosted project identifies one repository even when the checkout has multiple remotes.
+    const expected = repositoryUrlKey(hostedRepository);
+    for (const url of sources.keys())
+      if (repositoryUrlKey(url) !== expected)
+        throw new CodexSecurityError(
+          "The normalized repository does not match the hosted scanner project.",
+        );
   }
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.

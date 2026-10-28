@@ -55,12 +55,9 @@ accepted findings. Unknown Git hosts keep case-sensitive repository paths.
 
 ## Existing Platform findings
 
-Set `SEMGREP_APP_TOKEN` to a token with **Web API** access in your credential
-environment, not in the command or report. Select one deployment, project,
-exact ref and product. The collector looks up the
-[project](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
-and reads the [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
-by project ID, without running a scan or changing triage:
+Set `SEMGREP_APP_TOKEN` to a Web API token in the environment. Select the
+deployment slug, exact project name and ref. Use `sast` (the default) for
+Code, `sca` for Supply Chain or `ai_sast` for AI-powered detections.
 
 ```sh
 codex-security import semgrep example/project --semgrep-deployment example \
@@ -69,28 +66,18 @@ codex-security publish findings platform.json --to local --provider semgrep \
   --repository ./project --source-key example/project/main/platform-sast --dry-run
 ```
 
-Use `sast` (default) for Code, `sca` for Supply Chain, or `ai_sast` for
-AI-powered detections. Secrets has a different API and is not collected. The
-project SCM URL must match each available finding URL; if the project omits its
-URL, explicitly map it with `--source-repository-url`. No source declaration is
-required when publishing the self-contained report. For Cloud use `--to cloud`
-and a connected repository URL or ID. SDK callers can use
-`collectSemgrepPlatformFindings` and `normalizeSemgrepPlatformFindings`.
+The collector resolves the SCM URL and reads all pages for the selected
+project ID, ref and product. If the project has no SCM URL, supply
+`--source-repository-url` when collecting. The saved `semgrep-platform-findings/v1`
+report carries the repository URL for local or Cloud import. This endpoint
+excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
+and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
-Pages start at zero and are read sequentially through the last page. Collection
-errors do not yield partial reports. No time or status filters are applied;
-Semgrep never returns removed findings from this endpoint. It is a paged view,
-not a transactional snapshot. Native numeric finding IDs are scoped to the
-deployment, project, ref and product. Integers outside JavaScript's safe range,
-including finding and scan IDs, retain their exact decimal text in the saved
-collection. Changed status or source lines update the
-same record, and absence never closes an import. Keep separate source keys for
-CLI and Platform exports.
-
-The selected API record is retained in evidence, including triage and, for SCA,
-reported reachability, dependency versions and fix recommendations. None are
-Codex assessments or verified fixes. Guardian and MCP summaries are not
-complete exports and are not accepted by the collector.
+The SDK exposes `collectSemgrepPlatformFindings` and
+`normalizeSemgrepPlatformFindings`. Finding IDs retain their exact integer
+value, scoped to deployment, project ID, ref and product. Reimport with the
+same source key to update triage, locations or dependency evidence. Keep a
+separate key for CLI scans.
 
 ## Evidence and identity
 
