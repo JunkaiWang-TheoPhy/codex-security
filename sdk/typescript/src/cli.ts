@@ -54,9 +54,10 @@ import {
   Writable as NodeWritable,
 } from "node:stream";
 import { monitorSecurityEventsInternal } from "./monitor-events.js";
-import { json as readStreamJson } from "node:stream/consumers";
+import { text as readStreamText } from "node:stream/consumers";
 import {
   reviewSecurityEventsInternal,
+  parseSecurityEventInputText,
   securityEventReviewSchema,
 } from "./review-events.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -4680,8 +4681,8 @@ export async function main(
       },
     })
     .command("review-events", {
-      description: "Review a JSON batch of service audit events from stdin.",
-      hint: "Pipe native CloudTrail JSON, an OCSF event, or a version 1 batch into review-events --json. Use --screen-with-decisions to screen related events before a full review.",
+      description: "Review CEF audit records or a JSON batch from stdin.",
+      hint: "Pipe CEF records or a version 1 JSON batch into review-events --json. Use --screen-with-decisions to screen related events before a full review.",
       mcp: false,
       alias: { config: "c" },
       options: z.object({
@@ -4771,7 +4772,9 @@ export async function main(
             );
           }
           return await review(
-            await readStreamJson(addAbortSignal(controller.signal, input)),
+            parseSecurityEventInputText(
+              await readStreamText(addAbortSignal(controller.signal, input)),
+            ),
             reviewOptions,
             "cli",
           );

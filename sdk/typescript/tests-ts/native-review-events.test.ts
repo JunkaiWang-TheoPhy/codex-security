@@ -14,7 +14,7 @@ import { createCliTest } from "./support/cli-run.js";
 const fixture = (name: string) =>
   JSON.parse(
     readFileSync(
-      new URL(`../../../examples/audit-events/${name}.json`, import.meta.url),
+      new URL(`./fixtures/audit-events/${name}.json`, import.meta.url),
       "utf8",
     ),
   );

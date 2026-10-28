@@ -1863,38 +1863,39 @@ Options also include `projectId`, `linearApiKey`, and `assigneeId` (ID or email)
 
 ## Review audit events
 
-Review native CloudTrail JSON (a record or a `{"Records": [...]}` export), an OCSF
-record, or a version 1 batch from stdin. No event translation is required. The optional
-batch envelope groups related events and supplies earlier events as context. Each
-observation must cite a new event from its own group.
+Review native CEF records from stdin, one record per line, or a version 1 JSON batch.
+No event translation is required. The optional batch envelope groups related events
+and supplies earlier records as context. Each observation must cite a new event from
+its own group.
 
 ```sh
-codex-security review-events --json < cloudtrail.json
-codex-security review-events --json < ocsf.json
-codex-security review-events --screen-with-decisions --json < batch.json
+codex-security review-events --json < events.cef
+codex-security review-events --screen-with-decisions --json < events.cef
+codex-security review-events --json < batch.json
 ```
 
-CloudTrail 1.x records retain `eventID`, `eventTime`, `eventSource`, `eventName`, and
-all other native fields. OCSF 1.x.y records retain `metadata.version`, `class_uid`,
-`activity_id`, `type_uid`, `time` (Unix milliseconds), and all other native fields.
-These common fields are checked for review; this is not full upstream schema validation.
-See the [runnable synthetic examples](../../../examples/audit-events/README.md), including
-CloudTrail 1.11 and OCSF 1.1.0 API Activity (the version used by Security Lake source v2).
+CEF 0 and 1 records retain their header, extensions, escaping, and optional syslog
+prefix. Header framing and severity are checked; extensions and syslog prefixes are
+preserved without full conformance validation. See the [runnable synthetic CEF
+examples](../../../examples/audit-events/README.md). These examples make no assumptions
+about a customer's sources or export formats and include no collector.
 
 The optional envelope remains `{schemaVersion: 1, source, serviceContext?, groups}`.
-Each group has a unique `id`, an `events` array of unchanged native records, and an
-optional `contextEvents` array of earlier records. A bare record or CloudTrail export
-uses group `events` and source `aws.cloudtrail` or `ocsf`.
+Each group has a unique `id`, an `events` array of unchanged CEF strings, and an
+optional `contextEvents` array of earlier strings. Raw CEF uses group `events` and
+source `cef`; use the envelope for explicit source, grouping, and history.
 
-Citations use CloudTrail `eventID` or OCSF `metadata.uid`. Without an OCSF UID, they
-use `sha256:` plus the SHA-256 of JSON with recursively sorted object keys, retaining
-array order. Identical UID-less records share a citation; enrichment changes it.
-The model receives parallel `eventReferences` arrays, leaving records unchanged.
-Citation IDs must be unique across new and historical events within a group.
+CEF's event class ID identifies a type, not an occurrence. Citations use `sha256:`
+plus SHA-256 of the exact UTF-8 record, including its optional syslog prefix and
+escaping but excluding the line terminator. Repeated identical records share an ID;
+changing content or formatting changes it. The model receives parallel `eventReferences`
+arrays. Citation IDs must be unique across new and historical events within a group.
 
-Legacy custom records (`id`, ISO `timestamp`, `action`, optional `actor`, `resource`,
-`outcome`, `details`) remain accepted inside the envelope. JSONL describes transport,
-not the schema of an event.
+The SDK accepts a CEF string, an array of CEF strings, or a version 1 envelope.
+Existing CloudTrail 1.x records/`Records` exports, OCSF 1.x.y records, and legacy
+custom JSON events remain accepted for compatibility. Their original citation rules
+remain: CloudTrail `eventID`, OCSF `metadata.uid` (or a hash of recursively key-sorted
+JSON when absent), and legacy `id`. JSONL describes transport, not an event schema.
 
 By default each nonempty group gets one read-only Codex review using your configured Codex authentication, including a ChatGPT sign-in. **Decisions screening requires an OpenAI API key in `OPENAI_API_KEY`.** Signing in to Codex with ChatGPT alone cannot authenticate the Decisions API call. This applies to both single-batch and live reviews.
 

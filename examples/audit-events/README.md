@@ -1,38 +1,42 @@
-# Native audit events
+# Review CEF audit events
 
-These synthetic examples retain the source event schema. Run from this directory:
+These synthetic CEF records demonstrate an audit-event review; they do not describe
+any customer's logging system. Run from this directory with a CLI built from these PRs:
 
 ```sh
-codex-security review-events --json < cloudtrail.json
-codex-security review-events --json < ocsf.json
+codex-security review-events --json < events.cef
 codex-security review-events --json < batch.json
+codex-security review-events --screen-with-decisions --json < events.cef
 ```
 
-`cloudtrail.json` is a native CloudTrail `Records` export using event version 1.11.
-`ocsf.json` is an OCSF 1.1.0 API Activity event (class 6003, Update activity 3),
-compatible with the schema used by AWS Security Lake source version 2.
-`batch.json` wraps unchanged CloudTrail records with grouping and earlier context.
-No conversion into a proprietary event schema is required.
+`events.cef` contains native CEF records, one per line. `batch.json` demonstrates the
+optional grouping/history envelope: `events` and `contextEvents` contain the same
+unchanged CEF strings. No collector or conversion to a proprietary event schema is
+needed. Collection, durable history, checkpoints, and paging belong to the caller.
 
-The reader accepts CloudTrail 1.x and OCSF 1.x.y common review fields and preserves
-additional fields, including nested `userIdentity`, `requestParameters`, `actor`,
-`api`, `unmapped`, and extensions. It does not certify full upstream schema compliance
-or convert CloudTrail into OCSF. Producers remain responsible for their schema.
+CEF 0 and 1 headers are supported, with or without a syslog prefix. Header framing
+and severity are checked; extension values are retained verbatim, including spaces,
+pipes, escaped equals signs, backslashes, and escaped newlines. This is not a complete
+CEF conformance validator or a syslog receiver. Physical newlines delimit records.
 
-Citations use CloudTrail `eventID` or OCSF `metadata.uid`. When an OCSF record lacks
-its optional UID, the citation is `sha256:` plus the SHA-256 of JSON with recursively
-sorted object keys (array order preserved). Identical UID-less records have the same
-citation; changing or enriching a record changes it. Native records remain unchanged.
-The model receives a parallel `eventReferences` list linking citations to each record.
+The header's event class ID names an event type, not an occurrence. Citation IDs use
+`sha256:` followed by the SHA-256 of each complete UTF-8 record, including its optional
+syslog prefix and original escaping, excluding the transport line terminator. The
+model receives parallel `eventReferences` arrays; the records are not modified.
+Identical records share an ID; changing content, spacing, or prefixes changes it.
+Reuse the exact earlier record for historical citations. Each group must have unique
+IDs across its new and historical records.
 
-A bare record or CloudTrail export uses group `events`, with source `aws.cloudtrail`
-or `ocsf`. Use the version 1 envelope for explicit source, grouping, and historical
-context. Citation IDs must be unique within each group, across new and context events.
-Legacy custom events remain accepted for existing callers.
+Raw records use source `cef` and group `events`. Use the optional JSON envelope to
+name a feed, group related events, describe service behavior, and supply prior evidence.
+The SDK accepts one CEF string, an array of CEF strings, or an envelope through
+`reviewSecurityEvents()`; `securityEventInputSchema` validates those inputs.
 
-JSONL is a transport: each line contains an independent JSON input in one of these
-formats. It does not define an event schema. This example needs no collector.
+Direct review uses the configured Codex authentication. Decisions screening is opt-in
+and needs `OPENAI_API_KEY`; its confidence cutoff defaults to 0.95. A `page` result is
+a recommendation, not a delivered page. These examples do not measure detection quality.
 
-References: [CloudTrail record fields](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html),
-[OCSF 1.1.0](https://github.com/ocsf/ocsf-schema/tree/v1.1.0),
-[Security Lake OCSF versions](https://docs.aws.amazon.com/security-lake/latest/userguide/open-cybersecurity-schema-framework.html).
+JSONL is an optional transport for JSON strings and envelopes, separate from CEF.
+Existing CloudTrail, OCSF, and legacy custom JSON inputs remain compatible.
+
+Reference: [ArcSight CEF implementation standard](https://www.microfocus.com/documentation/arcsight/arcsight-smartconnectors-8.3/cef-implementation-standard/Content/CEF/Chapter%201%20What%20is%20CEF.htm).
