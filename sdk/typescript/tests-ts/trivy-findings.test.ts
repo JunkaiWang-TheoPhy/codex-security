@@ -116,6 +116,10 @@ test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root 
 
 test.each([
   ["team name/répo", "team%20name/r%C3%A9po", true],
+  ["Team%20Name/répo", "Team%20Name/r%C3%A9po", true],
+  ["a%2520b/x é", "a%2520b/x%20%C3%A9", true],
+  ["a%FF/répo", "a%FF/r%C3%A9po", true],
+  ["%72epo/café", "repo/caf%C3%A9", false],
   ["a%2f b/repo", "a/%20b/repo", false],
   ["other/../repo name", "repo%20name", false],
   ["repo name", "Repo%20name", false],

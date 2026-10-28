@@ -34,6 +34,6 @@ Trivy can report the same package path for a JAR inside a WAR file and a JAR ins
 
 With the same source key and identifying paths, a change in version, severity, commit, or declaration line updates the existing occurrence. Replaying identical evidence leaves it unchanged. A different manifest or package path, including a versioned JAR filename, identifies a new occurrence. If several records have the same identity, the importer excludes all of them.
 
-If you tested an earlier development build of this importer, finish any interrupted Cloud upload with the build that created it before switching builds. Earlier builds can produce different finding IDs or evidence from the same file. If either changed, the current build cannot identify the old pending request from that file.
+If an earlier development build left a Cloud upload pending, verify its destination and finish it with that build before switching. Earlier builds can produce different finding IDs or evidence from the same file. If either changed, the current build cannot identify the old pending request from that file.
 
 A Trivy status of `fixed` means an upstream fix is available. Imported evidence starts as `not_assessed`. Omitting an occurrence from a later report leaves its earlier record open.

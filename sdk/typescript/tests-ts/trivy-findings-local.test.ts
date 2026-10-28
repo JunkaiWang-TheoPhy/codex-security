@@ -219,6 +219,23 @@ test.each([
   },
 );
 
+test("a reader's GitHub web hint cannot change the meaning of the raw Trivy transport", async () => {
+  const web = "HTTPS://github.com/example/project";
+  await using checkout = await trivyCheckout(checkoutUrl, web);
+  for (const raw of [checkoutUrl, web]) {
+    const { findings, read, excluded } = normalizeTrivyFindings(
+      { ...trivyReport(), ArtifactName: ".", Metadata: { RepoURL: raw } },
+      "local",
+      ".",
+    );
+    findings[0]!.evidence.details = { kind: "sast", repository: { url: web } };
+    const pending = checkout.prepare({ findings, read, excluded });
+    if (raw === checkoutUrl)
+      expect((await pending).preview.findings).toHaveLength(1);
+    else await expect(pending).rejects.toThrow("different repositories");
+  }
+});
+
 test("a reader-declared Trivy source must agree with the finding even when both are checkout remotes", async () => {
   await using checkout = await trivyCheckout(checkoutUrl, foreignUrl);
   git(checkout.repository, "remote", "add", "upstream", foreignUrl);

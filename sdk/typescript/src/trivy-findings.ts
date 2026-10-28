@@ -167,9 +167,10 @@ export function trivyReportRemotes(report: unknown) {
     artifact && artifact !== repository ? artifact : undefined;
   if (artifactRepository && report["ArtifactType"] === "repository") {
     // Trivy clones an escaped HTTP path but retains the scanner argument as its label.
-    // Preserve the authority, existing escapes, separators and dot segments literally.
+    // Existing spaces, percent signs and non-ASCII bytes stay escaped in a mixed path.
+    // Go can rewrite escaped separators or unreserved bytes when it encounters raw Unicode.
     const escaped = artifactRepository.replace(
-      /^(https?:\/\/[^/]+)(\/[^%]*)$/u,
+      /^(https?:\/\/[^/]+)(\/(?:[^%]|%(?:2[05]|[89A-F][\dA-F]))*)$/u,
       (_, authority: string, path: string) =>
         authority + path.replace(/[ \P{ASCII}]+/gu, encodeURIComponent),
     );

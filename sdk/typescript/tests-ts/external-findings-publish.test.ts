@@ -299,6 +299,7 @@ async function fixture(
   const receipts = new Map<string, FindingImportReceipt>();
   const posts: string[] = [];
   const state = {
+    repositoryUrl,
     marker: "generation-1",
     environmentId: "environment-example" as string | null,
     materializeDefaults: false,
@@ -313,7 +314,7 @@ async function fixture(
     id: options.repository,
     object: "security.repository",
     repo_connector_id: repoConnectorId,
-    url: repositoryUrl,
+    url: state.repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -4600,66 +4601,80 @@ test.each([
 
 const checkpointRepository = "https://github.com/example/project";
 test.each(["file", "selected rows", "empty source list"] as const)(
-  "a Trivy %s retry requires the original source and a checkpoint from the current importer",
-  async (inputKind) => {
-    const cloud = await fixture();
-    const artifact = "ssh://git@github.com/example/project.git";
-    const prepare = async (ArtifactName = artifact, kind = inputKind) => {
-      const report = { ...trivyReport(), Metadata: {}, ArtifactName };
-      if (kind === "file") {
-        await writeFile(cloud.file, JSON.stringify(report));
-        return prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
-      }
-      return prepareNormalizedExternalPublication(
-        {
-          ...selectedTrivyRows(report),
-          ...(kind === "empty source list" && {
-            sourceRepositoryUrls: [],
-          }),
-        },
+  "a Trivy %s publication resumes its original request across entrypoints and a repository rename",
+  async (initialKind) => {
+    const report = {
+      ...trivyReport(),
+      Metadata: {},
+      ArtifactName: "ssh://git@github.com/example/project.git",
+    };
+    const cloud = await fixture(report);
+    const rows = selectedTrivyRows(report);
+    const file = () =>
+      prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
+    const selected = (sourceRepositoryUrls?: string[]) =>
+      prepareNormalizedExternalPublication(
+        sourceRepositoryUrls ? { ...rows, sourceRepositoryUrls } : rows,
         trivyOptions,
         cloud.deps,
       );
-    };
-    const first = await prepare();
+    const first =
+      initialKind === "file"
+        ? await file()
+        : await selected(initialKind === "empty source list" ? [] : undefined);
     cloud.state.loseResponse = true;
     await expect(first.publish()).rejects.toThrow("resume the saved request");
-
-    const directory = join(
-      cloud.root,
-      "state",
-      "external-finding-publications",
+    const body = cloud.posts[0]!;
+    expect(JSON.parse(body)).toEqual(first.preview.requests[0]);
+    await writeFile(
+      cloud.file,
+      JSON.stringify({ ...report, ArtifactName: foreignArtifactUrl }),
     );
-    const pending = (await readdir(directory)).find((name) =>
-      name.endsWith(".pending.json"),
-    )!;
-    const filename = join(directory, pending);
-    const saved = JSON.parse(await readFile(filename, "utf8"));
-    expect(saved.requests[0]).toEqual(JSON.parse(cloud.posts[0]!));
-    await expect(prepare(foreignArtifactUrl)).rejects.toThrow(
-      "does not match the selected Cloud repository",
-    );
-    expect((await prepare()).preview.resumed).toBe(true);
+    await expect(file()).rejects.toThrow("does not match");
+    await writeFile(cloud.file, JSON.stringify(report));
 
-    const fullReport = await prepare(artifact, "file");
-    expect(fullReport.preview.resumed).toBe(inputKind === "file");
-    delete saved.trivyRepositoryBound;
-    const older = JSON.stringify(saved);
-    await writeFile(filename, older);
-    await expect(prepare()).rejects.toThrow("the build that created it");
-    if (inputKind !== "file") {
-      // These rows alone have the earlier raw importer's checkpoint key.
-      await expect(prepare(artifact, "file")).rejects.toThrow(
-        "the build that created it",
-      );
-      await expect(fullReport.publish()).rejects.toThrow(
-        "the build that created it",
-      );
-    }
-    expect(await readFile(filename, "utf8")).toBe(older);
-    expect(cloud.posts).toHaveLength(1);
+    cloud.state.repositoryUrl = "https://github.com/example/renamed";
+    await expect(selected([cloud.state.repositoryUrl])).rejects.toThrow(
+      "does not match",
+    );
+    expect(cloud.posts).toEqual([body]);
+    const retry = initialKind === "file" ? await selected() : await file();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    expect((await retry.publish()).status).toBe("complete");
+    expect(cloud.posts).toEqual([body, body]);
   },
 );
+
+test("unverified Trivy checkpoints retain their requests and receipts for the original importer", async () => {
+  const cloud = await fixture(trivyReport());
+  const prepare = () =>
+    prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
+  cloud.state.brokenReadback = true;
+  await expect((await prepare()).publish()).rejects.toThrow();
+  cloud.state.brokenReadback = false;
+  const retry = await prepare();
+  const directory = join(cloud.root, "state", "external-finding-publications");
+  const filename = join(
+    directory,
+    (await readdir(directory)).find((name) => name.endsWith(".pending.json"))!,
+  );
+  const { accountId, requests, receipts, inputProjection } = JSON.parse(
+    await readFile(filename, "utf8"),
+  );
+  expect(receipts).toHaveLength(1);
+  const original = JSON.stringify({
+    accountId,
+    requests,
+    receipts,
+    inputProjection,
+  });
+  await writeFile(filename, original);
+  await expect(prepare()).rejects.toThrow("the build that created it");
+  await expect(retry.publish()).rejects.toThrow();
+  expect(await readFile(filename, "utf8")).toBe(original);
+  expect(cloud.posts).toHaveLength(1);
+});
 
 test.each([
   [
@@ -4688,26 +4703,17 @@ test.each([
     );
     cloud.state.loseResponse = true;
     await expect(first.publish()).rejects.toThrow("resume the saved request");
-    const renamed = {
-      ...cloud.deps,
-      fetch: async (url: string, init: RequestInit) => {
-        const response = await cloud.deps.fetch(url, init);
-        if (!new URL(url).pathname.endsWith("/repositories")) return response;
-        const catalog = await response.json();
-        catalog.data[0].url = "https://github.com/example/renamed";
-        return Response.json(catalog);
-      },
-    };
+    cloud.state.repositoryUrl = "https://github.com/example/renamed";
     const retry = await prepareExternalPublication(
       cloud.file,
       selected,
-      renamed,
+      cloud.deps,
     );
     expect(retry.preview.resumed).toBe(true);
     expect((await retry.publish()).status).toBe("complete");
     expect(cloud.posts[1]).toBe(cloud.posts[0]);
     await expect(
-      prepareExternalPublication(cloud.file, selected, renamed),
+      prepareExternalPublication(cloud.file, selected, cloud.deps),
     ).rejects.toThrow("does not match");
     expect(cloud.posts).toHaveLength(2);
   },

@@ -127,7 +127,7 @@ export class ExternalPublicationError extends CodexSecurityError {
 
 interface SavedSubmission {
   accountId: string;
-  trivyRepositoryBound?: true;
+  trivyRepositoryUrl?: string;
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
@@ -173,7 +173,7 @@ function sameSubmission(
 ): boolean {
   return (
     left.accountId === right.accountId &&
-    left.trivyRepositoryBound === right.trivyRepositoryBound &&
+    left.trivyRepositoryUrl === right.trivyRepositoryUrl &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -382,12 +382,6 @@ export async function prepareNormalizedExternalPublication(
   );
 }
 
-function evidenceIdentity(input: ExternalFindings) {
-  return input.report === undefined
-    ? input.findings
-    : { findings: input.findings, report: reportForJson(input.report) };
-}
-
 function normalizedPublicationInput(
   input: ExternalFindings,
 ): ExternalPublicationInput {
@@ -419,13 +413,10 @@ function normalizedPublicationInput(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  const evidence = evidenceIdentity(current);
-  const identity = current.sourceRepositoryUrls?.length
-    ? {
-        evidence,
-        sourceRepositoryUrls: [...new Set(current.sourceRepositoryUrls)].sort(),
-      }
-    : evidence;
+  const identity =
+    current.report === undefined
+      ? current.findings
+      : { findings: current.findings, report: reportForJson(current.report) };
   return {
     current,
     legacy: current,
@@ -464,7 +455,6 @@ async function preparePublicationInput(
     legacyIdentity,
   } = input;
   if (options.provider === "trivy") validateNormalizedTrivySources(parsed);
-  const { sourceRepositoryUrls = [] } = parsed;
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
@@ -567,8 +557,12 @@ async function preparePublicationInput(
   ];
   const inputDigest = hash("sha256", canonicalJson(currentIdentity));
   const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
-  const unverifiedTrivyCheckpoint =
-    "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.";
+  function requireTrivyRepositoryUrl(content: SavedSubmission): void {
+    if (source.provider === "trivy" && !content.trivyRepositoryUrl)
+      throw new CodexSecurityError(
+        "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
+      );
+  }
   function validateSaved(
     serialized: string,
     mode: "current" | "legacy" | "identify" = "current",
@@ -606,12 +600,7 @@ async function preparePublicationInput(
       )
         throw new Error("Saved import destination does not match.");
     }
-    if (
-      mode !== "identify" &&
-      source.provider === "trivy" &&
-      content.trivyRepositoryBound !== true
-    )
-      throw new CodexSecurityError(unverifiedTrivyCheckpoint);
+    if (mode !== "identify") requireTrivyRepositoryUrl(content);
     return content;
   }
   const checkpointKey = (identity: unknown) =>
@@ -625,11 +614,7 @@ async function preparePublicationInput(
       (left, right) => left.localeCompare(right),
     ),
   );
-  const legacyKeys = new Set([
-    checkpointKey(legacyIdentity),
-    // Historical filenames predate destination checks on report-level URLs.
-    ...(sourceRepositoryUrls.length ? [] : [historicalKey]),
-  ]);
+  const legacyKeys = new Set([checkpointKey(legacyIdentity), historicalKey]);
   async function rejectUnidentifiedLegacyCheckpoint(): Promise<void> {
     const entries = await readdir(state, { withFileTypes: true }).catch(
       (error: NodeJS.ErrnoException) => {
@@ -637,12 +622,7 @@ async function preparePublicationInput(
         throw error;
       },
     );
-    if (!entries.length) return;
-    await validatePreparedOutputDir(state, undefined, true);
-    const priorTrivyKey =
-      source.provider === "trivy" && sourceRepositoryUrls.length
-        ? checkpointKey(evidenceIdentity(parsed))
-        : undefined;
+    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
@@ -654,23 +634,15 @@ async function preparePublicationInput(
         // Locale-dependent filenames predate input projections. Later formats
         // must remain isolated by their deployment-bound checkpoint keys.
         const content = JSON.parse(serialized) as SavedSubmission | null;
-        if (!content) continue;
-        if (candidateKey === priorTrivyKey) {
-          // Earlier Trivy builds keyed these findings without their report URLs.
-          if (content.trivyRepositoryBound === true) continue;
-        } else {
-          if (content.inputProjection !== undefined) continue;
-          validateSaved(serialized, "identify");
-        }
+        if (!content || content.inputProjection !== undefined) continue;
+        validateSaved(serialized, "identify");
       } catch {
         continue;
       }
       // These older bodies contain no deployment identity. Do not guess a
       // destination or replace their immutable request with a fresh publication.
       throw new CodexSecurityError(
-        candidateKey === priorTrivyKey
-          ? unverifiedTrivyCheckpoint
-          : "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
+        "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
       );
     }
   }
@@ -751,6 +723,25 @@ async function preparePublicationInput(
   const saved =
     serialized === undefined ? recovered : validateSaved(serialized);
   if (!saved) await rejectUnidentifiedLegacyCheckpoint();
+  // A retry may select the same evidence through another entry point after
+  // a catalog rename. Check its report claims against the original destination.
+  const repositoryUrl = saved?.trivyRepositoryUrl ?? destination.url;
+  const destinationKey = cloudRepositoryUrlKey(repositoryUrl);
+  const repositoryKey = (url: string) =>
+    source.provider === "trivy"
+      ? trivyRemoteKey(url, repositoryUrl)
+      : cloudRepositoryUrlKey(url);
+  if (!saved || source.provider === "trivy") {
+    for (const url of [
+      reportRepositoryUrl,
+      ...(parsed.sourceRepositoryUrls ?? []),
+    ]) {
+      if (url && repositoryKey(url) !== destinationKey)
+        throw new CodexSecurityError(
+          `Source report belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(repositoryUrl)}.`,
+        );
+    }
+  }
   if (saved) {
     const content = saved;
     for (const submission of content.requests) {
@@ -774,17 +765,6 @@ async function preparePublicationInput(
   }
   let requests = saved?.requests;
   if (!requests) {
-    const destinationKey = cloudRepositoryUrlKey(destination.url);
-    const repositoryKey = (url: string) =>
-      options.provider === "trivy"
-        ? trivyRemoteKey(url, destination.url)
-        : cloudRepositoryUrlKey(url);
-    for (const url of [reportRepositoryUrl, ...sourceRepositoryUrls]) {
-      if (url && repositoryKey(url) !== destinationKey)
-        throw new CodexSecurityError(
-          `Source report belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
-        );
-    }
     for (const finding of parsed.findings) {
       const typedUrl = finding.evidence.details?.repository?.url;
       const scannerUrls = [
@@ -903,7 +883,7 @@ async function preparePublicationInput(
   }
   const submission: SavedSubmission = {
     accountId: credentials.account_id,
-    ...(source.provider === "trivy" && { trivyRepositoryBound: true }),
+    ...(source.provider === "trivy" && { trivyRepositoryUrl: repositoryUrl }),
     requests,
     receipts: saved?.receipts,
     inputProjection: saved?.inputProjection ?? {
@@ -982,6 +962,7 @@ async function preparePublicationInput(
           pending === undefined
             ? submission
             : (JSON.parse(pending) as SavedSubmission);
+        requireTrivyRepositoryUrl(current);
         if (!sameSubmission(current, submission))
           throw new CodexSecurityError(
             "Another publication prepared this input. Run the command again to review and resume that saved request.",

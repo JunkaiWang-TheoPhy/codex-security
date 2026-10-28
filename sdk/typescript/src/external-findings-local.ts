@@ -388,12 +388,17 @@ async function requireMatchingRepository(
     const key = remoteRepositoryKey(url, "github");
     return key && githubRepositories.has(key) ? key : undefined;
   };
-  const claims = sources.map(({ url, typedTrivyUrl }) => {
+  const claims = sources.map(({ url, platform, typedTrivyUrl }) => {
     const githubSource = githubSourceFor(url);
-    const key = typedTrivyUrl
-      ? trivyWebUrlKey(url, githubSource)
-      : (remoteRepositoryKey(url, provider, githubSource) ??
-        (provider === "trivy" ? url : undefined));
+    const readerWebUrl =
+      provider === "trivy" &&
+      platform === "github" &&
+      /^https?:\/\//iu.test(url);
+    const key =
+      typedTrivyUrl || readerWebUrl
+        ? trivyWebUrlKey(url, githubSource)
+        : (remoteRepositoryKey(url, provider, githubSource) ??
+          (provider === "trivy" ? url : undefined));
     return { url, githubSource, key };
   });
   if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
@@ -558,32 +563,26 @@ export async function prepareNormalizedLocalImport(
     options.repository,
     dependencies,
   );
-  const sources = new Map<string, ExternalSourceRepository>(
-    current.sourceRepositoryUrls?.map((url) => [url, { url }]),
-  );
+  const sources = new Set(current.sourceRepositoryUrls);
   const typedTrivyUrls = new Set<string>();
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) {
       if (options.provider === "trivy") typedTrivyUrls.add(url);
-      else sources.set(url, { url });
+      else sources.add(url);
     }
     for (const source of scannerFindingRepositoryUrls(
       options.provider,
       evidence.source_data,
     ))
-      sources.set(source, { url: source });
-  }
-  for (const source of dependencies.sourceRepositories ?? []) {
-    // A reader's explicit platform also applies to the same URL in typed evidence.
-    if (sources.get(source.url)?.platform !== "github")
-      sources.set(source.url, source);
+      sources.add(source);
   }
   await requireMatchingRepository(
     repository,
     options.provider,
     [
-      ...sources.values(),
+      ...Array.from(sources, (url) => ({ url })),
+      ...(dependencies.sourceRepositories ?? []),
       ...Array.from(typedTrivyUrls, (url) => ({ url, typedTrivyUrl: true })),
     ],
     workbenchOptions.protectedRoot,
