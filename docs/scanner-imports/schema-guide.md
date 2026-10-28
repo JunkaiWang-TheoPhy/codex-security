@@ -1,6 +1,6 @@
 # How saved scanner reports map to imported evidence
 
-This guide covers the Wiz, Endor Labs, Snyk Open Source, Semgrep Code and GitHub
+This guide covers the Wiz, Endor Labs, Snyk Open Source, Semgrep Code, GitHub and Black Duck
 **file readers** used by `publish findings`. Acquisition produces the artifact:
 for example, `snyk test` scans a workspace, while `codex-security import github`
 retrieves selected code-scanning alerts. File ingestion reads the saved report.
@@ -27,10 +27,11 @@ to investigate records together, not instructions to merge them.
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
+| [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
 
 Within **one input**, duplicate IDs are ambiguous, not corroboration. Wiz and
 GitHub reject a selection with duplicate accepted IDs. Endor, Snyk and Semgrep
-exclude every record with the colliding identity. Inspect the source and select
+exclude every record with the colliding identity. Black Duck rejects duplicate occurrences in a complete collection, and excludes all colliding rows in an explicit selection. Inspect the source and select
 the intended occurrence; don't rename records simply to make them import. Across
 **separate local imports**, changed evidence updates the same record; omission
 does not delete or resolve it. Cloud publication sends an expected version;
