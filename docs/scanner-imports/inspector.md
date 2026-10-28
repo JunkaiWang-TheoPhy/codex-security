@@ -41,13 +41,13 @@ Inspector can identify a repository by an opaque project ARN and a name such as
 `example/project`. That name can exist on several Git hosts. For these exports,
 maintain a JSON map keyed by the full Inspector project ARN. Verify each URL
 against the SCM repository connected to that project during integration setup.
-Keep the map outside any checkout containing the report, including directory
-links along the map path. For local imports, also keep it outside the selected
-repository and any enclosing checkout. You can store the map in a separate
-trusted configuration checkout and run the CLI from there.
-When a Cloud report comes from outside the source checkout, its repository URL
-does not identify the source checkout on disk. Verify that the map comes from
-a source you control independently of the scanned repository.
+For local imports, keep the map outside the selected repository and any checkout
+containing the repository or export. You can store the map in a separate
+configuration checkout. For Cloud publication, keep the map under operator
+control outside all Git checkouts. The CLI checks the map path, including its
+directory links, for checkout markers and recognizable Git metadata. It
+recognizes headless common storage when a `config` file accompanies the
+`objects` and `refs` directories. Links in those positions also count.
 
 ```json
 {

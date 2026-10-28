@@ -42,6 +42,7 @@ import {
   gitMarkerRoot,
   gitOutput,
   gitProtectionRoots,
+  hasGitCommonDirectoryLayout,
   normalizeRepository,
   nullIfMissingPath,
 } from "./targets.js";
@@ -199,9 +200,11 @@ function remoteRepository(
   };
 }
 
-async function bareMetadataRoots(
+/** @internal */
+export async function bareMetadataRoots(
   repository: string,
   signal?: AbortSignal,
+  includeHeadless = false,
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
@@ -218,9 +221,10 @@ async function bareMetadataRoots(
       signal,
     );
     if (
-      (head?.isFile() || head?.isSymbolicLink()) &&
-      ((await present("commondir")) ||
-        ((await present("objects")) && (await present("refs"))))
+      (includeHeadless && (await hasGitCommonDirectoryLayout(directory))) ||
+      ((head?.isFile() || head?.isSymbolicLink()) &&
+        ((await present("commondir")) ||
+          ((await present("objects")) && (await present("refs")))))
     )
       roots.push(directory);
     const parent = parentDirectory(directory);

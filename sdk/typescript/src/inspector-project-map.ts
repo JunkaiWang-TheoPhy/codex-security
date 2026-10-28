@@ -4,6 +4,7 @@ import { format, isAbsolute, join, parse, relative, sep } from "node:path";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import { parentDirectory } from "./windows-path.js";
+import { bareMetadataRoots } from "./external-findings-local.js";
 import { readRegularInputBytes } from "./prompt-files.js";
 import { isRecord } from "./record.js";
 import {
@@ -81,6 +82,18 @@ export async function readInspectorProjectMap(
   signal: AbortSignal,
 ): Promise<ReadonlyMap<string, string>> {
   const metadata = await lstat(path, { bigint: true });
+  const mapDirectories = await directoriesAlongPath(path, signal);
+  if (localRepository === undefined) {
+    for (const directory of mapDirectories) {
+      if (
+        (await gitMarkerRoot(directory, signal, "outermost")) !== null ||
+        (await bareMetadataRoots(directory, signal, true)).length > 0
+      )
+        throw new CodexSecurityError(
+          "--inspector-project-map for Cloud must be outside all Git checkouts and recognizable Git metadata directories.",
+        );
+    }
+  }
   const protectedRoots = new Set<string>();
   if (localRepository !== undefined)
     protectedRoots.add(await realpath(localRepository));
@@ -94,7 +107,7 @@ export async function readInspectorProjectMap(
   }
   const roots = [...protectedRoots];
   if (roots.length) {
-    for (const directory of await directoriesAlongPath(path, signal))
+    for (const directory of mapDirectories)
       if (
         roots.some((root) => !relativePathIsOutside(relative(root, directory)))
       )

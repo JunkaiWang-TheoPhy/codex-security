@@ -17,6 +17,7 @@ import {
   dependencies as cliDependencies,
   FakeSignals,
 } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 import {
@@ -291,7 +292,7 @@ test("Inspector CLI uses an operator map for a repository with a name and projec
   }
 });
 
-test("Cloud permits a trusted configuration checkout and rejects maps controlled by the report checkout", async () => {
+test("Cloud rejects Inspector maps stored in Git checkouts or metadata", async () => {
   const f = await fixture();
   const report = inspectorReport();
   const resource = report.findings[0]!.resources[0]!;
@@ -344,14 +345,14 @@ test("Cloud permits a trusted configuration checkout and rejects maps controlled
     await writeFile(join(external, "projects.json"), mapping);
     const repeated = join(f.root, "repeated-separators");
     await symlink(`${bridge}//external`, repeated);
-    expect(await run(repeated)).toContain("outside the selected repository");
+    expect(await run(repeated)).toContain("outside all Git checkouts");
 
     const hop = join(external, "hop");
     await symlink(config, hop);
     const exported = join(external, "linked-report.json");
     await symlink("hop/../example project/report.json", exported);
     expect(await run(f.repository, f.root, exported)).toContain(
-      "outside the selected repository",
+      "outside all Git checkouts",
     );
     expect(await run(f.root, f.root, exported)).toContain(
       "CODEX_SECURITY_CLOUD_BASE_URL",
@@ -371,16 +372,36 @@ test("Cloud permits a trusted configuration checkout and rejects maps controlled
     await symlink(Buffer.concat([rawName, Buffer.from("/maps")]), rawAlias);
     expect(await run(rawAlias)).toContain("UTF-8 symlink targets");
   }
-  expect(await run(config)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  expect(await run(config)).toContain("outside all Git checkouts");
   expect(await run(config, config, f.file)).toContain(
-    "CODEX_SECURITY_CLOUD_BASE_URL",
+    "outside all Git checkouts",
   );
   for (const directory of [f.repository, alias])
-    expect(await run(directory)).toContain("outside the selected repository");
+    expect(await run(directory)).toContain("outside all Git checkouts");
   // The report path enters the checkout and follows its "maps" link back out.
   expect(
     await run(f.repository, f.root, join(alias, "selected.json")),
-  ).toContain("outside the selected repository");
+  ).toContain("outside all Git checkouts");
+  expect(await run(f.root, f.root, f.file)).toContain(
+    "CODEX_SECURITY_CLOUD_BASE_URL",
+  );
+  const bare = join(f.root, "bare");
+  execFileSync("git", ["init", "--quiet", "--bare", bare]);
+  await writeFile(join(bare, "projects.json"), mapping);
+  expect(await run(bare)).toContain("outside all Git checkouts");
+  const linked = join(f.root, "linked-admin");
+  await mkdir(linked);
+  await writeFile(join(linked, "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(linked, "commondir"), bare);
+  await rm(join(bare, "HEAD"));
+  expect(await run(bare)).toContain("outside all Git checkouts");
+  await mkdir(join(bare, "HEAD"));
+  expect(
+    await realpath(git(linked, "--git-dir=.", "rev-parse", "--git-common-dir")),
+  ).toBe(bare);
+  await writeFile(join(linked, "projects.json"), mapping);
+  for (const directory of [linked, bare])
+    expect(await run(directory)).toContain("outside all Git checkouts");
   if (process.platform === "win32") {
     const linkedConfig = join(f.root, "linked-config");
     try {
@@ -390,6 +411,8 @@ test("Cloud permits a trusted configuration checkout and rejects maps controlled
       throw error;
     }
     expect(await realpath(linkedConfig)).toBe(await realpath(config));
+    expect(await run(linkedConfig)).toContain("outside all Git checkouts");
+    await rm(join(config, ".git"), { recursive: true });
     expect(await run(linkedConfig)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
   }
 });

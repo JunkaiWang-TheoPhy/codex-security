@@ -237,24 +237,33 @@ export async function enclosingGitWorktreeRoots(
   }
 }
 
+/** Recognize Git common-directory storage without opening its config. */
+export async function hasGitCommonDirectoryLayout(
+  repository: string,
+  inspect: (path: string) => Promise<Stats> = lstat,
+): Promise<boolean> {
+  const marker = async (name: string, kind: "isFile" | "isDirectory") => {
+    const entry = await inspect(join(repository, name)).catch(
+      nullIfMissingPath,
+    );
+    return entry !== null && (entry[kind]() || entry.isSymbolicLink());
+  };
+  if (!(await marker("config", "isFile"))) return false;
+  const [objects, refs] = await Promise.all([
+    marker("objects", "isDirectory"),
+    marker("refs", "isDirectory"),
+  ]);
+  return objects && refs;
+}
+
 export async function isGitMetadataDirectory(
   repository: string,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  const metadata = async (name: string, followLinks = false) =>
-    await (followLinks ? stat : lstat)(join(repository, name)).catch(
-      nullIfMissingPath,
-    );
-  const head = await metadata("HEAD");
+  const head = await lstat(join(repository, "HEAD")).catch(nullIfMissingPath);
   if (head === null) {
-    // A common directory can outlive its main worktree's HEAD. Require both
-    // Git storage directories and its format declaration, not names alone.
-    if (!(await metadata("config", true))?.isFile()) return false;
-    const [objects, refs] = await Promise.all([
-      metadata("objects", true),
-      metadata("refs", true),
-    ]);
-    if (!objects?.isDirectory() || !refs?.isDirectory()) return false;
+    // A common directory can outlive its main worktree's HEAD.
+    if (!(await hasGitCommonDirectoryLayout(repository, stat))) return false;
     try {
       const version = await gitOutput(
         repository,

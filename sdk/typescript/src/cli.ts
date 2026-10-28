@@ -3577,7 +3577,7 @@ export async function main(
         inspectorProjectMap: optionValue("--inspector-project-map")
           .optional()
           .describe(
-            "Inspector only: operator-controlled JSON file mapping full Inspector repository project ARNs to canonical repository URLs. Keep it outside the report checkout. For --to local, also keep it outside the selected repository and its enclosing checkouts. You can use a separate trusted configuration checkout.",
+            "Inspector only: operator-controlled JSON file mapping full Inspector repository project ARNs to canonical repository URLs. For --to local, keep the map outside the scanned checkout. If you supply a map for --to cloud, keep it outside all Git checkouts and recognizable Git metadata directories.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
