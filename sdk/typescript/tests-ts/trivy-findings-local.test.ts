@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
@@ -10,11 +9,18 @@ import {
 import type { ExternalFindings } from "../src/external-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { normalizeTrivyFindings } from "../src/trivy-findings.js";
+import { git } from "./git-fixture.js";
 import { trivyReport } from "./support/trivy-import-fixtures.js";
 
 const checkoutUrl = "https://github.com/example/project";
 const foreignUrl = "https://github.com/example/other";
+const enterpriseUrl = "https://git.example.test/Example/Project";
+const enterpriseSsh = "git@git.example.test:example/project.git";
 const mismatch = "does not match a configured remote";
+
+function repositoryClaims(artifactName: string, repoUrl: string) {
+  return { ArtifactName: artifactName, Metadata: { RepoURL: repoUrl } };
+}
 
 async function trivyCheckout(remote?: string, githubSource?: string) {
   const fixture = await localFindingsFixture({ remote });
@@ -73,28 +79,22 @@ test.each([
   ],
   [
     "unverified Enterprise aliases without a checkout remote",
-    {
-      ArtifactName: "https://git.example.test/example/project",
-      Metadata: { RepoURL: "git@git.example.test:example/project.git" },
-    },
+    repositoryClaims(enterpriseUrl.toLowerCase(), enterpriseSsh),
     undefined,
     "identify different repositories",
   ],
   [
     "case-sensitive HTTPS claims without a GitHub source",
-    {
-      ArtifactName: "https://git.example.test/Example/Project",
-      Metadata: { RepoURL: "https://git.example.test/example/project.git" },
-    },
+    repositoryClaims(enterpriseUrl, enterpriseUrl.toLowerCase() + ".git"),
     undefined,
     "identify different repositories",
   ],
   [
     "case-sensitive HTTP claims without a GitHub source",
-    {
-      ArtifactName: "http://git.example.test/Example/Project",
-      Metadata: { RepoURL: "http://git.example.test/example/project.git" },
-    },
+    repositoryClaims(
+      "http://git.example.test/Example/Project",
+      "http://git.example.test/example/project.git",
+    ),
     undefined,
     "identify different repositories",
   ],
@@ -176,11 +176,7 @@ test.each([
     const scheme = remote.startsWith("http:") ? "http" : "https";
     const url = `${scheme}://git.example.test/example/project`;
     await using checkout = await trivyCheckout(url, url);
-    const report = {
-      ...trivyReport(),
-      ArtifactName: artifact,
-      Metadata: { RepoURL: remote },
-    };
+    const report = { ...trivyReport(), ...repositoryClaims(artifact, remote) };
     for (const prepare of [checkout.fromNormalized, checkout.fromFile]) {
       const pending = prepare(report);
       if (accepts) expect((await pending).preview.findings).toHaveLength(1);
@@ -287,13 +283,7 @@ test("Trivy distinguishes a differently cased checkout alias from a separate dir
   await using checkout = await trivyCheckout();
   const alternate = join(dirname(checkout.repository), "REPOSITORY");
   const created = await mkdir(alternate, { recursive: true });
-  execFileSync("git", [
-    "-C",
-    checkout.repository,
-    "config",
-    "core.worktree",
-    alternate,
-  ]);
+  git(checkout.repository, "config", "core.worktree", alternate);
   const prepared = checkout.fromNormalized(trivyReport(), ".");
   if (created)
     await expect(prepared).rejects.toThrow(
@@ -302,16 +292,9 @@ test("Trivy distinguishes a differently cased checkout alias from a separate dir
   else expect((await prepared).preview.findings).toHaveLength(1);
 });
 
-const enterpriseUrl = "https://git.example.test/Example/Project";
-
 test.each([
   [foreignUrl, checkoutUrl, undefined, false],
-  [
-    enterpriseUrl,
-    "git@git.example.test:example/project.git",
-    enterpriseUrl,
-    true,
-  ],
+  [enterpriseUrl, enterpriseSsh, enterpriseUrl, true],
 ] as const)(
   "normalized Trivy report %s and finding %s must agree without a checkout remote",
   async (reportUrl, findingUrl, githubSource, matches) => {

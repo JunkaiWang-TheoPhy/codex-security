@@ -3482,6 +3482,10 @@ test("Snyk CLI dry run selects its adapter without writing an import", async () 
   expect(f.posts).toHaveLength(0);
 });
 
+const gitHubProject = "https://github.com/example/project";
+const connectedProject = "https://git.example.test/example/project";
+const foreignArtifactUrl = "https://github.com/example/other";
+
 const trivyOptions = {
   ...options,
   provider: "trivy" as const,
@@ -3497,10 +3501,7 @@ test.each([
     "https://git.example.test/Example/Project",
     "https://git.example.test/example/project.git",
   ],
-  [
-    "https://git.example.test/example/project",
-    "git@git.example.test:example/project.git",
-  ],
+  [connectedProject, "git@git.example.test:example/project.git"],
   [
     "ssh://git@git.example.test/example/project",
     "ssh://git.example.test/example/project",
@@ -3540,34 +3541,18 @@ test.each([
 );
 
 test.each([
-  [
-    "HTTPS://github.com/example/project",
-    "https://github.com/example/project",
-    undefined,
-  ],
-  [
-    "Git+SSH://git@github.com/example/project",
-    "https://github.com/example/project",
-    undefined,
-  ],
+  ["HTTPS://github.com/example/project", gitHubProject, undefined],
+  ["Git+SSH://git@github.com/example/project", gitHubProject, undefined],
   [
     "http://git.example.test/example/project.git",
-    "https://git.example.test/example/project",
+    connectedProject,
     "http://git.example.test/Example/Project",
   ],
-  [
-    "https://github.com/example/project",
-    "https://github.com/example/other",
-    undefined,
-  ],
-  [
-    "git@github.com:example/project.git.git",
-    "https://github.com/example/project",
-    undefined,
-  ],
+  [gitHubProject, foreignArtifactUrl, undefined],
+  ["git@github.com:example/project.git.git", gitHubProject, undefined],
   [
     "ssh://git@git.example.test/other/../example/project.git",
-    "https://git.example.test/example/project",
+    connectedProject,
     undefined,
   ],
   [
@@ -3586,25 +3571,38 @@ test.each([
     const report = trivyReport();
     if (artifact) report.ArtifactName = artifact;
     report.Metadata.RepoURL = source;
-    const fixtureData = await fixture(report, destination);
+    const cloud = await fixture(report, destination);
     await expect(
-      prepareExternalPublication(
-        fixtureData.file,
-        trivyOptions,
-        fixtureData.deps,
-      ),
+      prepareExternalPublication(cloud.file, trivyOptions, cloud.deps),
     ).rejects.toThrow("does not match the selected Cloud repository");
     const { findings } = normalizeTrivyFindings(report, "cloud", ".");
     await expect(
       prepareNormalizedExternalPublication(
         { read: findings.length, findings, excluded: [] },
         trivyOptions,
-        fixtureData.deps,
+        cloud.deps,
       ),
     ).rejects.toThrow("does not match the selected Cloud repository");
-    expect(fixtureData.posts).toHaveLength(0);
+    expect(cloud.posts).toHaveLength(0);
   },
 );
+
+async function trivyReplayTargets(
+  input: ReturnType<typeof normalizeTrivyFindings>,
+) {
+  const local = await localFindingsFixture({ remote: gitHubProject });
+  cleanups.push(local.dispose);
+  const cloud = await fixture();
+  return [
+    () =>
+      prepareNormalizedLocalImport(
+        input,
+        { ...trivyOptions, repository: local.repository },
+        { environment: local.environment },
+      ),
+    () => prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+  ];
+}
 
 test("each normalized Trivy finding must retain its report's repository", async () => {
   const report = trivyReport();
@@ -3614,23 +3612,11 @@ test("each normalized Trivy finding must retain its report's repository", async 
   });
   const input = normalizeTrivyFindings(report, "cloud", ".");
   delete input.findings[1]!.evidence.source_data;
-  const local = await localFindingsFixture({ remote: report.Metadata.RepoURL });
-  cleanups.push(local.dispose);
-  await expect(
-    prepareNormalizedLocalImport(
-      input,
-      { ...trivyOptions, repository: local.repository },
-      { environment: local.environment },
-    ),
-  ).rejects.toThrow(/retain/i);
-  const cloud = await fixture();
-  await expect(
-    prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
-  ).rejects.toThrow(/retain/i);
+  for (const prepare of await trivyReplayTargets(input))
+    await expect(prepare()).rejects.toThrow(/retain/i);
 });
 
 const credentialUrl = "https://scanner:fixture@github.com/example/project";
-const foreignArtifactUrl = "https://github.com/example/other";
 
 test.each([
   ["filesystem", credentialUrl, "without credentials"],
@@ -3651,21 +3637,7 @@ test.each([
       ...(ArtifactType && { ArtifactType }),
       ArtifactName,
     };
-    const local = await localFindingsFixture({
-      remote: "https://github.com/example/project",
-    });
-    cleanups.push(local.dispose);
-    const cloud = await fixture();
-    for (const prepare of [
-      () =>
-        prepareNormalizedLocalImport(
-          input,
-          { ...trivyOptions, repository: local.repository },
-          { environment: local.environment },
-        ),
-      () =>
-        prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
-    ]) {
+    for (const prepare of await trivyReplayTargets(input)) {
       if (error) await expect(prepare()).rejects.toThrow(error);
       else expect((await prepare()).preview.findings).toHaveLength(1);
     }
@@ -3686,7 +3658,7 @@ test.each([
       ArtifactName,
       Metadata: {},
     };
-    const f = await fixture(report, "https://github.com/example/project");
+    const f = await fixture(report, gitHubProject);
     const normalized = normalizeTrivyFindings(report, "cloud", ".");
     const selectedRow = {
       read: 1,
@@ -3707,7 +3679,7 @@ test.each([
       const prepared = await prepare();
       const reloaded = JSON.parse(JSON.stringify(prepared.preview));
       if (ArtifactType === "repository") {
-        const other = await fixture(report, "https://github.com/example/other");
+        const other = await fixture(report, foreignArtifactUrl);
         await expect(
           prepareNormalizedExternalPublication(
             reloaded,
@@ -3886,8 +3858,6 @@ async function snykRepositoryEvidence(
   };
 }
 
-const gitHubProject = "https://github.com/example/project";
-const connectedProject = "https://git.example.test/example/project";
 const tenantProject = "https://tenant.ghe.com/example/project";
 
 const snykRepositoryAliases: [string, string][] = [
