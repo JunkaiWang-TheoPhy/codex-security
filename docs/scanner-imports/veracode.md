@@ -28,14 +28,10 @@ while :; do
   http --ignore-stdin --check-status --body --timeout 20 --auth-type veracode_hmac GET \
     "$api/appsec/v2/applications/$guid/findings" \
     scan_type==STATIC page=="$page" size==100 > "$out/page.tmp"
-  jq -e --arg app "$application" --argjson n "$page" \
-    '._links.application.href == $app and
-     .page.number == $n and (.page.total_pages | type == "number") and
-     ((._embedded.findings | type == "array") or
-      ((has("_embedded") | not) and $n == 0 and .page.total_elements == 0 and
-       (.page.total_pages == 0 or .page.total_pages == 1)))' "$out/page.tmp" >/dev/null
-  jq -c '.' "$out/page.tmp" >> "$out/pages.stream"
-  pages=$(jq -r '.page.total_pages' "$out/page.tmp")
+  pages=$(jq -er --arg app "$application" --argjson n "$page" '
+    select(._links.application.href == $app and .page.number == $n) |
+    .page.total_pages | numbers' "$out/page.tmp")
+  cat "$out/page.tmp" >> "$out/pages.stream"
   page=$((page + 1))
   [ "$page" -lt "$pages" ] || break
 done

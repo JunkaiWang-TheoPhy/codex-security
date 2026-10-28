@@ -1,4 +1,12 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
+import {
+  type ExternalImportTarget,
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
+} from "./external-import-contract.js";
+import type {
+  ExternalFinding,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import { requiredText } from "./scanner-import.js";
 
 function repositorySegment(encoded: string): boolean {
@@ -38,4 +46,42 @@ export function declaredScannerRepositoryUrl(
       `${provider} --source-repository-url requires an HTTP(S) repository path without credentials, query, fragment, or ambiguous path segments.`,
     );
   return source;
+}
+
+/** A native application or project version maps to one source repository per report. */
+export function repositoryScopeValidator(
+  retainedRepository: (
+    data: unknown,
+    id: string,
+    target: ExternalImportTarget,
+  ) => { url: string; scope?: string } | undefined,
+  scopeError: string,
+) {
+  return (
+    findings: readonly ExternalFinding[],
+    target: ExternalImportTarget,
+  ): Map<string, ExternalSourceRepository> => {
+    const repositories = new Map<string, ExternalSourceRepository>();
+    const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    let scope: string | undefined;
+    let repository: string | undefined;
+    for (const { source_finding_id: id, evidence } of findings) {
+      const retained = retainedRepository(evidence.source_data, id, target);
+      if (!retained) continue;
+      const repositoryKey = key(retained.url);
+      if (retained.scope) {
+        if (scope && (scope !== retained.scope || repository !== repositoryKey))
+          throw new Error(scopeError);
+        scope = retained.scope;
+        repository = repositoryKey;
+      }
+      const declared = evidence.details?.repository?.url;
+      if (declared && key(declared) !== repositoryKey)
+        throw new Error(
+          "Retained scanner repository does not match the normalized evidence repository.",
+        );
+      repositories.set(id, { url: retained.url });
+    }
+    return repositories;
+  };
 }
