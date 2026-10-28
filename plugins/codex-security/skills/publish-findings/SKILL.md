@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Amazon Inspector, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import supported findings from Snyk Open Source, Semgrep Code, OpenGrep, Amazon Inspector, Black Duck SCA, Endor Labs, GitHub, or Wiz into the local workbench or Codex Security Cloud. Use each provider's documented native JSON, SARIF, plugin bundle, JSONL or CSV format, including gzip-compressed reports.
 ---
 
 # Publish external findings
@@ -34,6 +34,10 @@ Local records remain unassessed source evidence, separate from `findings list` a
 ## Amazon Inspector repository findings
 
 Use `--provider inspector` for a complete Inspector2 ListFindings JSON export from one Code Security repository. Supply `--source-repository-url` and verify that the native repository URL in the export identifies the same project. Preview repository package and code findings with a stable source key for the account, Region and repository. Self-managed GitLab imports use the local destination.
+
+## Black Duck SCA project-version vulnerabilities
+
+Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.
 
 ## Endor Labs findings
 

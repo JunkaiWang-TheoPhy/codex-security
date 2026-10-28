@@ -672,6 +672,11 @@ ListFindings JSON export and `--source-repository-url`. The native repository
 identity must match the selected destination. See the
 [Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
 
+For Black Duck SCA, use `--provider blackduck` with a BOM-6 vulnerable-components
+export for one project version. Map that version to its source repository with
+`--source-repository-url`. See the
+[Black Duck guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/blackduck.md).
+
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
 evidence through the existing Semgrep source-provider contract. See the
