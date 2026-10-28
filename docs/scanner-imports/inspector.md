@@ -39,11 +39,25 @@ The optional project-name filter is mutable after a rename. A narrower, intentio
 
 ## Preview and import
 
+Inspector can identify a repository by an opaque project ARN and a name such as
+`example/project`. That name can exist on several Git hosts. For these exports,
+maintain a JSON map keyed by the full Inspector project ARN. Verify each URL
+against the SCM repository connected to that project during integration setup.
+Keep the map in an operator-controlled location outside the checkout and the
+scanner export. A synthetic example is shown below.
+
+```json
+{
+  "arn:aws:inspector2:us-east-1:123456789012:codesecurity-integration/11111111-1111-4111-8111-111111111111/project-22222222-2222-4222-8222-222222222222": "https://github.com/example/project"
+}
+```
+
 ```bash
 export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 codex-security publish findings "$out/inspector.json" \
   --to local --repository ./project --provider inspector \
   --source-repository-url https://github.com/example/project \
+  --inspector-project-map /trusted/inspector-projects.json \
   --source-key inspector/account-alias/us-east-1/example/project \
   --dry-run --format json
 ```
@@ -56,12 +70,16 @@ import requires no AWS credentials or Codex Cloud login. For Cloud, use
 deployment must accept the `inspector` provider. A self-managed GitLab
 repository is not a substitute for a GitHub Cloud destination.
 
-Inspector must report a native repository URL that matches the selected host and
-repository. A namespace path such as `example/project` can identify projects on
-multiple GitHub or GitLab instances. Rows from the same verified project can
-supply the URL and provider for rows that omit them. Keep the export scoped to
-one repository and integration. For delegated accounts, use the account and
-resource ID filters in the example.
+When you supply `--inspector-project-map`, the selected project must have an
+entry. Its URL must agree with the declared source, any native URL, and the
+Cloud destination or configured local Git remote. Supply the trusted mapping again on replay,
+including when resuming a pending Cloud submission. SDK callers can pass the
+same bindings as an `inspectorProjectMap` option of type
+`ReadonlyMap<string, string>` when preparing a raw or normalized import.
+
+You can omit the map for exports that already contain a matching native
+repository URL. Rows in the same verified project can supply the native URL
+and provider for rows that omit them. Keep each export scoped to one project.
 
 ## What gets tracked
 

@@ -27,6 +27,7 @@ export function boundScannerRepositories(
   provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
+  inspectorProjectMap?: ReadonlyMap<string, string>,
 ): Map<string, ExternalSourceRepository> {
   if (
     provider !== "inspector" &&
@@ -43,7 +44,7 @@ export function boundScannerRepositories(
       "Retained Black Duck evidence requires the blackduck provider.",
     );
   if (provider === "inspector")
-    return inspectorReportRepositories(findings, target);
+    return inspectorReportRepositories(findings, target, inspectorProjectMap);
   if (provider === "blackduck")
     return blackDuckReportRepositories(findings, target);
   return new Map();

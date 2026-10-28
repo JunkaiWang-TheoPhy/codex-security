@@ -5,6 +5,7 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,10 @@ import {
 } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
+import {
+  inspectorReport,
+  inspectorRepositoryUrl,
+} from "./support/inspector-import-fixtures.js";
 
 const dependencies: typeof cliDependencies = (options = {}) => {
   const result = cliDependencies(options);
@@ -201,6 +206,119 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
   });
   expect(result.findings[0].evidence.code_revision).toBeNull();
   expect(result.findings[0].evidence.confidence).toBeUndefined();
+});
+
+test("Inspector CLI uses an operator map for a repository with a name and project ARN", async () => {
+  const f = await fixture();
+  const report = inspectorReport();
+  const resource = report.findings[0]!.resources[0]!;
+  resource.details.codeRepository.projectName = "example/project";
+  await writeFile(f.file, JSON.stringify(report));
+  const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
+  const map = join(f.root, "projects.json");
+  await writeFile(map, mapping);
+  const run = async (path: string) => {
+    const cli = createCliTest(main);
+    const code = await cli.runCli(
+      [
+        ...f.command.map((value) => (value === "wiz" ? "inspector" : value)),
+        "--source-repository-url",
+        inspectorRepositoryUrl,
+        "--inspector-project-map",
+        path,
+        "--dry-run",
+      ],
+      f.deps,
+    );
+    return { code, stdout: cli.stdout.text(), stderr: cli.stderr.text() };
+  };
+  const preview = await run("projects.json");
+  expect(preview.code).toBe(0);
+  expect(JSON.parse(preview.stdout)).toMatchObject({
+    findings: [{ source_finding_id: report.findings[0]!.findingArn }],
+    dryRun: true,
+  });
+
+  const checkoutMap = join(f.repository, "projects.json");
+  await writeFile(checkoutMap, mapping);
+  const alias = join(f.root, "linked-checkout");
+  await symlink(f.repository, alias, "junction");
+  for (const path of [checkoutMap, join(alias, "projects.json")]) {
+    const rejected = await run(path);
+    expect(rejected.code).not.toBe(0);
+    expect(rejected.stderr).toContain("outside the selected repository");
+  }
+  for (const contents of [
+    Buffer.of(0xff),
+    "[]",
+    "{}",
+    '{"invalid":"https://example.test/o/r"}',
+  ]) {
+    await writeFile(map, contents);
+    const rejected = await run(map);
+    expect(rejected.code).not.toBe(0);
+    expect(rejected.stderr).toMatch(/inspector-project-map|project ARN/i);
+  }
+});
+
+test("Cloud excludes maps from the report checkout even through directory links", async () => {
+  const f = await fixture();
+  const report = inspectorReport();
+  const resource = report.findings[0]!.resources[0]!;
+  resource.details.codeRepository.projectName = "example/project";
+  await writeFile(join(f.repository, "report.json"), JSON.stringify(report));
+  const linked = join(f.root, "linked-checkout");
+  await symlink(f.repository, linked, "junction");
+  const mapping = JSON.stringify({ [resource.id]: inspectorRepositoryUrl });
+  await writeFile(join(f.repository, "map.json"), mapping);
+  const operator = join(f.root, "operator-config");
+  await mkdir(operator);
+  execFileSync("git", ["init", "--quiet", operator]);
+  await writeFile(join(operator, "map.json"), mapping);
+  const run = async (map: string) => {
+    const cli = createCliTest(main);
+    await cli.runCli(
+      [
+        "publish",
+        "findings",
+        join(linked, "report.json"),
+        "--provider",
+        "inspector",
+        "--to",
+        "cloud",
+        "--repository",
+        inspectorRepositoryUrl,
+        "--source-repository-url",
+        inspectorRepositoryUrl,
+        "--source-key",
+        "inspector/example/project",
+        "--inspector-project-map",
+        map,
+        "--dry-run",
+      ],
+      f.deps,
+    );
+    return cli.stderr.text();
+  };
+  expect(await run(join(linked, "map.json"))).toContain(
+    "outside the selected repository",
+  );
+  // Only the independent map can pass normalization and reach Cloud configuration.
+  expect(await run(join(operator, "map.json"))).toContain(
+    "CODEX_SECURITY_CLOUD_BASE_URL",
+  );
+});
+
+test("the Inspector map option cannot be used for other providers", async () => {
+  const f = await fixture();
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [...f.command, "--inspector-project-map", "unused.json", "--dry-run"],
+      f.deps,
+    ),
+  ).not.toBe(0);
+  expect(cli.stderr.text()).toContain("requires --provider inspector");
 });
 
 test("CLI imports OpenGrep evidence locally without assessing it", async () => {

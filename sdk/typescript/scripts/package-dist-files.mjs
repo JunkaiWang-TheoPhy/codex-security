@@ -30,6 +30,7 @@ const distModules = [
   "scanner-import",
   "scanner-repository-provenance",
   "inspector-findings",
+  "inspector-project-map",
   "snyk-findings",
   "scanner-repository-url",
   "semgrep-findings",

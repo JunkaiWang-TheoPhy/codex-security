@@ -62,6 +62,8 @@ export interface NormalizedLocalImportOptions {
   provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 export interface LocalExternalImportDependencies {
@@ -518,6 +520,7 @@ export async function prepareNormalizedLocalImport(
       options.provider,
       current.findings,
       "local",
+      options.inspectorProjectMap,
     ).values(),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
