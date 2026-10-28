@@ -723,34 +723,63 @@ def test_count_capped_repair_after_deadline_preserves_original_cutoff(
     assert repaired["completedAt"] == selected_at
 
 
-@pytest.mark.parametrize("checkpoint_at_selection", [False, True])
+@pytest.mark.parametrize("checkpoint", ["late", "complete", "sparse"])
 def test_evidence_repair_preserves_selected_deadline_findings(
-    workbench_api, workbench_db, deadline_scan, checkpoint_at_selection
+    workbench_api, workbench_db, deadline_scan, checkpoint, monkeypatch
 ):
     scan = deadline_scan
-    _, output = canceled_discovery_output(workbench_db, scan)
+    sparse = checkpoint == "sparse"
+    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2 if sparse else 1)
     worker_finding = copy.deepcopy(scan.findings[0])
     worker_finding.update(
         identity={"anchor": "separate-canceled-review"}, provenance={"source": "local_plugin"}
     )
-    draft = saved_draft(scan.scan_id, findings=[worker_finding])
-    if checkpoint_at_selection:
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
+    if sparse:
+        del worker_finding["validation"]
+        output = output.parent / "attempts" / "attempt-1"
+    surface = {"id": "entry", "label": "Worker review", "disposition": "reported"}
+    draft = saved_draft(scan.scan_id, findings=[worker_finding], surfaces=[surface])
+    if checkpoint != "late":
+        source = write_checkpoint(output / "checkpoints", draft)
     owner = "selected-report-owner"
     with workbench_db:
         workbench_db.execute(
             "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
         )
-    selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    if not checkpoint_at_selection:
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-    original_checkpoint = checkpoint.read_bytes()
+    with monkeypatch.context() as legacy:
+        if sparse:
+            # Earlier versions selected canceled worker findings before checking their proof.
+            legacy.setattr(
+                workbench_api["saved_results"],
+                "_defer_incomplete_deadline_findings",
+                lambda *args: None,
+            )
+        selected = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    if checkpoint == "late":
+        source = write_checkpoint(output / "checkpoints", draft)
+    elif sparse:
+        # Later evidence for the same worker must not change the selected attempt.
+        corrected = {**worker_finding, "validation": scan.findings[0]["validation"]}
+        write_checkpoint(
+            output.parent.parent / "output" / "checkpoints",
+            saved_draft(scan.scan_id, findings=[corrected], surfaces=[surface]),
+        )
+    original_checkpoint = source.read_bytes()
     findings_path = scan.scan_dir / "findings.json"
     original = json.loads(findings_path.read_text())
     identities = [row["identity"] for row in original["findings"]]
-    assert len(identities) == 1 + checkpoint_at_selection
-    original["findings"][0].pop("validation")
-    findings_path.write_text(json.dumps(original))
+    assert len(identities) == 1 + (checkpoint != "late")
+    if sparse:
+        assert "validation" not in original["findings"][1]
+        identities = identities[:1]
+        monkeypatch.setattr(
+            workbench_api["deep_scan"],
+            "require_scan_target_unchanged",
+            lambda scan: pytest.fail("Host-only deadline repair inspected the target checkout."),
+        )
+    else:
+        original["findings"][0].pop("validation")
+        findings_path.write_text(json.dumps(original))
     coverage = read_review_state(workbench_db, scan.scan_dir)
 
     claim = workbench_api["deep_scan"].claim_deep_scan_coordinator(
@@ -766,9 +795,10 @@ def test_evidence_repair_preserves_selected_deadline_findings(
     publication = stage_publication(
         scan, generation=generation, result_path=reducer_path, title=scan.findings[0]["title"]
     )
-    workbench_api["saved_results"].write_scan_draft(
-        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
-    )
+    for _ in range(2 if sparse else 1):
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+        )
     assert [
         row["identity"] for row in json.loads(findings_path.read_text())["findings"]
     ] == identities
@@ -776,14 +806,32 @@ def test_evidence_repair_preserves_selected_deadline_findings(
         workbench_api, workbench_db, scan, terminal_reason="capped", generation=generation
     )
     assert repaired["completedAt"] == selected["completedAt"]
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    completed = complete(workbench_api, workbench_db, scan)
+    assert completed["progress"]["status"] == "complete"
     rows = json.loads(findings_path.read_text())["findings"]
     assert [row["identity"] for row in rows] == identities
     assert rows[0]["validation"] == scan.findings[0]["validation"]
     sealed_coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert sealed_coverage["surfaces"] == coverage["surfaces"]
-    assert sealed_coverage["deferred"] == coverage["deferred"]
-    assert checkpoint.read_bytes() == original_checkpoint
+    if sparse:
+        selected_surface = next(
+            row for row in coverage["surfaces"] if row.get("workerId") == worker_id
+        )
+        repaired_surface = next(
+            row for row in sealed_coverage["surfaces"] if row["id"] == selected_surface["id"]
+        )
+        assert selected_surface["disposition"] == "reported"
+        assert repaired_surface == {**selected_surface, "disposition": "needs_follow_up"}
+        deferred = sealed_coverage["deferred"][-1]
+        assert deferred["workerId"] == worker_id
+        assert deferred["surfaceIds"] == [selected_surface["id"]]
+        assert deferred["provenance"]["attempt"] == 1
+        assert "validation" in deferred["reason"]
+        assert completed["warnings"].count(deferred["reason"]) == 1
+        assert sealed_coverage["deferred"][:-1] == coverage["deferred"]
+    else:
+        assert sealed_coverage["surfaces"] == coverage["surfaces"]
+        assert sealed_coverage["deferred"] == coverage["deferred"]
+    assert source.read_bytes() == original_checkpoint
 
 
 @pytest.mark.parametrize("sparse_finding", [False, True])

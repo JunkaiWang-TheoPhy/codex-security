@@ -82,7 +82,7 @@ from workbench.retained_coverage import (
     _worker_candidate_key as _worker_candidate_key,
 )
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
-from workbench.retained_records import same_raw_value
+from workbench.retained_records import same_raw_value, selected_deadline_sources
 from workbench.saved_coverage import (
     _deferred_rows as _deferred_rows,
 )
@@ -544,11 +544,10 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
 
 
 def _defer_incomplete_deadline_findings(
-    findings, coverage, canonical, worker_attempts, warnings, sources
+    findings, coverage, reduced_ids, prior_deferred, worker_attempts, warnings, sources
 ):
     """Defer selected worker findings only after their revisions and receipts are reconciled."""
-    canonical_ids = {finding["findingId"] for finding in canonical.findings["findings"]}
-    prior_tasks = {task["id"]: task for task in canonical.coverage["deferred"]}
+    prior_tasks = {task["id"]: task for task in prior_deferred}
     retained = []
     pending = {}
     rechecked = {}
@@ -559,7 +558,7 @@ def _defer_incomplete_deadline_findings(
             retained.append(finding)
             continue
         worker_findings.setdefault(worker_id, []).append(finding)
-        if finding["findingId"] not in canonical_ids:
+        if finding["findingId"] not in reduced_ids:
             task_id = f"{worker_id}/discarded-{finding['findingId']}"
             source = sources.get((worker_id, _semantic_identity_key(finding)))
             attempt = source.attempt if source is not None else worker_attempts[worker_id]
@@ -800,7 +799,13 @@ def preserve_deep_deadline_draft(
         if preserve_reduction:
             worker_attempts = {worker["id"]: worker["attempt"] for worker in workers}
             _defer_incomplete_deadline_findings(
-                findings, coverage, canonical, worker_attempts, warnings, deadline_sources
+                findings,
+                coverage,
+                {row["findingId"] for row in canonical.findings["findings"]},
+                canonical.coverage["deferred"],
+                worker_attempts,
+                warnings,
+                deadline_sources,
             )
         manifest["scan"].pop("sealedAt", None)
         manifest["scan"].pop("artifacts", None)
@@ -1280,7 +1285,7 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 def _repair_selected_finding_evidence(
     selected: list[dict[str, Any]], proposed: list[dict[str, Any]]
-) -> None:
+) -> set[str]:
     evidence = ("codeEvidence", "rootCause", "attackPath", "validation")
 
     def source_key(finding: dict[str, Any]) -> str:
@@ -1299,8 +1304,8 @@ def _repair_selected_finding_evidence(
 
     saved = {}
     legacy = {}
-    for row in selected:
-        key = source_key(row)
+    selected_keys = [(source_key(row), row) for row in selected]
+    for key, row in selected_keys:
         add_unique(saved, key, row)
         provenance = row.get("provenance")
         if isinstance(provenance, dict) and not provenance.get("sourceFindings"):
@@ -1347,6 +1352,7 @@ def _repair_selected_finding_evidence(
             _validate_finding_evidence(finding)
         except ContractError:
             finding.update({field: repair[field] for field in evidence if field in repair})
+    return {row["findingId"] for key, row in selected_keys if "findingId" in row and key in repairs}
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
@@ -1372,6 +1378,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         accepted_input = copy.deepcopy(draft)
         accepted_checkpoint = None
+        deadline_warnings: list[str] = []
         manifest, findings, coverage = (
             draft["manifest"],
             draft["findings"],
@@ -1380,17 +1387,48 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if (
             scan["mode"] == "deep"
             and draft.get("deepScanPublication") is not None
-            and connection.execute(
-                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? AND status = 'running' "
-                "AND completed_at IS NOT NULL AND manifest_path = ?",
-                (scan_id, str(scan_dir / "scan-manifest.json")),
-            ).fetchone()
+            and (
+                selected_run := connection.execute(
+                    "SELECT * FROM deep_scan_runs WHERE scan_id = ? AND status = 'running' "
+                    "AND completed_at IS NOT NULL AND manifest_path = ?",
+                    (scan_id, str(scan_dir / "scan-manifest.json")),
+                ).fetchone()
+            )
         ):
             # An evidence-only continuation repairs the report selected at its original cutoff.
             manifest, selected = _read_saved_parent_result(scan_dir, scan_id)
-            _repair_selected_finding_evidence(selected["findings"], findings["findings"])
+            reduced_ids = _repair_selected_finding_evidence(
+                selected["findings"], findings["findings"]
+            )
             findings = {**findings, "findings": selected["findings"]}
             coverage = selected["reviewState"]
+            if selected_run[
+                "terminal_reason"
+            ] == "capped" and db.deep_scan.deep_scan_deadline_reached(selected_run):
+                # The original deadline could retain canceled-worker findings outside the reducer.
+                # Recheck only rows already selected, using their saved history and follow-ups.
+                workers = connection.execute(
+                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? "
+                    "AND kind = 'discovery' AND status = 'canceled'",
+                    (scan_id,),
+                ).fetchall()
+                sources = selected_deadline_sources(
+                    scan_dir,
+                    scan_id,
+                    manifest["scan"].get("preservedSources", {}),
+                    workers,
+                    selected["findings"],
+                    coverage["surfaces"],
+                )
+                _defer_incomplete_deadline_findings(
+                    findings,
+                    coverage,
+                    reduced_ids,
+                    coverage["deferred"],
+                    {worker["id"]: worker["attempt"] for worker in workers},
+                    deadline_warnings,
+                    sources,
+                )
         manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
         manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
@@ -1496,6 +1534,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         head = {"checkpoint": checkpoint_name}
         if admitted_input is not None:
             head["inputCheckpoint"] = admitted_input
+        if deadline_warnings:
+            # Save diagnostics before replacing the selected findings needed to reproduce them.
+            warnings = [*json.loads(scan["completion_warnings_json"]), *deadline_warnings]
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                    (json.dumps(list(dict.fromkeys(warnings))), scan_id),
+                )
         write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded(head))
         documents = {
             filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()

@@ -22,12 +22,14 @@ from finalize_scan_contract import (
     finding_candidate_id,
 )
 from workbench.saved_coverage import (
+    _coverage_comparison_row,
     _coverage_rows,
     _DeadlineFindingSource,
+    _project_worker_coverage_row,
     _saved_coverage_id,
     _worker_source_directory,
 )
-from workbench.saved_sources import _digest, _encoded
+from workbench.saved_sources import _digest, _encoded, _read_saved_result, _worker_outputs
 from workbench_coverage_receipts import resolve_coverage_receipts
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
@@ -651,6 +653,65 @@ def _legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
             key=_encoded,
         )
     return _digest([owner, _identity_candidate(finding), content])
+
+
+def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, surfaces):
+    """Recover exact observation links from the selected deadline's recorded sources."""
+
+    def match_key(owner, finding):
+        return owner, _digest(
+            [_finding_key(finding, owner), finding_candidate_id(finding), _finding_content(finding)]
+        )
+
+    attempts = {}
+    for worker in workers:
+        try:
+            for path, attempt in _worker_outputs(scan_dir, worker):
+                attempts[path] = (worker["id"], attempt)
+        except (TypeError, ValueError):
+            continue
+    selected_keys = {}
+    owners = {worker["id"] for worker in workers}
+    for row in selected:
+        if (owner := row["provenance"].get("workerId")) in owners:
+            key = match_key(owner, row)
+            selected_keys[key] = (
+                None if key in selected_keys else (owner, _semantic_identity_key(row))
+            )
+    if not selected_keys:
+        return {}
+    saved_surfaces = {_digest(row): row["id"] for row in surfaces}
+    sources = {}
+    for path, expected in preserved.items():
+        directory = _worker_source_directory(path)
+        if directory not in attempts or not (
+            Path(path).name == "result.json" or Path(path).parent.name == "checkpoints"
+        ):
+            continue
+        try:
+            draft, digest, _ = _read_saved_result(scan_dir, path, scan_id)
+        except (ContractError, OSError, ValueError):
+            continue
+        if digest != expected:
+            continue
+        owner, attempt = attempts[directory]
+        surface_ids = set()
+        for row in _coverage_rows(draft["reviewState"], "surfaces"):
+            if isinstance(row, dict):
+                projected = _project_worker_coverage_row(row, owner, "surfaces")
+                if surface_id := saved_surfaces.get(
+                    _digest(_coverage_comparison_row(projected, "surfaces"))
+                ):
+                    surface_ids.add(surface_id)
+        for index, row in enumerate(draft["findings"]):
+            if isinstance(row, dict) and (key := selected_keys.get(match_key(owner, row))):
+                # Repeated identical findings do not establish which observation was selected.
+                sources[key] = (
+                    None
+                    if key in sources
+                    else _DeadlineFindingSource(path, index, attempt, surface_ids)
+                )
+    return {key: source for key, source in sources.items() if source is not None}
 
 
 def _record_deadline_sources(
