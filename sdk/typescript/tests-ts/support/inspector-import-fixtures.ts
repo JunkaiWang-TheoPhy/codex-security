@@ -44,7 +44,7 @@ export function inspectorPackageFinding() {
           version: "1.0.0",
           fixedInVersion: "1.0.1",
           packageManager: "NPM",
-          filePath: "apps/web/package-lock.json",
+          filePath: "apps/web/package.json",
         },
       ],
     },

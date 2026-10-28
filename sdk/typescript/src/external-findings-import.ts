@@ -11,7 +11,7 @@ import {
   prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
-import { snapshotImportOptions } from "./scanner-repository-provenance.js";
+import { snapshotImportOptions } from "./external-findings.js";
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
@@ -23,10 +23,7 @@ export async function prepareLocalExternalImport(
 ) {
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
-  const settings = {
-    ...snapshotImportOptions(options),
-    sourceRepositoryUrl: options.sourceRepositoryUrl,
-  };
+  const settings = snapshotImportOptions(options);
   const parsed = await abortable(
     () => readExternalFindings(path, settings, "local"),
     dependencies.signal,

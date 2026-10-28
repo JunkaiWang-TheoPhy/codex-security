@@ -114,7 +114,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
-import { readInspectorProjectMap } from "./inspector-project-map.js";
+import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   externalImportsDisabledMessage,
   externalImportsEnabled,
@@ -3574,10 +3574,10 @@ export async function main(
           .describe(
             "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
           ),
-        inspectorProjectMap: optionValue("--inspector-project-map")
+        inspectorProjectArn: optionValue("--inspector-project-arn")
           .optional()
           .describe(
-            "Inspector only: operator-controlled JSON file mapping full Inspector repository project ARNs to canonical repository URLs. For --to local, keep the map outside the selected repository and any checkout containing the repository or report. If you supply a map for --to cloud, keep it outside all Git checkouts and recognizable Git metadata directories.",
+            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3679,13 +3679,19 @@ export async function main(
           try {
             if (!importsEnabled)
               throw new CodexSecurityError(externalImportsDisabledMessage);
-            if (
-              options.inspectorProjectMap !== undefined &&
-              options.provider !== "inspector"
-            )
-              throw new CodexSecurityError(
-                "--inspector-project-map requires --provider inspector.",
+            const { inspectorProjectArn, ...readerOptions } = options;
+            let inspectorProjectMap: Map<string, string> | undefined;
+            if (inspectorProjectArn !== undefined) {
+              if (options.provider !== "inspector")
+                throw new CodexSecurityError(
+                  "--inspector-project-arn requires --provider inspector.",
+                );
+              const url = validateInspectorProjectMapping(
+                inspectorProjectArn,
+                options.sourceRepositoryUrl,
               );
+              inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
+            }
             const directory = dependencies.currentDirectory();
             const report = resolveCliPath(directory, args.file);
             const repository =
@@ -3693,19 +3699,9 @@ export async function main(
                 ? resolveCliPath(directory, options.repository)
                 : options.repository;
             const publicationOptions = {
-              ...options,
+              ...readerOptions,
               repository,
-              inspectorProjectMap:
-                options.inspectorProjectMap === undefined
-                  ? undefined
-                  : await readInspectorProjectMap(
-                      resolveCliPath(directory, options.inspectorProjectMap),
-                      report,
-                      options.to === "local" ? repository : undefined,
-                      controller.signal,
-                      directory,
-                      dependencies.environment,
-                    ),
+              inspectorProjectMap,
             };
             if (options.to === "local") {
               const prepared = await (

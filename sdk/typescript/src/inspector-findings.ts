@@ -13,9 +13,10 @@ import {
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { isGitHubCloudHost } from "./git-remote.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
+import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
-  array,
   normalizeRecords,
   readScannerJson,
   record,
@@ -75,19 +76,6 @@ export function validateInspectorProjectMapping(
   return repositoryUrl(canonicalUrl);
 }
 
-function checkProjectName(name: string, source: string, github: boolean): void {
-  const urlKey = github ? cloudRepositoryUrlKey : repositoryUrlKey;
-  const key = urlKey(source);
-  const path = new URL(key).pathname.slice(1);
-  const literal = github ? name.toLowerCase() : name;
-  if (absoluteUrl.test(name)) {
-    if (urlKey(repositoryUrl(name)) === key) return;
-  } else if (literal === path || literal === posix.basename(path)) return;
-  throw new Error(
-    "Inspector native repository does not match --source-repository-url.",
-  );
-}
-
 function identity(finding: Native) {
   const arn = requiredText(finding["findingArn"], "Inspector finding ARN");
   const match = findingArn.exec(arn);
@@ -107,41 +95,31 @@ function repositoryClaim(
   { issuer, partition, region, account }: ReturnType<typeof identity>,
   resource: Native,
 ) {
-  if (
-    (resource["partition"] !== undefined &&
-      resource["partition"] !== partition) ||
-    (resource["region"] !== undefined && resource["region"] !== region) ||
-    (resource["provider"] !== undefined && resource["provider"] !== "AWS") ||
-    (resource["providerAccountId"] !== undefined &&
-      resource["providerAccountId"] !== account)
-  )
-    throw new Error(
-      "Inspector repository resource and finding scope do not match.",
-    );
-  const details = record(
+  for (const [field, expected] of Object.entries({
+    partition,
+    region,
+    provider: "AWS",
+    providerAccountId: account,
+  })) {
+    if (resource[field] !== undefined && resource[field] !== expected)
+      throw new Error(
+        "Inspector repository resource and finding scope do not match.",
+      );
+  }
+  const { codeRepository } = record(
     resource["details"] ?? {},
     "Inspector resource details",
   );
-  const repo = record(
-    details["codeRepository"] ?? {},
-    "Inspector codeRepository",
-  );
-  const provider =
-    repo["providerType"] === undefined
+  const repo = record(codeRepository ?? {}, "Inspector codeRepository");
+  const optional = (field: string) =>
+    repo[field] === undefined
       ? undefined
-      : requiredText(repo["providerType"], "Inspector repository provider");
+      : requiredText(repo[field], `Inspector codeRepository.${field}`);
   const nativeId = requiredText(
     resource["id"],
     "Inspector repository resource ID",
   );
-  const name =
-    repo["projectName"] === undefined
-      ? null
-      : requiredText(repo["projectName"], "Inspector native project name");
-  let integration =
-    repo["integrationArn"] === undefined
-      ? undefined
-      : requiredText(repo["integrationArn"], "Inspector integration ARN");
+  let integration = optional("integrationArn");
   if (
     integration !== undefined &&
     (!integration.startsWith(issuer + ":") || !integrationArn.test(integration))
@@ -163,45 +141,56 @@ function repositoryClaim(
   return {
     project: JSON.stringify([issuer, nativeId]),
     integration,
-    provider,
+    provider: optional("providerType"),
     nativeId,
-    name,
+    name: optional("projectName"),
   };
 }
 
 function checkRepositoryMapping(
-  nativeId: string,
-  name: string | null,
+  { nativeId, name }: ReturnType<typeof repositoryClaim>,
   source: string,
   provider: string | undefined,
   target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
 ) {
-  const mapped = new URL(source);
-  const knownGitHub = isGitHubCloudHost(mapped.hostname);
+  const hostname = new URL(source).hostname;
+  const knownGitHub = isGitHubCloudHost(hostname);
+  const gitlab = provider === "GITLAB_SELF_MANAGED";
+  const github = provider === "GITHUB" || knownGitHub;
   if (
-    (provider !== undefined &&
-      !["GITHUB", "GITLAB_SELF_MANAGED"].includes(provider)) ||
-    (provider === "GITLAB_SELF_MANAGED" && knownGitHub) ||
-    mapped.hostname === "gitlab.com"
+    hostname === "gitlab.com" ||
+    (gitlab && knownGitHub) ||
+    (provider !== undefined && !gitlab && provider !== "GITHUB")
   )
     throw new Error(
       "Inspector repository provider does not match the selected mapping.",
     );
-  if (
-    target === "cloud" &&
-    (provider === "GITLAB_SELF_MANAGED" ||
-      (!knownGitHub && provider !== "GITHUB"))
-  )
+  if (target === "cloud" && !github)
     throw new Error(
       "Inspector Cloud requires a GitHub repository provider; self-managed GitLab is local only.",
     );
-  const github = provider === "GITHUB" || knownGitHub;
-  if (absoluteUrl.test(nativeId)) checkProjectName(nativeId, source, github);
-  if (name !== null) {
-    const matchAsGitHub = github && (!projectMap || !absoluteUrl.test(name));
-    checkProjectName(name, source, matchAsGitHub);
-  }
+  const urls = [nativeId, name].filter(
+    (url): url is string => !!url && absoluteUrl.test(url),
+  );
+  const key = github && !projectMap ? cloudRepositoryUrlKey : repositoryUrlKey;
+  const path = new URL(
+    (github ? cloudRepositoryUrlKey : repositoryUrlKey)(source),
+  ).pathname.slice(1);
+  const slug = github ? name?.toLowerCase() : name;
+  const matchesSlug =
+    !slug ||
+    absoluteUrl.test(slug) ||
+    slug === path ||
+    slug === posix.basename(path) ||
+    (gitlab && projectMap && path.endsWith("/" + slug));
+  if (
+    !matchesSlug ||
+    urls.some((url) => key(repositoryUrl(url)) !== key(source))
+  )
+    throw new Error(
+      "Inspector native repository does not match --source-repository-url.",
+    );
   if (projectMap) {
     // repositoryClaim validated this ARN and its issuer before the lookup.
     const trustedUrl = nativeId.startsWith("arn:")
@@ -219,118 +208,138 @@ function checkRepositoryMapping(
       );
     return true;
   }
-  return (
-    absoluteUrl.test(nativeId) || (name !== null && absoluteUrl.test(name))
-  );
+  return urls.length > 0;
 }
 
-function mergeScopeValue(
-  current: string | undefined,
-  next: string | undefined,
-) {
-  if (current && next && current !== next)
-    throw new Error(
-      "Inspector export identifies more than one repository project or integration.",
-    );
-  return current ?? next;
+function repositoryClaims(finding: unknown) {
+  if (!isRecord(finding) || !Array.isArray(finding["resources"])) return [];
+  const claims = [];
+  let origin: ReturnType<typeof identity> | undefined;
+  for (const resource of finding["resources"]) {
+    if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY") continue;
+    origin ??= identity(finding);
+    claims.push(repositoryClaim(origin, resource));
+  }
+  return claims;
 }
 
-/** Rows from one project can share provider and host evidence. */
-function checkReportScope(
-  rows: readonly { finding: unknown; source: string }[],
+/** Claims from the whole export must identify one project, including excluded rows. */
+function checkReportScope<
+  T extends { claims: ReturnType<typeof repositoryClaims>; source: string },
+>(
+  rows: readonly T[],
   target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
-  hasRepositoryUrl = false,
+  exclude: (row: T, error: unknown) => void = (_, error) => {
+    throw error;
+  },
 ): string | undefined {
-  const mappings = [];
-  let project: string | undefined;
-  let integration: string | undefined;
-  let provider: string | undefined;
-  for (const { finding, source } of rows) {
-    if (!isRecord(finding) || !Array.isArray(finding["resources"])) continue;
-    let origin: ReturnType<typeof identity> | undefined;
-    for (const resource of finding["resources"]) {
-      if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY")
-        continue;
-      origin ??= identity(finding);
-      const claim = repositoryClaim(origin, resource);
-      project = mergeScopeValue(project, claim.project);
-      integration = mergeScopeValue(integration, claim.integration);
-      provider = mergeScopeValue(provider, claim.provider);
-      mappings.push({ source, nativeId: claim.nativeId, name: claim.name });
+  const claims = rows.flatMap((row) => row.claims);
+  function shared(field: "project" | "integration" | "provider") {
+    const values = new Set(claims.map((claim) => claim[field]));
+    values.delete(undefined);
+    if (values.size > 1)
+      throw new Error(
+        "Inspector export identifies more than one repository project or integration.",
+      );
+    return values.values().next().value;
+  }
+  shared("project");
+  shared("integration");
+  const provider = shared("provider");
+  const needHost = [];
+  let verified = false;
+  for (const row of rows) {
+    if (!row.claims.length) continue;
+    try {
+      // Check every claim even when an earlier one supplied host evidence.
+      const matches = row.claims.map((claim) =>
+        checkRepositoryMapping(claim, row.source, provider, target, projectMap),
+      );
+      if (matches.includes(true)) verified = true;
+      else needHost.push(row);
+    } catch (error) {
+      exclude(row, error);
     }
   }
-  for (const { nativeId, name, source } of mappings) {
-    if (
-      checkRepositoryMapping(
-        nativeId,
-        name,
-        source,
-        provider,
-        target,
-        projectMap,
-      )
-    )
-      hasRepositoryUrl = true;
+  if (!verified) {
+    for (const row of needHost)
+      exclude(
+        row,
+        new Error(
+          "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
+        ),
+      );
   }
-  if (mappings.length && !hasRepositoryUrl)
-    throw new Error(
-      "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
-    );
   return provider;
 }
 
-function selectedFinding(value: unknown): Native {
-  const finding = record(value, "Inspector finding");
-  const resources = array(finding["resources"], "Inspector resources");
-  if (
-    !resources.length ||
-    resources.some(
-      (resource) =>
-        !isRecord(resource) ||
-        resource["type"] !== "CODE_REPOSITORY" ||
-        Object.keys(
-          record(resource["details"] ?? {}, "Inspector resource details"),
-        ).some((key) => key !== "codeRepository"),
+const nonempty = z.string().regex(/\S/u, "Expected nonempty text.");
+const optionalValue = z.unknown().optional();
+const absent = z.never().optional();
+const vulnerablePackage = z.object({
+  name: nonempty,
+  version: nonempty,
+  packageManager: optionalValue,
+  fixedInVersion: optionalValue,
+  filePath: optionalValue,
+  sourceLayerHash: absent,
+  sourceLambdaLayerArn: absent,
+});
+const repositoryFinding = z.object({
+  type: z.enum(["PACKAGE_VULNERABILITY", "CODE_VULNERABILITY"]),
+  resources: z
+    .array(
+      z.object({
+        type: z.literal("CODE_REPOSITORY"),
+        details: z.strictObject({ codeRepository: optionalValue }).nullish(),
+      }),
     )
-  )
+    .min(1),
+  networkReachabilityDetails: absent,
+  packageVulnerabilityDetails: z
+    .object({
+      vulnerabilityId: nonempty,
+      source: nonempty,
+      sourceUrl: optionalValue,
+      relatedVulnerabilities: z.array(nonempty).nullish(),
+      vulnerablePackages: z.array(vulnerablePackage).nullish(),
+    })
+    .optional(),
+  codeVulnerabilityDetails: z
+    .object({
+      detectorName: nonempty,
+      detectorId: nonempty,
+      cwes: z.array(z.unknown()),
+      filePath: z.object({
+        fileName: optionalValue,
+        filePath: optionalValue,
+        startLine: optionalValue,
+      }),
+      sourceLambdaLayerArn: absent,
+    })
+    .optional(),
+});
+function selectedFinding(value: unknown) {
+  const native = record(value, "Inspector finding");
+  const parsed = repositoryFinding.safeParse(native);
+  if (!parsed.success)
     throw new Error(
-      "Only Inspector findings exclusively on CODE_REPOSITORY resources are supported.",
+      `Expected an Inspector vulnerability on CODE_REPOSITORY resources. ${z.prettifyError(parsed.error)}`,
     );
-  const type = finding["type"];
-  if (type !== "PACKAGE_VULNERABILITY" && type !== "CODE_VULNERABILITY")
-    throw new Error(
-      "Only Inspector package and code vulnerability findings are supported.",
-    );
+  const {
+    type,
+    packageVulnerabilityDetails: pkg,
+    codeVulnerabilityDetails: code,
+  } = parsed.data;
   if (
-    finding["networkReachabilityDetails"] !== undefined ||
-    (type === "PACKAGE_VULNERABILITY" &&
-      finding["codeVulnerabilityDetails"] !== undefined) ||
-    (type === "CODE_VULNERABILITY" &&
-      finding["packageVulnerabilityDetails"] !== undefined)
+    (pkg && type !== "PACKAGE_VULNERABILITY") ||
+    (code && type !== "CODE_VULNERABILITY")
   )
     throw new Error(
       "Inspector finding contains details for a different finding type.",
     );
-  const code = finding["codeVulnerabilityDetails"];
-  const pkg = finding["packageVulnerabilityDetails"];
-  if (
-    (isRecord(code) && code["sourceLambdaLayerArn"] !== undefined) ||
-    (isRecord(pkg) &&
-      array(
-        pkg["vulnerablePackages"] ?? [],
-        "Inspector vulnerable packages",
-      ).some(
-        (item) =>
-          isRecord(item) &&
-          (item["sourceLayerHash"] !== undefined ||
-            item["sourceLambdaLayerArn"] !== undefined),
-      ))
-  )
-    throw new Error(
-      "Inspector workload layer evidence is not repository evidence.",
-    );
-  return finding;
+  return { native, pkg, code };
 }
 
 function isInspectorFinding(value: unknown): boolean {
@@ -342,7 +351,7 @@ function isInspectorFinding(value: unknown): boolean {
   );
 }
 
-export function hasInspectorEvidence(sourceData: unknown): boolean {
+function hasInspectorEvidence(sourceData: unknown): boolean {
   return (
     isRecord(sourceData) &&
     (sourceData["format"] === format ||
@@ -351,11 +360,23 @@ export function hasInspectorEvidence(sourceData: unknown): boolean {
   );
 }
 
-export function inspectorReportRepositories(
+export function inspectorReportRepository(
+  provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
-): Map<string, ExternalSourceRepository> {
+): (ExternalSourceRepository & { findingId: string }) | undefined {
+  if (provider !== "inspector") {
+    if (
+      findings.some(({ evidence }) =>
+        hasInspectorEvidence(evidence.source_data),
+      )
+    )
+      throw new CodexSecurityError(
+        "Retained Inspector evidence requires the inspector provider.",
+      );
+    return undefined;
+  }
   const retained = [];
   for (const { source_finding_id: id, evidence } of findings) {
     const data = evidence.source_data;
@@ -367,39 +388,41 @@ export function inspectorReportRepositories(
       continue;
     }
     const source = repositoryUrl(data["sourceRepositoryUrl"]);
-    const finding = selectedFinding(data["finding"]);
+    const { native: finding } = selectedFinding(data["finding"]);
     if (finding["findingArn"] !== id)
       throw new Error(
         "Inspector source_finding_id does not match the retained finding ARN.",
       );
     retained.push({
       source,
-      finding,
+      claims: repositoryClaims(finding),
       id,
       declared: evidence.details?.repository?.url,
     });
   }
+  const first = retained[0];
+  if (!first) return undefined;
   // A supplied map owns the path casing on custom hosts.
   const github =
     checkReportScope(retained, target, projectMap) === "GITHUB" && !projectMap;
   const key =
     github || target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  if (new Set(retained.map(({ source }) => key(source))).size > 1)
-    throw new Error(
-      "Inspector export identifies more than one source repository.",
-    );
-  const repositories = new Map<string, ExternalSourceRepository>();
-  for (const { source, id, declared } of retained) {
-    if (declared && key(declared) !== key(source))
+  const repository = key(first.source);
+  for (const { source, declared } of retained) {
+    if (key(source) !== repository)
+      throw new Error(
+        "Inspector export identifies more than one source repository.",
+      );
+    if (declared && key(declared) !== repository)
       throw new Error(
         "Retained scanner repository does not match the normalized evidence repository.",
       );
-    repositories.set(
-      id,
-      github ? { url: source, platform: "github" } : { url: source },
-    );
   }
-  return repositories;
+  return {
+    findingId: first.id,
+    url: first.source,
+    ...(github && { platform: "github" }),
+  };
 }
 
 function repoFile(value: unknown): string | null {
@@ -428,25 +451,27 @@ function timestamp(value: unknown): number {
   return Math.floor(seconds);
 }
 
-const ecosystems: Record<string, string> = {
-  BUNDLER: "rubygems",
-  GEMSPEC: "rubygems",
-  CARGO: "cargo",
-  COMPOSER: "composer",
-  NPM: "npm",
-  YARN: "npm",
-  NODEPKG: "npm",
-  NUGET: "nuget",
-  DOTNET_CORE: "nuget",
-  GOBINARY: "go",
-  GOMOD: "go",
-  JAR: "java",
-  POM: "maven",
-  PIP: "pypi",
-  PIPENV: "pypi",
-  POETRY: "pypi",
-  PYTHONPKG: "pypi",
-};
+const ecosystems = new Map(
+  Object.entries({
+    BUNDLER: "rubygems",
+    GEMSPEC: "rubygems",
+    CARGO: "cargo",
+    COMPOSER: "composer",
+    NPM: "npm",
+    YARN: "npm",
+    NODEPKG: "npm",
+    NUGET: "nuget",
+    DOTNET_CORE: "nuget",
+    GOBINARY: "go",
+    GOMOD: "go",
+    JAR: "java",
+    POM: "maven",
+    PIP: "pypi",
+    PIPENV: "pypi",
+    POETRY: "pypi",
+    PYTHONPKG: "pypi",
+  }),
+);
 
 const manifests = new Set([
   "package.json",
@@ -515,119 +540,82 @@ function concreteVersion(
 }
 
 function evidence(
-  finding: Native,
+  { native: finding, pkg, code }: ReturnType<typeof selectedFinding>,
   id: string,
   source: string,
   target: ExternalImportTarget,
 ) {
-  const description = requiredText(
-    finding["description"],
-    "Inspector description",
+  const {
+    description,
+    severity,
+    remediation,
+    firstObservedAt,
+    lastObservedAt,
+    updatedAt,
+    status,
+  } = finding;
+  const { recommendation } = record(remediation, "Inspector remediation");
+  record(recommendation ?? {}, "Inspector recommendation");
+  requiredText(status, "Inspector status");
+  timestamp(firstObservedAt);
+  timestamp(lastObservedAt);
+  const level = requiredText(severity, "Inspector severity").toLowerCase();
+  const paths = new Set<string>();
+  const packages = (pkg?.vulnerablePackages ?? []).map((item) => {
+    const path = repoFile(item.filePath);
+    if (path) paths.add(path);
+    const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
+    const fixed = concreteVersion(item.fixedInVersion, ecosystem);
+    return {
+      name: item.name,
+      ecosystem,
+      installed_version: concreteVersion(item.version, ecosystem),
+      manifest_path: manifestPath(path),
+      fixed_versions: fixed ? [fixed] : [],
+    };
+  });
+  const locations: { path: string; line: number | null }[] = [...paths].map(
+    (path) => ({ path, line: null }),
   );
-  const remediation = record(finding["remediation"], "Inspector remediation");
-  record(remediation["recommendation"] ?? {}, "Inspector recommendation");
-  requiredText(finding["status"], "Inspector status");
-  timestamp(finding["firstObservedAt"]);
-  timestamp(finding["lastObservedAt"]);
-  const level = requiredText(
-    finding["severity"],
-    "Inspector severity",
-  ).toLowerCase();
-  const packages = [];
-  const locations: { path: string; line: number | null }[] = [];
-  const advisoryIds = new Set<string>();
-  let fallbackTitle: string | undefined;
-  let url: string | null = null;
-  if (finding["packageVulnerabilityDetails"] !== undefined) {
-    const detail = record(
-      finding["packageVulnerabilityDetails"],
-      "Inspector package vulnerability",
-    );
-    fallbackTitle = requiredText(
-      detail["vulnerabilityId"],
-      "Inspector vulnerability ID",
-    );
-    requiredText(detail["source"], "Inspector vulnerability source");
-    advisoryIds.add(fallbackTitle);
-    for (const alias of array(
-      detail["relatedVulnerabilities"] ?? [],
-      "Inspector related vulnerabilities",
-    ))
-      advisoryIds.add(
-        requiredText(alias, "Inspector related vulnerability ID"),
-      );
-    url = text(detail["sourceUrl"]);
-    const seenPaths = new Set<string>();
-    for (const value of array(
-      detail["vulnerablePackages"] ?? [],
-      "Inspector vulnerable packages",
-    )) {
-      const item = record(value, "Inspector vulnerable package");
-      const version = requiredText(
-        item["version"],
-        "Inspector package version",
-      );
-      const path = repoFile(item["filePath"]);
-      const manager = text(item["packageManager"]);
-      const ecosystem =
-        manager && Object.hasOwn(ecosystems, manager)
-          ? (ecosystems[manager] ?? null)
-          : null;
-      const fixed = concreteVersion(item["fixedInVersion"], ecosystem);
-      packages.push({
-        name: requiredText(item["name"], "Inspector package name"),
-        ecosystem,
-        installed_version: concreteVersion(version, ecosystem),
-        manifest_path: manifestPath(path),
-        fixed_versions: fixed ? [fixed] : [],
-      });
-      if (path && !seenPaths.has(path)) {
-        seenPaths.add(path);
-        locations.push({ path, line: null });
-      }
-    }
-  }
-  if (finding["codeVulnerabilityDetails"] !== undefined) {
-    const detail = record(
-      finding["codeVulnerabilityDetails"],
-      "Inspector code vulnerability",
-    );
-    fallbackTitle = requiredText(
-      detail["detectorName"],
-      "Inspector detector name",
-    );
-    requiredText(detail["detectorId"], "Inspector detector ID");
-    array(detail["cwes"], "Inspector CWEs");
-    const file = record(detail["filePath"], "Inspector code file path");
-    const path = repoFile(file["filePath"]);
-    if (path && posix.basename(path) === file["fileName"]) {
-      const start = file["startLine"];
+  if (code) {
+    const { fileName, filePath, startLine } = code.filePath;
+    const path = repoFile(filePath);
+    if (path && posix.basename(path) === fileName)
       locations.push({
         path,
         line:
-          typeof start === "number" && Number.isSafeInteger(start) && start > 0
-            ? start
+          typeof startLine === "number" &&
+          Number.isSafeInteger(startLine) &&
+          startLine > 0
+            ? startLine
             : null,
       });
-    }
   }
   return validateExternalEvidence(
     {
-      title: text(finding["title"]) ?? fallbackTitle ?? id,
-      description,
+      title:
+        text(finding["title"]) ??
+        pkg?.vulnerabilityId ??
+        code?.detectorName ??
+        id,
+      description: requiredText(description, "Inspector description"),
       severity: ["critical", "high", "medium", "low", "informational"].includes(
         level,
       )
         ? level
         : "unknown",
-      url,
-      advisory_ids: [...advisoryIds],
+      url: text(pkg?.sourceUrl),
+      advisory_ids: pkg
+        ? [
+            ...new Set([
+              pkg.vulnerabilityId,
+              ...(pkg.relatedVulnerabilities ?? []),
+            ]),
+          ]
+        : [],
       packages,
       locations,
-      source_updated_at:
-        finding["updatedAt"] === undefined
-          ? null
-          : timestamp(finding["updatedAt"]),
+      source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
       source_data: {
         format,
         sourceRepositoryUrl: source,
@@ -657,43 +645,39 @@ export function normalizeInspectorFindings(
     throw new Error(
       "Expected only a complete native Inspector ListFindings response with a findings array.",
     );
-  const rows = report.data.findings;
-  checkReportScope(
-    rows.map((finding) => ({ finding, source })),
+  const rows = report.data.findings.map((finding, i) => ({
+    finding,
+    source,
+    position: i + 1,
+    claims: repositoryClaims(finding),
+  }));
+  checkReportScope(rows, target, projectMap);
+  const result = normalizeRecords(
+    rows,
+    ({ finding }, id) => ({
+      source_finding_id: id,
+      evidence: evidence(selectedFinding(finding), id, source, target),
+    }),
+    ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
-    projectMap,
   );
-  const normalize = (checkMapping?: (finding: Native) => void) =>
-    normalizeRecords(
-      rows,
-      (row, id) => {
-        const finding = selectedFinding(row);
-        const projected = evidence(finding, id, source, target);
-        checkMapping?.(finding);
-        return { source_finding_id: id, evidence: projected };
-      },
-      (row) => identity(record(row, "Inspector finding")).arn,
-      target,
-    );
-  const result = normalize();
   if (result.excluded.length && result.findings.length) {
-    try {
-      inspectorReportRepositories(result.findings, target, projectMap);
-    } catch {
-      // All rows claim one project. Only a retained, independently verified row
-      // can supply the host after another row's provider or URL was excluded.
-      const check = (finding: unknown, sharedUrl = false) =>
-        checkReportScope([{ finding, source }], target, projectMap, sharedUrl);
-      const sharedUrl = result.findings.some(({ evidence }) => {
-        try {
-          check(evidence.source_data!["finding"]);
-          return true;
-        } catch {
-          return false;
-        }
+    // Only surviving rows can supply shared provider and host evidence on replay.
+    const skipped = new Set(result.excluded.map((row) => row.position));
+    const retained = rows.filter((row) => !skipped.has(row.position));
+    checkReportScope(retained, target, projectMap, (row, error) => {
+      skipped.add(row.position);
+      result.excluded.push({
+        position: row.position,
+        source_finding_id: identity(record(row.finding, "Inspector finding"))
+          .arn,
+        reason: errorMessage(error),
       });
-      return normalize((finding) => check(finding, sharedUrl));
-    }
+    });
+    result.findings = result.findings.filter(
+      (_, i) => !skipped.has(retained[i]!.position),
+    );
+    result.excluded.sort((a, b) => a.position - b.position);
   }
   return result;
 }

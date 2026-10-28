@@ -34,13 +34,11 @@ import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
+import { inspectorReportRepository } from "./inspector-findings.js";
 import {
-  boundScannerRepositories,
   snapshotImportOptions,
-} from "./scanner-repository-provenance.js";
-import type {
-  ExternalFindings,
-  ExternalPublicationInput,
+  type ExternalFindings,
+  type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -355,10 +353,7 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
-  const settings = {
-    ...snapshotImportOptions(options),
-    sourceRepositoryUrl: options.sourceRepositoryUrl,
-  };
+  const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
@@ -540,22 +535,6 @@ async function preparePublicationInput(
         : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
     );
   const destination = destinations[0]!;
-  function requireMatchingDestination(id: string, url: string) {
-    if (cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url))
-      throw new CodexSecurityError(
-        `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-      );
-  }
-  function checkScannerRepositories(findings: ExternalFindings["findings"]) {
-    for (const [id, repository] of boundScannerRepositories(
-      options.provider,
-      findings,
-      "cloud",
-      inspectorProjectMap,
-    ))
-      requireMatchingDestination(id, repository.url);
-  }
-  checkScannerRepositories(parsed.findings);
   const source = { provider: options.provider, source_key: options.sourceKey };
   const state = join(
     codexSecurityStateDirectory(environment),
@@ -604,27 +583,6 @@ async function preparePublicationInput(
         canonicalJson(submission.source) !== canonicalJson(source)
       )
         throw new Error("Saved import destination does not match.");
-    }
-    // The identity checks above still bind a reset submission to this input.
-    // Its obsolete requests will be retired under the publication lock.
-    if (
-      content.requests.some(
-        (request) =>
-          request.repository.reset_marker !== destination.reset_marker,
-      )
-    )
-      return content;
-    if (content.inspectorProjectMapRequired && !inspectorProjectMap)
-      throw new CodexSecurityError(
-        "This pending Inspector submission was prepared with a project map. Supply the trusted mapping again to resume.",
-      );
-    // A pending request can carry an older projection of the selected input.
-    checkScannerRepositories(savedFindings);
-    if (options.provider === "inspector") {
-      for (const { source_finding_id, evidence } of savedFindings) {
-        const url = evidence.details?.repository?.url;
-        if (url) requireMatchingDestination(source_finding_id, url);
-      }
     }
     return content;
   }
@@ -773,30 +731,52 @@ async function preparePublicationInput(
       }
     }
   }
-  let requests = saved?.requests;
-  if (!requests) {
-    for (const finding of parsed.findings) {
-      const sourceRepositories = [
-        finding.evidence.details?.repository?.url,
-        ...(options.provider === "wiz"
-          ? [wizCsvRepositoryUrl(finding.evidence)]
-          : []),
+  if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
+    throw new CodexSecurityError(
+      "Supply the verified Inspector project binding again to resume.",
+    );
+
+  function checkRepositories(findings: ExternalFindings["findings"]) {
+    const binding = inspectorReportRepository(
+      options.provider,
+      findings,
+      "cloud",
+      inspectorProjectMap,
+    );
+    // Other providers' immutable requests follow the repository ID across renames.
+    if (saved && options.provider !== "inspector") return;
+    function requireDestination(id: string, url: string | null | undefined) {
+      if (
+        url &&
+        cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url)
+      )
+        throw new CodexSecurityError(
+          `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        );
+    }
+    if (binding) requireDestination(binding.findingId, binding.url);
+    for (const { source_finding_id: id, evidence } of findings) {
+      const urls = [
+        evidence.details?.repository?.url,
+        ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
         ...(options.provider === "snyk"
-          ? snykRepositoryUrls(finding.evidence.source_data, {
+          ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
             })
           : []),
         ...(options.provider === "endor"
-          ? endorRepositoryUrls(finding.evidence.source_data)
+          ? endorRepositoryUrls(evidence.source_data)
           : []),
       ];
-      for (const sourceRepository of sourceRepositories)
-        if (sourceRepository)
-          requireMatchingDestination(
-            finding.source_finding_id,
-            sourceRepository,
-          );
+      for (const url of urls) requireDestination(id, url);
     }
+  }
+  checkRepositories(parsed.findings);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) checkRepositories(submissionFindings(saved.requests));
+
+  let requests = saved?.requests;
+  if (!requests) {
     let preparedCount = 0;
     progress({
       phase: "preparing",
@@ -899,8 +879,7 @@ async function preparePublicationInput(
       ),
     },
   };
-  if (saved?.inspectorProjectMapRequired || inspectorProjectMap)
-    submission.inspectorProjectMapRequired = true;
+  if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
     ...parsed,
     findings: submissionFindings(requests),

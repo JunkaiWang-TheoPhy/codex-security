@@ -11,8 +11,7 @@ import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
-import { normalizeInspectorFindings } from "./inspector-findings.js";
-import { readScannerJson } from "./scanner-import.js";
+import { readInspectorFindings } from "./inspector-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -119,8 +118,8 @@ export async function readExternalFindings(
   if (options.provider === "inspector") {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: normalizeInspectorFindings(
-        await readScannerJson(path),
+      findings: await readInspectorFindings(
+        path,
         url,
         target,
         options.inspectorProjectMap,
