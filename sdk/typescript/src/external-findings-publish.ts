@@ -382,6 +382,12 @@ export async function prepareNormalizedExternalPublication(
   );
 }
 
+function evidenceIdentity(input: ExternalFindings) {
+  return input.report === undefined
+    ? input.findings
+    : { findings: input.findings, report: reportForJson(input.report) };
+}
+
 function normalizedPublicationInput(
   input: ExternalFindings,
 ): ExternalPublicationInput {
@@ -413,10 +419,7 @@ function normalizedPublicationInput(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  const evidence =
-    current.report === undefined
-      ? current.findings
-      : { findings: current.findings, report: reportForJson(current.report) };
+  const evidence = evidenceIdentity(current);
   const identity = current.sourceRepositoryUrls?.length
     ? {
         evidence,
@@ -564,6 +567,8 @@ async function preparePublicationInput(
   ];
   const inputDigest = hash("sha256", canonicalJson(currentIdentity));
   const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
+  const unverifiedTrivyCheckpoint =
+    "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.";
   function validateSaved(
     serialized: string,
     mode: "current" | "legacy" | "identify" = "current",
@@ -606,15 +611,12 @@ async function preparePublicationInput(
       source.provider === "trivy" &&
       content.trivyRepositoryBound !== true
     )
-      throw new CodexSecurityError(
-        "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
-      );
+      throw new CodexSecurityError(unverifiedTrivyCheckpoint);
     return content;
   }
-  const key = hash(
-    "sha256",
-    canonicalJson([...checkpointIdentity, currentIdentity]),
-  );
+  const checkpointKey = (identity: unknown) =>
+    hash("sha256", canonicalJson([...checkpointIdentity, identity]));
+  const key = checkpointKey(currentIdentity);
   const pendingPath = join(state, `${key}.pending.json`);
   const historicalKey = hash(
     "sha256",
@@ -624,7 +626,7 @@ async function preparePublicationInput(
     ),
   );
   const legacyKeys = new Set([
-    hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
+    checkpointKey(legacyIdentity),
     // Historical filenames predate destination checks on report-level URLs.
     ...(sourceRepositoryUrls.length ? [] : [historicalKey]),
   ]);
@@ -635,7 +637,12 @@ async function preparePublicationInput(
         throw error;
       },
     );
-    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
+    if (!entries.length) return;
+    await validatePreparedOutputDir(state, undefined, true);
+    const priorTrivyKey =
+      source.provider === "trivy" && sourceRepositoryUrls.length
+        ? checkpointKey(evidenceIdentity(parsed))
+        : undefined;
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
@@ -647,15 +654,23 @@ async function preparePublicationInput(
         // Locale-dependent filenames predate input projections. Later formats
         // must remain isolated by their deployment-bound checkpoint keys.
         const content = JSON.parse(serialized) as SavedSubmission | null;
-        if (!content || content.inputProjection !== undefined) continue;
-        validateSaved(serialized, "identify");
+        if (!content) continue;
+        if (candidateKey === priorTrivyKey) {
+          // Earlier Trivy builds keyed these findings without their report URLs.
+          if (content.trivyRepositoryBound === true) continue;
+        } else {
+          if (content.inputProjection !== undefined) continue;
+          validateSaved(serialized, "identify");
+        }
       } catch {
         continue;
       }
       // These older bodies contain no deployment identity. Do not guess a
       // destination or replace their immutable request with a fresh publication.
       throw new CodexSecurityError(
-        "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
+        candidateKey === priorTrivyKey
+          ? unverifiedTrivyCheckpoint
+          : "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
       );
     }
   }

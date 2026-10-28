@@ -59,32 +59,37 @@ async function trivyCheckout(remote?: string, githubSource?: string) {
   };
 }
 
-test("normalized Trivy batch URLs reject credentials before local or Cloud preparation", async () => {
-  const input = normalizeTrivyFindings(trivyReport(), "cloud", ".");
-  input.sourceRepositoryUrls = [
-    "https://scanner:fixture@github.com/example/other",
-  ];
-  const error =
-    "Use a Trivy repository URL without credentials, a query, or a fragment.";
-  await using local = await trivyCheckout(checkoutUrl);
-  await expect(local.prepare(input)).rejects.toThrow(error);
-  await expect(
-    prepareNormalizedExternalPublication(
-      input,
-      {
-        provider: "trivy",
-        repository: "repo-example",
-        sourceKey: "example/project/main",
-      },
-      {
-        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-        credentials: async () => {
-          throw new Error("Unexpected Cloud authentication");
+test.each([
+  ["https://scanner:fixture@github.com/example/other", "without credentials"],
+  [
+    "//scanner:fixture@github.com/example/other",
+    "sourceRepositoryUrls must contain network repository URLs",
+  ],
+])(
+  "normalized Trivy batch URLs reject %s before local or Cloud preparation",
+  async (url, error) => {
+    const input = normalizeTrivyFindings(trivyReport(), "cloud", ".");
+    input.sourceRepositoryUrls = [url];
+    await using local = await trivyCheckout(checkoutUrl);
+    await expect(local.prepare(input)).rejects.toThrow(error);
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        {
+          provider: "trivy",
+          repository: "repo-example",
+          sourceKey: "example/project/main",
         },
-      },
-    ),
-  ).rejects.toThrow(error);
-});
+        {
+          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+          credentials: async () => {
+            throw new Error("Unexpected Cloud authentication");
+          },
+        },
+      ),
+    ).rejects.toThrow(error);
+  },
+);
 
 test.each([
   ["foreign empty report", {}, foreignUrl, mismatch],

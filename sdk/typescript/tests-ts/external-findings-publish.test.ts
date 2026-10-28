@@ -3581,10 +3581,9 @@ test.each([
     await expect(
       prepareExternalPublication(cloud.file, trivyOptions, cloud.deps),
     ).rejects.toThrow("does not match the selected Cloud repository");
-    const { findings } = normalizeTrivyFindings(report, "cloud", ".");
     await expect(
       prepareNormalizedExternalPublication(
-        { read: findings.length, findings, excluded: [] },
+        selectedTrivyRows(report),
         trivyOptions,
         cloud.deps,
       ),
@@ -3593,14 +3592,25 @@ test.each([
   },
 );
 
-async function trivyReplayTargets(
+// A selected row has no report-level source repository list.
+function selectedTrivyRows(report: unknown) {
+  const { findings, read, excluded } = normalizeTrivyFindings(
+    report,
+    "cloud",
+    ".",
+  );
+  return { findings, read, excluded };
+}
+
+async function expectTrivyReplay(
   input: ReturnType<typeof normalizeTrivyFindings>,
+  error?: string | RegExp,
   remote = gitHubProject,
 ) {
   const local = await localFindingsFixture({ remote });
   cleanups.push(local.dispose);
   const cloud = await fixture();
-  return [
+  for (const prepare of [
     () =>
       prepareNormalizedLocalImport(
         input,
@@ -3608,22 +3618,27 @@ async function trivyReplayTargets(
         { environment: local.environment },
       ),
     () => prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
-  ];
+  ]) {
+    if (error === undefined)
+      expect((await prepare()).preview.findings).toHaveLength(1);
+    else await expect(prepare()).rejects.toThrow(error);
+  }
 }
 
-test("an ambiguous HTTP transport remains unbound when publishing a selected Trivy finding", async () => {
-  const report = {
-    ...trivyReport(),
-    ArtifactName: "HTTPS://github.com/example/project",
-  };
-  const { findings, read, excluded } = normalizeTrivyFindings(
-    report,
-    "cloud",
-    ".",
-  );
-  for (const prepare of await trivyReplayTargets({ findings, read, excluded }))
-    await expect(prepare()).rejects.toThrow("different repositories");
-});
+test.each([{}, { RepoURL: gitHubProject }])(
+  "a mixed-case HTTP transport in a selected Trivy finding with metadata %j cannot bind to HTTPS",
+  async (Metadata) => {
+    const report = {
+      ...trivyReport(),
+      Metadata,
+      ArtifactName: "HTTPS://github.com/example/project",
+    };
+    await expectTrivyReplay(
+      selectedTrivyRows(report),
+      /different repositories|does not match/,
+    );
+  },
+);
 
 const userlessSsh = "ssh://github.com/example/project";
 const explicitSsh = "ssh://git@github.com/example/project";
@@ -3639,34 +3654,20 @@ test.each([
 ] as const)(
   "selected Trivy SSH finding with origin %s and artifact %s on checkout %s",
   async (RepoURL, ArtifactName, remote, accepts) => {
-    const { findings } = normalizeTrivyFindings(
-      { ...trivyReport(), Metadata: {} },
-      "cloud",
-      ".",
-    );
-    findings[0]!.evidence.source_data!["report"] = {
+    const input = selectedTrivyRows({ ...trivyReport(), Metadata: {} });
+    const evidence = input.findings[0]!.evidence;
+    evidence.source_data!["report"] = {
       SchemaVersion: 2,
       ArtifactType: "repository",
       Metadata: { RepoURL },
       ...(ArtifactName && { ArtifactName }),
     };
-    findings[0]!.evidence.details = {
-      kind: "sast",
-      repository: { url: gitHubProject },
-    };
-    for (const prepare of await trivyReplayTargets(
-      {
-        read: 1,
-        findings,
-        excluded: [],
-        sourceRepositoryUrls: [gitHubProject],
-      },
+    evidence.details = { kind: "sast", repository: { url: gitHubProject } };
+    await expectTrivyReplay(
+      { ...input, sourceRepositoryUrls: [gitHubProject] },
+      accepts ? undefined : /Trivy omitted the SSH user/u,
       remote,
-    )) {
-      if (accepts) expect((await prepare()).preview.findings).toHaveLength(1);
-      else
-        await expect(prepare()).rejects.toThrow(/Trivy omitted the SSH user/u);
-    }
+    );
   },
 );
 
@@ -3678,8 +3679,7 @@ test("each normalized Trivy finding must retain its report's repository", async 
   });
   const input = normalizeTrivyFindings(report, "cloud", ".");
   delete input.findings[1]!.evidence.source_data;
-  for (const prepare of await trivyReplayTargets(input))
-    await expect(prepare()).rejects.toThrow(/retain/i);
+  await expectTrivyReplay(input, /retain/i);
 });
 
 const uppercaseWebUrl = "HTTPS://github.com/Example/Project";
@@ -3693,22 +3693,15 @@ test.each([
   async (typed, raw, matches) => {
     const report = trivyReport();
     report.Metadata.RepoURL = raw;
-    const { findings } = normalizeTrivyFindings(report, "cloud", ".");
-    findings[0]!.evidence.details = {
+    const input = selectedTrivyRows(report);
+    input.findings[0]!.evidence.details = {
       kind: "sast",
       repository: { url: typed },
     };
-    for (const prepare of await trivyReplayTargets({
-      read: 1,
-      findings,
-      excluded: [],
-    })) {
-      if (matches) expect((await prepare()).preview.findings).toHaveLength(1);
-      else
-        await expect(prepare()).rejects.toThrow(
-          /does not match|different repositories/,
-        );
-    }
+    await expectTrivyReplay(
+      input,
+      matches ? undefined : /does not match|different repositories/,
+    );
   },
 );
 
@@ -3733,10 +3726,7 @@ test.each([
       ...(ArtifactType && { ArtifactType }),
       ArtifactName,
     };
-    for (const prepare of await trivyReplayTargets(input)) {
-      if (error) await expect(prepare()).rejects.toThrow(error);
-      else expect((await prepare()).preview.findings).toHaveLength(1);
-    }
+    await expectTrivyReplay(input, error);
   },
 );
 
@@ -4614,23 +4604,16 @@ test.each(["file", "selected rows", "empty source list"] as const)(
   async (inputKind) => {
     const cloud = await fixture();
     const artifact = "ssh://git@github.com/example/project.git";
-    const prepare = async (ArtifactName = artifact) => {
+    const prepare = async (ArtifactName = artifact, kind = inputKind) => {
       const report = { ...trivyReport(), Metadata: {}, ArtifactName };
-      if (inputKind === "file") {
+      if (kind === "file") {
         await writeFile(cloud.file, JSON.stringify(report));
         return prepareExternalPublication(cloud.file, trivyOptions, cloud.deps);
       }
-      const { findings, read, excluded } = normalizeTrivyFindings(
-        report,
-        "cloud",
-        ".",
-      );
       return prepareNormalizedExternalPublication(
         {
-          findings,
-          read,
-          excluded,
-          ...(inputKind === "empty source list" && {
+          ...selectedTrivyRows(report),
+          ...(kind === "empty source list" && {
             sourceRepositoryUrls: [],
           }),
         },
@@ -4658,10 +4641,21 @@ test.each(["file", "selected rows", "empty source list"] as const)(
     );
     expect((await prepare()).preview.resumed).toBe(true);
 
+    const fullReport = await prepare(artifact, "file");
+    expect(fullReport.preview.resumed).toBe(inputKind === "file");
     delete saved.trivyRepositoryBound;
     const older = JSON.stringify(saved);
     await writeFile(filename, older);
     await expect(prepare()).rejects.toThrow("the build that created it");
+    if (inputKind !== "file") {
+      // These rows alone have the earlier raw importer's checkpoint key.
+      await expect(prepare(artifact, "file")).rejects.toThrow(
+        "the build that created it",
+      );
+      await expect(fullReport.publish()).rejects.toThrow(
+        "the build that created it",
+      );
+    }
     expect(await readFile(filename, "utf8")).toBe(older);
     expect(cloud.posts).toHaveLength(1);
   },

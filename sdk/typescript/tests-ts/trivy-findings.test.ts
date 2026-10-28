@@ -108,7 +108,7 @@ test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root 
   const targetOnly = { ...report, Metadata: {} };
   expect(() => normalizeTrivyFindings(targetOnly)).toThrow("--trivy-scan-root");
   const selected = normalizeAtRoot(targetOnly);
-  expect(selected.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
+  expect(selected.sourceRepositoryUrls).toEqual([report.ArtifactName]);
   expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
     ArtifactName: report.ArtifactName,
   });
@@ -128,8 +128,14 @@ test.each([
       ArtifactName: base + target,
       Metadata: { RepoURL: base + cloned },
     };
-    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
     const input = normalizeAtRoot(report);
+    if (matches) {
+      expect(normalizeTrivyFindings(report)).toEqual(input);
+      expect(() => normalizeTrivyFindings(report, "local", "nested")).toThrow(
+        "must be .",
+      );
+    } else
+      expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
     const saved = input.findings[0]!.evidence.source_data!["report"];
     expect(saved).toMatchObject({
       ArtifactName: report.ArtifactName,
@@ -141,6 +147,22 @@ test.each([
       expect(() => trivyRepositoryUrl(saved)).toThrow("different repositories");
   },
 );
+
+test("identical SSH declarations can use an SSH-config host alias", () => {
+  const url = "ssh://git@git.1/org/project";
+  const report = {
+    ...trivyReport(),
+    ArtifactName: url,
+    Metadata: { RepoURL: url },
+  };
+  expect(normalizeTrivyFindings(report).sourceRepositoryUrls).toEqual([url]);
+  const native = { ...report, Metadata: { RepoURL: "git@git.1:org/project" } };
+  expect(normalizeAtRoot(native).sourceRepositoryUrls).toEqual([
+    native.Metadata.RepoURL,
+    url,
+  ]);
+  expect(() => trivyRepositoryUrl(native)).toThrow("different repositories");
+});
 
 test("retains a provisional Enterprise SSH alias until the destination is known", () => {
   const report = {

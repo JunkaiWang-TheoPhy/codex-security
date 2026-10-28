@@ -116,7 +116,12 @@ function requireTrivySshUsers(urls: readonly string[]): void {
 
 /** Findings are stored and published individually, without the batch repository URLs. */
 export function validateNormalizedTrivySources(input: ExternalFindings): void {
-  for (const url of input.sourceRepositoryUrls ?? []) networkRepository(url);
+  for (const url of input.sourceRepositoryUrls ?? []) {
+    if (!networkRepository(url))
+      throw new Error(
+        "Trivy sourceRepositoryUrls must contain network repository URLs.",
+      );
+  }
   requireTrivySshUsers(input.sourceRepositoryUrls ?? []);
   for (const { evidence } of input.findings) {
     const report = evidence.source_data?.["report"];
@@ -161,12 +166,6 @@ export function trivyReportRemotes(report: unknown) {
   const artifactRepository =
     artifact && artifact !== repository ? artifact : undefined;
   if (artifactRepository && report["ArtifactType"] === "repository") {
-    if (!repository) {
-      const target = artifactRepository.replace(/^https?:/iu, (scheme) =>
-        scheme.toLowerCase(),
-      );
-      return { urls: [target], artifactRepository };
-    }
     // Trivy clones an escaped HTTP path but retains the scanner argument as its label.
     // Preserve the authority, existing escapes, separators and dot segments literally.
     const escaped = artifactRepository.replace(
@@ -174,8 +173,7 @@ export function trivyReportRemotes(report: unknown) {
       (_, authority: string, path: string) =>
         authority + path.replace(/[ \P{ASCII}]+/gu, encodeURIComponent),
     );
-    if (escaped === repository)
-      return { urls: [repository], artifactRepository };
+    if (escaped === repository) artifact = repository;
   }
   // ArtifactName can come from the scanned checkout's etc/hostname.
   if (repository && userlessSsh(repository))
@@ -422,10 +420,7 @@ export function normalizeTrivyFindings(
   };
   // A scan root requires corroboration. Explicit-root readers can inspect a report
   // whose declarations still have to agree with the destination at import.
-  const hint =
-    urls.length === 2
-      ? `https://${parseGitRemote(urls[0]!)!.url.hostname}`
-      : undefined;
+  const hint = urls.find((url) => /^https?:\/\//u.test(url));
   const root = resolveScanRoot(scanRoot, matchingTrivyRemotes(urls, hint));
 
   const entries: (Entry | string)[] = [];
