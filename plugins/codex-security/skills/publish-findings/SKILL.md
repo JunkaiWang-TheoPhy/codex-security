@@ -33,7 +33,7 @@ Local records remain unassessed source evidence, separate from `findings list` a
 
 ## Amazon Inspector repository findings
 
-Use `--provider inspector` for a complete Inspector2 ListFindings JSON export from one Code Security repository. Supply `--source-repository-url` and verify that the native repository URL in the export identifies the same project. Preview repository package and code findings with a stable source key for the account, Region and repository. Self-managed GitLab imports use the local destination.
+Use `--provider inspector` for a complete Inspector2 ListFindings JSON export from one Code Security repository. Supply `--source-repository-url`. If the export identifies the repository by its project ARN and name, supply `--inspector-project-map FILE` with an operator-verified binding from that full ARN to the canonical repository URL. Keep the map outside the checkout and supply it again on replay. A matching native repository URL also supports import without a map. Preview repository package and code findings with a stable source key for the account, Region and repository. Self-managed GitLab imports use the local destination.
 
 ## Endor Labs findings
 
