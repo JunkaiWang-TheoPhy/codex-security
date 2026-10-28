@@ -19,7 +19,6 @@ import {
   stableId,
   text,
 } from "./scanner-import.js";
-
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
 const format = "blackduck-bom-6";
@@ -39,11 +38,10 @@ export function hasBlackDuckEvidence(data: unknown): boolean {
 
 function retainedRepository(
   data: unknown,
-  id: string | undefined,
+  id: string,
   target: ExternalImportTarget,
 ): { url: string; projectVersion?: string } | undefined {
-  const native =
-    hasBlackDuckEvidence(data) || (id !== undefined && nativeId.test(id));
+  const native = hasBlackDuckEvidence(data) || nativeId.test(id);
   if (native && (!isRecord(data) || !isRecord(data["row"])))
     throw new Error("Expected retained Black Duck BOM occurrence evidence.");
   if (!isRecord(data) || (!native && !("sourceRepositoryUrl" in data))) return;
@@ -67,20 +65,11 @@ function retainedRepository(
     scopedRow(data["row"], projectVersion, false),
     projectVersion,
   );
-  if (id !== undefined && id !== actual)
+  if (id !== actual)
     throw new Error(
       "Black Duck source finding ID contradicts the retained native occurrence.",
     );
   return { url, projectVersion };
-}
-
-export function blackDuckEvidenceRepositoryUrls(
-  data: unknown,
-  id?: string,
-  target: ExternalImportTarget = "cloud",
-): string[] {
-  const retained = retainedRepository(data, id, target);
-  return retained ? [retained.url] : [];
 }
 
 export function blackDuckReportRepositories(
