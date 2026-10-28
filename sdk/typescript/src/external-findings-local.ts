@@ -20,10 +20,10 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { hasBlackDuckEvidence } from "./blackduck-findings.js";
 import { parseGitRemote } from "./git-remote.js";
 import {
   boundScannerRepositories,
+  repositoryBoundScanners,
   snapshotImportOptions,
 } from "./scanner-repository-provenance.js";
 import { parentDirectory } from "./windows-path.js";
@@ -603,12 +603,13 @@ export async function prepareLocalImport(
     "local",
     options.inspectorProjectMap,
   );
+  const isNative = repositoryBoundScanners[options.provider]?.hasEvidence;
   const nativeSources = new Set<string>();
   for (const { source_finding_id: id, evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
     const source = bound.get(id);
-    if (source && hasBlackDuckEvidence(evidence.source_data))
+    if (source && isNative?.(evidence.source_data, id))
       nativeSources.add(source.url);
   }
   for (const source of [

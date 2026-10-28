@@ -58,6 +58,19 @@ Use the same source key for later exports from the same application and
 context; an application GUID is not evidence of a Git URL. For Cloud use an
 authorized GitHub repository and a deployment that accepts provider `veracode`.
 
+Local import compares the source with the checkout’s Git remotes when
+comparable remotes are configured.
+
+If an interrupted Cloud upload reports `result.savedSubmission`, the SDK
+reads that checkpoint on retry. Use the same state directory, build, provider,
+source key and destination. Rerun the CLI with the original HAL export. For
+`prepareNormalizedExternalPublication`, supply your original normalized
+`ExternalFindings` input. Check `preview.resumed` before calling `publish()`
+and review any fresh preview before approving it.
+Passing different normalized findings prepares a new upload. Save each finding
+with its original `source_finding_id` and `evidence.source_data` so the SDK can
+verify its application and repository when replayed with the Veracode provider.
+
 | Veracode evidence                              | What Codex Security tracks                                                                                                            |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | API origin, application/context and `issue_id` | A stable policy flaw occurrence. Build number, line, CWE and the separate Pipeline flaw ID are not its identity.                      |

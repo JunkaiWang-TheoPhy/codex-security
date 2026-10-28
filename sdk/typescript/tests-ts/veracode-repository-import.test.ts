@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -63,6 +64,18 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
         dependencies,
       ),
     ).rejects.toThrow(/remote|repository/i);
+    const mixed = structuredClone(first.preview);
+    const typed = mixed.findings[1]!;
+    typed.source_finding_id = "sdk-id";
+    delete typed.evidence.source_data;
+    typed.evidence.details!.repository!.url =
+      "git@github.com:example/mirror.git";
+    const prepareMixed = () =>
+      prepareNormalizedLocalImport(mixed, options, dependencies);
+    const remote = (...args: string[]) =>
+      execFileSync("git", ["-C", fixture.repository, "remote", ...args]);
+    remote("add", "mirror", "https://github.com/example/mirror");
+    expect((await prepareMixed()).preview.findings).toHaveLength(2);
     const wrong = structuredClone(first.preview);
     wrong.findings[0]!.evidence.details!.repository!.url =
       "https://github.com/example/other";
@@ -89,6 +102,8 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
         dependencies,
       ),
     ).rejects.toThrow(/same application/i);
+    remote("set-url", "origin", "ssh://git@github.com/example/project?other");
+    await expect(prepareMixed()).rejects.toThrow(/configured remote/);
   } finally {
     await fixture.dispose();
   }

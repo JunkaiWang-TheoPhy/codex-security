@@ -376,9 +376,19 @@ test("prepared provenance binds the repository and native occurrence", () => {
     retained(
       { applicationUrl: "https://scanner.example.test/dashboard" },
       "custom-issue-id",
-    ),
-  ).toBeUndefined();
+    )?.url,
+  ).toBe(repository);
   expect(() => retained(undefined)).toThrow(/source-repository-url/);
+  const summary = structuredClone(second!);
+  summary.source_finding_id = "sdk-id";
+  delete summary.evidence.source_data;
+  summary.evidence.details!.repository!.url = repository + "-other";
+  expect(veracodeReportRepositories([summary, first!], "cloud")).toEqual(
+    new Map([
+      [summary.source_finding_id, { url: repository + "-other" }],
+      [first!.source_finding_id, { url: repository }],
+    ]),
+  );
   for (const source of [
     "",
     "https://vcs.example.test",
