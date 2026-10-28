@@ -16,20 +16,23 @@ function limited(hint: string, cancel: () => void) {
 }
 
 test.each([
-  ["010", 10_000],
-  ["Fri, 06 Nov 2026 08:49:30 GMT", 9_750],
-  ["Friday, 06-Nov-26 08:49:30 GMT", 9_750],
-  ["Fri Nov  6 08:49:30 2026", 9_750],
-  ["Sun, 06 Nov 1994 08:49:37 GMT", 0],
-  ["Sunday, 06-Nov-94 08:49:37 GMT", 0],
-  ["Sat, 31 Dec 2016 23:59:60 GMT", 0],
+  ["010", 10_000, null],
+  ["Fri, 06 Nov 2026 08:48:05 GMT", 5_000, "Fri, 06 Nov 2026 08:48:00 GMT"],
+  ["Fri, 06 Nov 2026 08:49:30 GMT", 9_750, null],
+  ["Friday, 06-Nov-26 08:49:30 GMT", 9_750, "unusable date"],
+  ["Fri Nov  6 08:49:30 2026", 9_750, null],
+  ["Sun, 06 Nov 1994 08:49:37 GMT", 0, null],
+  ["Sunday, 06-Nov-94 08:49:37 GMT", 0, null],
+  ["Sat, 31 Dec 2016 23:59:60 GMT", 0, null],
 ] as const)(
   "releases the 429 body and waits for Retry-After %s",
-  async (hint, delay) => {
+  async (hint, delay, serverDate) => {
     jest.useFakeTimers({ now });
     const released = Promise.withResolvers<void>();
     const fetch = mock(async () => Response.json({ complete: true }));
-    fetch.mockResolvedValueOnce(limited(hint, released.resolve));
+    const response = limited(hint, released.resolve);
+    if (serverDate) response.headers.set("Date", serverDate);
+    fetch.mockResolvedValueOnce(response);
     const result = getHostedJson(url, "Bearer synthetic", { fetch });
     await released.promise;
     if (delay > 0) {

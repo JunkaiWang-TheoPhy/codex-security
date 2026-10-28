@@ -54,10 +54,15 @@ function retryAfterMs(response: Response): number | undefined {
   if (response.status !== 429) return;
   const hint = response.headers.get("retry-after");
   if (!hint) return;
-  const now = Date.now();
-  const delay = /^\d+$/u.test(hint)
-    ? Number(hint) * 1000
-    : Math.max(0, httpDate(hint, now) - now);
+  let delay: number;
+  if (/^\d+$/u.test(hint)) {
+    delay = Number(hint) * 1000;
+  } else {
+    const now = Date.now();
+    const serverDate = httpDate(response.headers.get("date") ?? "", now);
+    const reference = Number.isNaN(serverDate) ? now : serverDate;
+    delay = Math.max(0, httpDate(hint, reference) - reference);
+  }
   return delay <= maxRetryAfterMs ? delay : undefined;
 }
 
