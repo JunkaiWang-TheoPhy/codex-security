@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { z } from "zod";
 import validSemver from "semver/functions/valid.js";
 import type {
   ExternalFinding,
@@ -25,6 +26,7 @@ import {
 
 type Native = Record<string, unknown>;
 
+const listFindings = z.strictObject({ findings: z.array(z.unknown()) });
 const format = "aws-inspector2-list-findings/v1";
 const findingArn =
   /^(arn:(aws[a-zA-Z-]*):inspector2:([a-z]{2}(?:-gov)?-[a-z]+-\d):(\d{12})):finding\/[a-f0-9]{32}$/u;
@@ -73,19 +75,14 @@ export function validateInspectorProjectMapping(
   return repositoryUrl(canonicalUrl);
 }
 
-function matchesProject(
-  name: string,
-  source: string,
-  github: boolean,
-): boolean {
+function checkProjectName(name: string, source: string, github: boolean): void {
   const urlKey = github ? cloudRepositoryUrlKey : repositoryUrlKey;
   const key = urlKey(source);
   const path = new URL(key).pathname.slice(1);
   const literal = github ? name.toLowerCase() : name;
   if (absoluteUrl.test(name)) {
-    if (urlKey(repositoryUrl(name)) === key) return true;
-  } else if (literal === path) return true;
-  else if (literal === posix.basename(path)) return false;
+    if (urlKey(repositoryUrl(name)) === key) return;
+  } else if (literal === path || literal === posix.basename(path)) return;
   throw new Error(
     "Inspector native repository does not match --source-repository-url.",
   );
@@ -97,18 +94,26 @@ function identity(finding: Native) {
   if (!match) throw new Error("Expected an Inspector2 finding ARN.");
   if (finding["awsAccountId"] !== match[4])
     throw new Error("Inspector finding ARN and AWS account do not match.");
-  return { arn, issuer: match[1]!, partition: match[2]!, region: match[3]! };
+  return {
+    arn,
+    issuer: match[1]!,
+    partition: match[2]!,
+    region: match[3]!,
+    account: match[4]!,
+  };
 }
 
-function repositoryClaim(finding: Native, resource: Native) {
-  const { issuer, partition, region } = identity(finding);
+function repositoryClaim(
+  { issuer, partition, region, account }: ReturnType<typeof identity>,
+  resource: Native,
+) {
   if (
     (resource["partition"] !== undefined &&
       resource["partition"] !== partition) ||
     (resource["region"] !== undefined && resource["region"] !== region) ||
     (resource["provider"] !== undefined && resource["provider"] !== "AWS") ||
     (resource["providerAccountId"] !== undefined &&
-      resource["providerAccountId"] !== finding["awsAccountId"])
+      resource["providerAccountId"] !== account)
   )
     throw new Error(
       "Inspector repository resource and finding scope do not match.",
@@ -192,8 +197,8 @@ function checkRepositoryMapping(
       "Inspector Cloud requires a GitHub repository provider; self-managed GitLab is local only.",
     );
   const github = provider === "GITHUB" || knownGitHub;
-  if (absoluteUrl.test(nativeId)) matchesProject(nativeId, source, github);
-  if (name !== null) matchesProject(name, source, github);
+  if (absoluteUrl.test(nativeId)) checkProjectName(nativeId, source, github);
+  if (name !== null) checkProjectName(name, source, github);
   if (projectMap) {
     // repositoryClaim validated this ARN and its issuer before the lookup.
     const trustedUrl = nativeId.startsWith("arn:")
@@ -215,76 +220,60 @@ function checkRepositoryMapping(
   );
 }
 
-class InspectorReportScope {
-  private readonly projects = new Set<string>();
-  private readonly integrations = new Set<string>();
-  private readonly providers = new Set<string>();
-  private readonly mappings: {
-    nativeId: string;
-    name: string | null;
-    source: string;
-  }[] = [];
-
-  include(row: unknown, source: string): void {
-    if (!isRecord(row) || !Array.isArray(row["resources"])) return;
-    for (const resource of row["resources"]) {
-      if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY")
-        continue;
-      const claim = repositoryClaim(row, resource);
-      this.mappings.push({
-        nativeId: claim.nativeId,
-        name: claim.name,
-        source,
-      });
-      this.projects.add(claim.project);
-      if (claim.integration) this.integrations.add(claim.integration);
-      if (claim.provider) this.providers.add(claim.provider);
-      if (
-        this.projects.size > 1 ||
-        this.integrations.size > 1 ||
-        this.providers.size > 1
-      )
-        throw new Error(
-          "Inspector export identifies more than one repository project or integration.",
-        );
-    }
-  }
-  validate(
-    target?: ExternalImportTarget,
-    projectMap?: ReadonlyMap<string, string>,
-  ): string | undefined {
-    const provider = this.providers.values().next().value;
-    let hasRepositoryUrl = false;
-    for (const { nativeId, name, source } of this.mappings) {
-      if (
-        checkRepositoryMapping(
-          nativeId,
-          name,
-          source,
-          provider,
-          target,
-          projectMap,
-        )
-      )
-        hasRepositoryUrl = true;
-    }
-    if (this.mappings.length && !hasRepositoryUrl)
-      throw new Error(
-        "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
-      );
-    return provider;
-  }
+function mergeScopeValue(
+  current: string | undefined,
+  next: string | undefined,
+) {
+  if (current && next && current !== next)
+    throw new Error(
+      "Inspector export identifies more than one repository project or integration.",
+    );
+  return current ?? next;
 }
 
+/** Rows from one project can share provider and host evidence. */
 function checkReportScope(
-  rows: unknown[],
-  source: string,
-  target?: ExternalImportTarget,
+  rows: readonly { finding: unknown; source: string }[],
+  target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
 ): string | undefined {
-  const scope = new InspectorReportScope();
-  for (const row of rows) scope.include(row, source);
-  return scope.validate(target, projectMap);
+  const mappings = [];
+  let project: string | undefined;
+  let integration: string | undefined;
+  let provider: string | undefined;
+  for (const { finding, source } of rows) {
+    if (!isRecord(finding) || !Array.isArray(finding["resources"])) continue;
+    let origin: ReturnType<typeof identity> | undefined;
+    for (const resource of finding["resources"]) {
+      if (!isRecord(resource) || resource["type"] !== "CODE_REPOSITORY")
+        continue;
+      origin ??= identity(finding);
+      const claim = repositoryClaim(origin, resource);
+      project = mergeScopeValue(project, claim.project);
+      integration = mergeScopeValue(integration, claim.integration);
+      provider = mergeScopeValue(provider, claim.provider);
+      mappings.push({ source, nativeId: claim.nativeId, name: claim.name });
+    }
+  }
+  let hasRepositoryUrl = false;
+  for (const { nativeId, name, source } of mappings) {
+    if (
+      checkRepositoryMapping(
+        nativeId,
+        name,
+        source,
+        provider,
+        target,
+        projectMap,
+      )
+    )
+      hasRepositoryUrl = true;
+  }
+  if (mappings.length && !hasRepositoryUrl)
+    throw new Error(
+      "Inspector needs a matching native repository URL or a trusted project ARN mapping to identify the Git host.",
+    );
+  return provider;
 }
 
 function selectedFinding(value: unknown): Native {
@@ -362,83 +351,51 @@ export function hasInspectorEvidence(sourceData: unknown): boolean {
   );
 }
 
-function retainedRepository(
-  sourceData: unknown,
-  expectedSourceId: string | undefined,
-  requireRetained: boolean,
-) {
-  if (!isRecord(sourceData) || sourceData["format"] !== format) {
-    if (
-      requireRetained ||
-      hasInspectorEvidence(sourceData) ||
-      (expectedSourceId !== undefined && findingArn.test(expectedSourceId))
-    )
-      throw new Error(
-        "Expected retained Inspector ListFindings evidence for the finding ARN.",
-      );
-    return;
-  }
-  const source = repositoryUrl(sourceData["sourceRepositoryUrl"]);
-  const finding = selectedFinding(sourceData["finding"]);
-  if (
-    expectedSourceId !== undefined &&
-    finding["findingArn"] !== expectedSourceId
-  )
-    throw new Error(
-      "Inspector source_finding_id does not match the retained finding ARN.",
-    );
-  return { source, finding };
-}
-
-export function inspectorEvidenceRepositoryUrls(
-  sourceData: unknown,
-  expectedSourceId?: string,
-  target?: ExternalImportTarget,
-  projectMap?: ReadonlyMap<string, string>,
-): string[] {
-  const retained = retainedRepository(
-    sourceData,
-    expectedSourceId,
-    projectMap !== undefined,
-  );
-  if (!retained) return [];
-  checkReportScope([retained.finding], retained.source, target, projectMap);
-  return [retained.source];
-}
-
 export function inspectorReportRepositories(
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
 ): Map<string, ExternalSourceRepository> {
-  const scope = new InspectorReportScope();
-  const repositories = new Map<string, ExternalSourceRepository>();
+  const retained = [];
   for (const { source_finding_id: id, evidence } of findings) {
-    const retained = retainedRepository(
-      evidence.source_data,
+    const data = evidence.source_data;
+    if (!isRecord(data) || data["format"] !== format) {
+      if (projectMap || hasInspectorEvidence(data) || findingArn.test(id))
+        throw new Error(
+          "Expected retained Inspector ListFindings evidence for the finding ARN.",
+        );
+      continue;
+    }
+    const source = repositoryUrl(data["sourceRepositoryUrl"]);
+    const finding = selectedFinding(data["finding"]);
+    if (finding["findingArn"] !== id)
+      throw new Error(
+        "Inspector source_finding_id does not match the retained finding ARN.",
+      );
+    retained.push({
+      source,
+      finding,
       id,
-      projectMap !== undefined,
-    );
-    if (!retained) continue;
-    scope.include(retained.finding, retained.source);
-    repositories.set(id, { url: retained.source });
+      declared: evidence.details?.repository?.url,
+    });
   }
-  const github = scope.validate(target, projectMap) === "GITHUB";
+  const github = checkReportScope(retained, target, projectMap) === "GITHUB";
   const key =
     github || target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  if (new Set([...repositories.values()].map(({ url }) => key(url))).size > 1)
+  if (new Set(retained.map(({ source }) => key(source))).size > 1)
     throw new Error(
       "Inspector export identifies more than one source repository.",
     );
-  for (const { source_finding_id: id, evidence } of findings) {
-    const repository = repositories.get(id);
-    if (!repository) continue;
-    if (github) repository.platform = "github";
-    const declared = evidence.details?.repository?.url;
-    if (declared && key(declared) !== key(repository.url))
+  const repositories = new Map<string, ExternalSourceRepository>();
+  for (const { source, id, declared } of retained) {
+    if (declared && key(declared) !== key(source))
       throw new Error(
         "Retained scanner repository does not match the normalized evidence repository.",
       );
+    repositories.set(
+      id,
+      github ? { url: source, platform: "github" } : { url: source },
+    );
   }
   return repositories;
 }
@@ -686,17 +643,24 @@ export function normalizeInspectorFindings(
   projectMap?: ReadonlyMap<string, string>,
 ): ExternalFindings {
   const source = repositoryUrl(sourceRepositoryUrl);
-  const report = record(input, "Inspector ListFindings response");
-  if (Object.hasOwn(report, "NextToken") || Object.hasOwn(report, "nextToken"))
+  if (
+    isRecord(input) &&
+    (Object.hasOwn(input, "NextToken") || Object.hasOwn(input, "nextToken"))
+  )
     throw new Error(
       "Inspector export has a continuation key; supply the complete paginated CLI JSON output.",
     );
-  if (Object.keys(report).some((key) => key !== "findings"))
+  const report = listFindings.safeParse(input);
+  if (!report.success)
     throw new Error(
-      "Expected only a complete native Inspector ListFindings response.",
+      "Expected only a complete native Inspector ListFindings response with a findings array.",
     );
-  const rows = array(report["findings"], "Inspector findings");
-  checkReportScope(rows, source, target, projectMap);
+  const rows = report.data.findings;
+  checkReportScope(
+    rows.map((finding) => ({ finding, source })),
+    target,
+    projectMap,
+  );
   const normalize = (requireOwnMapping: boolean) =>
     normalizeRecords(
       rows,
@@ -704,7 +668,7 @@ export function normalizeInspectorFindings(
         const finding = selectedFinding(row);
         const projected = evidence(finding, id, source, target);
         if (requireOwnMapping)
-          checkReportScope([finding], source, target, projectMap);
+          checkReportScope([{ finding, source }], target, projectMap);
         return { source_finding_id: id, evidence: projected };
       },
       (row) => identity(record(row, "Inspector finding")).arn,

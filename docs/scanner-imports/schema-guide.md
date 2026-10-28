@@ -1,7 +1,7 @@
 # How saved scanner reports map to imported evidence
 
-This guide covers the Wiz, Endor Labs, Snyk Open Source, Semgrep Code, GitHub and Black Duck
-**file readers** used by `publish findings`. Acquisition produces the artifact:
+The **reader** selected by `publish findings --provider` interprets a saved
+scanner export. Acquisition produces the artifact:
 for example, `snyk test` scans a workspace, while `codex-security import github`
 retrieves selected code-scanning alerts. File ingestion reads the saved report.
 Use the mappings to decide what one record represents, whether a later export
@@ -23,6 +23,7 @@ to investigate records together, not instructions to merge them.
 | [Wiz package JSON or detailed CSV](../../sdk/typescript/docs/cli.md#package-vulnerability-inputs); CSV requires `CloudPlatform=GitHub` and `CloudProviderURL` for a GitHub repository `/tree/<ref>` | Vendor occurrence `id` (CSV: `ID`), not the CVE                                                                                                         | Tenant and finding family                  |
 | [Wiz named repository collections](../../sdk/typescript/docs/cli.md#sast-repository-secrets-and-iac-inputs)                                                                                         | `sast:<id>`, `secret:<id>`, `iac:<id>`                                                                                                                  | Tenant and finding family                  |
 | [Endor Finding JSON or endorctl SARIF](endor.md)                                                                                                                                                    | Finding `uuid` or SARIF `properties["finding-uuid"]`                                                                                                    | Namespace, project and context             |
+| [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
@@ -55,6 +56,11 @@ before preparing a fresh submission.
   normalized JSONL: supply the reviewed `source_finding_id` and `evidence`,
   retaining the raw row. The reader does not infer a mapping for other CSV
   profiles.
+- **Amazon Inspector.** Supply a complete export for one repository project.
+  A matching native URL or the operator's full project ARN mapping establishes
+  the Git host. Local import and Cloud replay check the destination again.
+  Each finding ARN identifies one occurrence. Duplicate ARNs exclude all
+  colliding rows. Package and code evidence retain the native finding.
 - **Endor Labs:** Prefer a complete native Finding, array or `list.objects`.
   `spec.level`, dependency paths/versions, advisory aliases, source SHA and
   primary SAST/AI SAST locations map when present. The project UUID does not
