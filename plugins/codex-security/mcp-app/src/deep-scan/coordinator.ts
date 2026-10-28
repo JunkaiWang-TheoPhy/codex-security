@@ -94,6 +94,7 @@ export interface CoordinatorOptions {
     publication: DeepScanPublication,
   ) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
+  onStart?: (coordinator: DeepScanCoordinator) => void;
 }
 
 export { DeepScanNonRetryableError } from "./errors.js";
@@ -373,7 +374,7 @@ export class DeepScanCoordinator {
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
-            coverage: {
+            reviewState: {
               surfaces: [],
               explicitExclusions: [],
               deferred: [
