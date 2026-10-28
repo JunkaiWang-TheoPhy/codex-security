@@ -19,7 +19,6 @@ import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
-import { exportArtifact } from "../src/artifact-export.js";
 import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
