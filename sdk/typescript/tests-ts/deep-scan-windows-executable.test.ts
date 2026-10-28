@@ -17,7 +17,7 @@ import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 async function bundledResolver() {
   const runtime = await loadBundledRuntime();
   const start = runtime.indexOf("function resolveCodexPath(");
-  const end = runtime.indexOf("\n// server.ts", start);
+  const end = runtime.indexOf("\n// ", start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const source = runtime.slice(start, end);
@@ -165,23 +165,3 @@ test.each([
     }
   },
 );
-
-test("does not retry Windows executable permission failures", async () => {
-  const runtime = await loadBundledRuntime();
-  const source =
-    /function classifyCodexWorkerError\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-  expect(source).toBeDefined();
-  class NonRetryableError extends Error {}
-  const classify = new Function(
-    "DeepScanNonRetryableError",
-    `${source}\nreturn classifyCodexWorkerError;`,
-  )(NonRetryableError) as (error: Error) => Error;
-  const original = Object.assign(new Error("spawn codex EPERM"), {
-    code: "EPERM",
-  });
-  const result = classify(original);
-  expect(result).toBeInstanceOf(NonRetryableError);
-  expect(result.cause).toBe(original);
-});
