@@ -19,8 +19,8 @@ use windows_sys::Win32::{
         CreateFileW, FileBasicInfo, GetFileInformationByHandleEx, GetFileType,
         GetFinalPathNameByHandleW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-        OPEN_EXISTING,
+        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FILE_TYPE_DISK, OPEN_EXISTING,
     },
 };
 
@@ -218,7 +218,8 @@ fn open_file(path: &Path, directory: bool) -> io::Result<Option<File>> {
         CreateFileW(
             path.as_ptr(),
             if directory {
-                FILE_READ_ATTRIBUTES
+                // Attribute-only handles do not participate in share-access checks.
+                FILE_READ_ATTRIBUTES | FILE_TRAVERSE
             } else {
                 FILE_GENERIC_READ
             },

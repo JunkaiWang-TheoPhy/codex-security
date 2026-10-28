@@ -56,6 +56,15 @@ export function scanReadProof(): Record<string, boolean> {
     mkdirSync(outside, { mode: 0o700 });
     writeFileSync(join(artifacts, "receipt.json"), payload);
     writeFileSync(join(outside, "receipt.json"), "outside scan");
+    if (process.platform === "win32") {
+      const moved = join(fixture, "moved-scan");
+      const heldRoot = openRoot(scan);
+      assert.throws(() => renameSync(scan, moved));
+      heldRoot.verify();
+      heldRoot.close();
+      renameSync(scan, moved);
+      renameSync(moved, scan);
+    }
     const root = openRoot(scan);
     assert.deepEqual(chunks(openFile(root, "artifacts/receipt.json")), payload);
     assert.equal(root.openFile("missing.json"), null);
