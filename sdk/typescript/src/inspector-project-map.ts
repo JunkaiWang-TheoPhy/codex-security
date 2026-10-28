@@ -47,6 +47,11 @@ async function directoriesAlongPath(input: string, signal: AbortSignal) {
           "Inspector project-map discovery requires UTF-8 symlink targets.",
         );
       const target = bytes.toString("utf8");
+      if (sep === "\\" && !isAbsolute(target)) {
+        // Win32 cancels parent components when substituting a relative link.
+        paths.set(join(parent, target), entry);
+        continue;
+      }
       const raw = isAbsolute(target) ? target : `${parent}${sep}${target}`;
       const root = parse(raw).root;
       const components = raw

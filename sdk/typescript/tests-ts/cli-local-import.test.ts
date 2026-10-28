@@ -381,6 +381,17 @@ test("Cloud permits a trusted configuration checkout and rejects maps controlled
   expect(
     await run(f.repository, f.root, join(alias, "selected.json")),
   ).toContain("outside the selected repository");
+  if (process.platform === "win32") {
+    const linkedConfig = join(f.root, "linked-config");
+    try {
+      await symlink("missing\\..\\config", linkedConfig, "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+      throw error;
+    }
+    expect(await realpath(linkedConfig)).toBe(await realpath(config));
+    expect(await run(linkedConfig)).toContain("CODEX_SECURITY_CLOUD_BASE_URL");
+  }
 });
 
 test("the Inspector map option cannot be used for other providers", async () => {
