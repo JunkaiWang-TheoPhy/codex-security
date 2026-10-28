@@ -923,15 +923,8 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
-    const { onProgress, ...scanOptions } = options;
-    const reportProgress = (progress: DependencyScanProgress): void => {
-      void Promise.resolve()
-        .then(() => onProgress?.(progress))
-        .catch((error: unknown) =>
-          options.onObserverError?.("onProgress", error),
-        )
-        .catch(() => {});
-    };
+    const { onProgress: _onProgress, ...scanOptions } = options;
+    const reportProgress = notifyObserver(options, "onProgress");
     const onActivity = notifyObserver(options, "onActivity");
     const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
@@ -6176,11 +6169,12 @@ export function selectedScanEnvironment(
   );
 }
 
-function notifyObserver<Name extends ScanObserverName>(
-  options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
-  observerName: Name,
-) {
-  type Arguments = Parameters<NonNullable<(typeof options)[Name]>>;
+function notifyObserver<
+  Name extends ScanObserverName,
+  Options extends Pick<ScanOptions, "onObserverError"> &
+    Partial<Record<Name, (...args: never[]) => void>>,
+>(options: Options, observerName: Name) {
+  type Arguments = Parameters<NonNullable<Options[Name]>>;
   const observer = options[observerName] as
     ((...args: Arguments) => void) | undefined;
   const onObserverError = options.onObserverError;
