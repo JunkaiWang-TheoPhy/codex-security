@@ -148,29 +148,21 @@ test("retains a provisional Enterprise SSH alias until the destination is known"
       }),
     ).toThrow("different repositories");
   }
-  for (const [ArtifactName, RepoURL] of [
-    [
-      "ssh://other@git.example.test/org/project",
-      "ssh://git.example.test/org/project",
-    ],
-    [
-      "ssh://git@git.example.test:2222/org/project",
-      "ssh://git.example.test:2222/org/project",
-    ],
-  ] as const) {
-    const batch = normalizeAtRoot({
-      ...report,
-      ArtifactName,
-      Metadata: { RepoURL },
-    });
-    expect(batch.sourceRepositoryUrls).toEqual([ArtifactName]);
-    expect(
-      trivyRepositoryUrl(
-        batch.findings[0]!.evidence.source_data!["report"],
-        report.ArtifactName,
-      ),
-    ).toBe(ArtifactName);
-  }
+});
+
+test("a repository display label cannot supply an SSH account omitted from Git metadata", () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "ssh://tenant-a@git.example.test:2222/org/project",
+    Metadata: { RepoURL: "ssh://git.example.test:2222/org/project" },
+  };
+  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+  const batch = normalizeAtRoot(report);
+  expect(batch.sourceRepositoryUrls).toEqual([report.Metadata.RepoURL]);
+  expect(batch.findings[0]!.evidence.source_data!["report"]).toMatchObject({
+    ArtifactName: report.ArtifactName,
+    Metadata: report.Metadata,
+  });
 });
 
 test("rejects unsafe scan directories before importing even a clean local report", () => {

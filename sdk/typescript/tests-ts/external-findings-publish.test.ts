@@ -3502,10 +3502,6 @@ test.each([
     "https://git.example.test/example/project.git",
   ],
   [connectedProject, "git@git.example.test:example/project.git"],
-  [
-    "ssh://git@git.example.test/example/project",
-    "ssh://git.example.test/example/project",
-  ],
 ])(
   "Trivy CLI verifies Enterprise artifact %s and report remote %s before publication",
   async (artifact, remote) => {
@@ -3540,6 +3536,21 @@ test.each([
   },
 );
 
+test("Trivy CLI rejects a checkout-supplied repository label even in a dry run", async () => {
+  const report = trivyReport();
+  report.ArtifactName = "ssh://tenant-a@git.example.test/example/project";
+  report.Metadata.RepoURL = "ssh://git.example.test/example/project";
+  const f = await fixture(report, connectedProject);
+  const command = [...f.command, "--trivy-scan-root", "."];
+  command[command.indexOf("--provider") + 1] = "trivy";
+  const cli = createCliTest(main);
+  for (const mode of ["--dry-run", "--yes"]) {
+    expect(await cli.runCli([...command, mode], f.cliDeps)).toBe(2);
+    expect(cli.stderr.text()).toContain("Trivy omitted the SSH user");
+  }
+  expect(f.posts).toHaveLength(0);
+});
+
 test.each([
   ["HTTPS://github.com/example/project", gitHubProject, undefined],
   ["Git+SSH://git@github.com/example/project", gitHubProject, undefined],
@@ -3559,11 +3570,6 @@ test.each([
     "https://git.example.test/example/project.git",
     "https://git.example.test/example/other",
     "https://git.example.test/Example/Project",
-  ],
-  [
-    "ssh://git.example.test/example/project",
-    "https://git.example.test/example/other",
-    "ssh://git@git.example.test/example/project",
   ],
 ])(
   "Trivy source %s is rejected for Cloud destination %s by both entrypoints",
@@ -3614,8 +3620,8 @@ test.each([
   [userlessSsh, undefined, explicitSsh, false],
   [explicitSsh, undefined, gitHubProject, true],
   ["git@github.com:example/project", undefined, gitHubProject, true],
-  [userlessSsh, gitHubProject, gitHubProject, true],
-  [userlessSsh, explicitSsh, gitHubProject, true],
+  [userlessSsh, gitHubProject, gitHubProject, false],
+  [userlessSsh, explicitSsh, gitHubProject, false],
 ] as const)(
   "selected Trivy SSH finding with origin %s and artifact %s on checkout %s",
   async (RepoURL, ArtifactName, remote, accepts) => {
@@ -3630,8 +3636,17 @@ test.each([
       Metadata: { RepoURL },
       ...(ArtifactName && { ArtifactName }),
     };
+    findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: gitHubProject },
+    };
     for (const prepare of await trivyReplayTargets(
-      { read: 1, findings, excluded: [] },
+      {
+        read: 1,
+        findings,
+        excluded: [],
+        sourceRepositoryUrls: [gitHubProject],
+      },
       remote,
     )) {
       if (accepts) expect((await prepare()).preview.findings).toHaveLength(1);

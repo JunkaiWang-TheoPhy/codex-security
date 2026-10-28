@@ -187,7 +187,7 @@ test.each([
   [
     "ssh://git.example.test/example/project",
     "ssh://git@git.example.test/example/project",
-    true,
+    false,
   ],
   [
     "ssh://git.example.test/example/other",
@@ -207,12 +207,9 @@ test.each([
     await using checkout = await trivyCheckout(url, url);
     const report = { ...trivyReport(), ...repositoryClaims(artifact, remote) };
     for (const prepare of [checkout.fromNormalized, checkout.fromFile]) {
-      const pending = prepare(report);
+      const pending = prepare(report, ".");
       if (accepts) expect((await pending).preview.findings).toHaveLength(1);
-      else
-        await expect(pending).rejects.toThrow(
-          /different repositories|does not match/,
-        );
+      else await expect(pending).rejects.toThrow(ambiguousSsh);
     }
   },
 );

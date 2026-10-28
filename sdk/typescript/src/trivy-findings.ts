@@ -110,7 +110,7 @@ function userlessSsh(url: string): boolean {
 function requireTrivySshUsers(urls: readonly string[]): void {
   if (urls.some(userlessSsh))
     throw new Error(
-      "Trivy omitted the SSH user, so this report cannot identify its source repository. Verify the checkout uses the intended git@host:path or HTTPS remote and regenerate the report.",
+      "Trivy omitted the SSH user, so this report cannot identify its source repository. Verify the checkout uses the intended SSH account in a user@host:path remote or a verified HTTPS remote, then regenerate the report.",
     );
 }
 
@@ -168,19 +168,13 @@ export function trivyReportRemotes(report: unknown) {
     if (target !== artifactRepository && (!repository || target === repository))
       return { urls: [target], artifactRepository };
   }
-  const urls = [repository, artifact].filter((url) => url !== null);
-  const weak = urls.find(userlessSsh);
-  if (weak && urls.length === 2) {
-    const declared = urls.find((url) => url !== weak);
-    if (!declared) return { urls: [weak], artifactRepository };
-    // Compare the lost user against another retained declaration, never the destination.
-    if (
-      weak === declared.replace(/:\/\/[^/@]+@/u, "://") ||
-      declared === weak.replace(sshScheme, "https://")
-    )
-      return { urls: [declared, declared], artifactRepository };
-  }
-  return { urls, artifactRepository };
+  // ArtifactName can come from the scanned checkout's etc/hostname.
+  if (repository && userlessSsh(repository))
+    return { urls: [repository], artifactRepository };
+  return {
+    urls: [repository, artifact].filter((url) => url !== null),
+    artifactRepository,
+  };
 }
 
 export function requireMatchingTrivyRemotes(
