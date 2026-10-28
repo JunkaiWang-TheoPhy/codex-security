@@ -22,7 +22,11 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { parseGitRemote } from "./git-remote.js";
-import { trivyRemoteKey } from "./trivy-findings.js";
+import {
+  requireMatchingTrivyRemotes,
+  trivyRemoteKey,
+  validateNormalizedTrivySources,
+} from "./trivy-findings.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
@@ -107,8 +111,17 @@ function requireIdentity(
 function remoteRepositoryKey(
   value: string,
   provider: Provider,
+  githubSource?: string,
+  checkout = false,
 ): string | undefined {
-  if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
+  if (
+    /^[A-Za-z]:[\\/]/u.test(value) ||
+    (provider === "trivy" &&
+      checkout &&
+      process.platform === "win32" &&
+      /^[a-z]:/iu.test(value))
+  )
+    return undefined;
   let remote;
   try {
     remote = parseGitRemote(value);
@@ -129,7 +142,8 @@ function remoteRepositoryKey(
     ].includes(remote.url.protocol)
   )
     return undefined;
-  if (provider === "trivy") return trivyRemoteKey(value);
+  if (provider === "trivy")
+    return trivyRemoteKey(value, githubSource, checkout);
   const url = remote.url;
   const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
   const protocol = url.protocol === "http:" ? "http:" : "https:";
@@ -148,7 +162,10 @@ function remoteRepositoryKey(
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  const key =
+    provider === "github" || githubSource
+      ? cloudRepositoryUrlKey
+      : repositoryUrlKey;
   return key(
     `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
   );
@@ -346,11 +363,29 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  trivyReportUrls: readonly string[],
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
 ): Promise<void> {
-  if (sources.length === 0) return;
+  if (sources.length === 0 && provider !== "trivy") return;
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = remoteRepositoryKey(source.url, "github");
+      return key === undefined ? [] : [key];
+    }),
+  );
+  const githubSourceFor = (url: string) => {
+    const key = remoteRepositoryKey(url, "github");
+    return key && githubRepositories.has(key) ? key : undefined;
+  };
+  if (trivyReportUrls.length > 1)
+    requireMatchingTrivyRemotes(
+      trivyReportUrls,
+      githubSourceFor(trivyReportUrls[0]!),
+    );
+
   if (!(await hasGitMetadata(repository, signal))) return;
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
@@ -375,6 +410,14 @@ async function requireMatchingRepository(
     );
   let remoteNames: string;
   try {
+    if (provider === "trivy") {
+      const root = resolve(await readGit(["rev-parse", "--show-toplevel"]));
+      if (root !== repository)
+        throw new CodexSecurityError(
+          `Trivy finding paths are checkout-relative. Use --repository ${JSON.stringify(root)} and set --trivy-scan-root to the scanned directory relative to that root.`,
+        );
+      if (sources.length === 0) return;
+    }
     remoteNames = await readGit(["remote"]);
   } catch (error) {
     signal?.throwIfAborted();
@@ -399,29 +442,16 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = remoteRepositoryKey(source.url, "github");
-      return key === undefined ? [] : [key];
-    }),
-  );
   for (const source of sources) {
-    const githubKey = remoteRepositoryKey(source.url, "github");
-    const sourceProvider =
-      provider !== "trivy" &&
-      (source.platform === "github" ||
-        (githubKey !== undefined && githubRepositories.has(githubKey)))
-        ? "github"
-        : provider;
+    const githubSource = githubSourceFor(source.url);
     const remoteKeys = new Set(
       remotes.flatMap((remote) => {
-        const key = remoteRepositoryKey(remote, sourceProvider);
+        const key = remoteRepositoryKey(remote, provider, githubSource, true);
         return key === undefined ? [] : [key];
       }),
     );
     if (remoteKeys.size === 0) continue;
-    const key = remoteRepositoryKey(source.url, sourceProvider);
+    const key = remoteRepositoryKey(source.url, provider, githubSource);
     if (key === undefined || !remoteKeys.has(key))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
@@ -507,11 +537,14 @@ export async function prepareNormalizedLocalImport(
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
   }
+  if (options.provider === "trivy") validateNormalizedTrivySources(current);
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
   );
-  const sources = new Map<string, ExternalSourceRepository>();
+  const sources = new Map<string, ExternalSourceRepository>(
+    current.sourceRepositoryUrls?.map((url) => [url, { url }]),
+  );
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
@@ -521,6 +554,8 @@ export async function prepareNormalizedLocalImport(
     ))
       sources.set(source, { url: source });
   }
+  const trivyReportUrls =
+    options.provider === "trivy" ? [...sources.keys()] : [];
   for (const source of dependencies.sourceRepositories ?? []) {
     // A reader's explicit platform also applies to the same URL in typed evidence.
     if (sources.get(source.url)?.platform !== "github")
@@ -530,6 +565,7 @@ export async function prepareNormalizedLocalImport(
     repository,
     options.provider,
     [...sources.values()],
+    trivyReportUrls,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

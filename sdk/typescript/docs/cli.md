@@ -1358,17 +1358,17 @@ exports.
 
 ## Import Trivy dependency findings
 
-Use a native schema-v2 JSON report from `trivy repo` or `trivy fs`, or a gzip-compressed copy from CI. From the source repository root:
+Preview a saved Trivy repository or filesystem report against its local checkout. Use schema-v2 JSON or gzip from CI or an isolated, credential-free scanner job with only approved inputs.
 
 ```sh
-trivy repo --scanners vuln --list-all-pkgs --format json --output ../trivy.json .
-codex-security publish findings ../trivy.json --to local --repository . \
+checkout=/absolute/path/to/project
+codex-security publish findings /path/to/reports/trivy.json --to local --repository "$checkout" \
   --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
 ```
 
-For a local-path or CI report, `--trivy-scan-root` is the scanned directory relative to the Git root, not the current import directory. Use `.` for a root scan or, for example, `apps/web` for a subtree. A scan of a remote repository URL needs no override.
+Set `--trivy-scan-root` to the directory scanned, relative to the Git root. Omit it only when the report's Git metadata confirms a remote repository scan. To import, repeat the command without `--dry-run`. Read the result with `codex-security findings imported "$checkout" --format json`.
 
-Review the preview, then repeat without `--dry-run` to confirm. Read the result with `codex-security findings imported . --format json`. For Cloud, use `--to cloud --repository URL_OR_ID` on a deployment that accepts the `trivy` source provider. A saved report needs no Trivy installation or Aqua account. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for supported evidence, repository binding, and repeat imports.
+For Cloud, use `--to cloud --repository URL_OR_ID` on a deployment that accepts the `trivy` provider. See the [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md) for repository matching, exclusions, and repeat imports.
 
 ## Import Endor Labs findings
 

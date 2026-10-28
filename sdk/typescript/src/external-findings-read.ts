@@ -21,7 +21,8 @@ import {
 } from "./semgrep-platform-findings.js";
 import { readScannerJson } from "./scanner-import.js";
 import {
-  normalizeTrivyFindings,
+  readTrivyFindings,
+  trivyReportRemotes,
   trivyRepositoryUrl,
 } from "./trivy-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
@@ -71,7 +72,9 @@ export function scannerFindingRepositoryUrls(
   cloudRepositoryUrl?: string,
 ): string[] {
   if (provider === "trivy") {
-    const url = trivyRepositoryUrl(sourceData, cloudRepositoryUrl);
+    const report = sourceData?.["report"];
+    if (!cloudRepositoryUrl) return trivyReportRemotes(report).urls;
+    const url = trivyRepositoryUrl(report, cloudRepositoryUrl);
     return url ? [url] : [];
   }
   if (provider === "semgrep" && isSemgrepPlatformReport(sourceData))
@@ -99,13 +102,8 @@ export async function readExternalFindings(
       throw new Error(
         "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
       );
-    const report = await readScannerJson(path);
     return {
-      findings: normalizeTrivyFindings(report, target, options.trivyScanRoot),
-      reportRepositoryUrl:
-        target === "local"
-          ? (trivyRepositoryUrl({ report }) ?? undefined)
-          : undefined,
+      findings: await readTrivyFindings(path, target, options.trivyScanRoot),
     };
   }
   if (options.trivyScanRoot !== undefined)

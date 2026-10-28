@@ -14,6 +14,9 @@ export interface ExternalSourceRepository {
 
 export interface ExternalFindings {
   read: number;
+  /** Compare these report-level claims with the destination. When supplied,
+   * each Trivy finding must also retain its source repository. */
+  sourceRepositoryUrls?: string[];
   /** Reader-retained run metadata, including diagnostics for empty reports. */
   report?: Record<string, unknown>;
   findings: ExternalFinding[];

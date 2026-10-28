@@ -1,26 +1,37 @@
 # Import Trivy dependency findings
 
-Enable vendor imports with `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`. Use a native schema-v2 JSON report from a Trivy repository or filesystem scan of one checkout. Plain JSON and gzip are supported. An existing CI artifact needs no scanner, database download, or Aqua account on the importing machine.
+Import an existing Trivy schema-v2 JSON report for one checkout. Use a report saved by CI or produced in an isolated scanner job with only approved inputs and no credentials. Both plain JSON and gzip are supported. The import requires no Trivy installation, vulnerability database, or Aqua account.
 
-## Collect, preview, and import
+## Preview and import
 
-To run a new scan, start in the repository root with Trivy and an accessible vulnerability database (or a populated cache):
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`. Preview the report against the checkout it describes.
 
 ```sh
-trivy repo --scanners vuln --list-all-pkgs --format json --output ../trivy.json .
-codex-security publish findings ../trivy.json --to local --repository . \
+checkout=/absolute/path/to/project
+codex-security publish findings /path/to/reports/trivy.json --to local --repository "$checkout" \
   --provider trivy --trivy-scan-root . --source-key example/project/main --dry-run --format json
 ```
 
-`trivy fs` is also supported. `--list-all-pkgs` makes package declaration ranges available when the analyzer provides them. For a local-path report, supply the directory Trivy actually scanned, relative to the Git root: `--trivy-scan-root .` for the whole checkout or, for example, `--trivy-scan-root apps/web` for that subtree. A saved CI report cannot establish this offset from the scanner’s working directory. For a scan of a remote repository URL, the repository root is known and the flag is unnecessary.
+The importer infers `.` only when the report names a remote repository and its Git metadata confirms that repository. Otherwise, set `--trivy-scan-root` to the scanned directory relative to the Git root. Use `.` for the whole checkout or `apps/web` for a subtree on any platform. In this argument, a backslash is a path separator on Windows and a literal filename character on POSIX.
 
-Keep one stable source key per project and branch; do not put the scan ID or commit in it. Review the source, destination, package locations, and exclusions. Repeat without `--dry-run` to confirm, then use `codex-security findings imported . --format json` to read the stored evidence.
+A saved Git origin such as `r:org/repo.git` can name either a Windows drive-relative path or a one-letter SSH server. Supply the scan root if this is the only origin. For a one-letter SSH server, configure the remote as `git@r:org/repo.git` or `ssh://git@r/org/repo.git` so the report identifies a network source.
 
-For Cloud, replace `--to local --repository .` with `--to cloud --repository URL_OR_ID`. This requires an authorized destination and a Cloud deployment that accepts the distinct `trivy` provider. The importer checks the report’s Git remote against the Cloud destination or a comparable local Git remote. On unknown Git hosts, supply the same remote spelling; different SSH users or paths can select different repositories. If the report has no network remote, or the local checkout has none to compare, independently verify the artifact's origin before confirming. A directory name is not proof of identity.
+Use a stable source key per project and branch across commits and scans. Check the source, destination, package locations, and exclusions in the preview. Repeat without `--dry-run` to confirm. Read the stored evidence with `codex-security findings imported "$checkout" --format json`.
+
+For Cloud, replace `--to local --repository "$checkout"` with `--to cloud --repository URL_OR_ID`. You need access to the destination and a Cloud deployment that accepts the `trivy` provider. The importer compares the report’s Git remote with the destination when both are available. On unknown Git hosts, use the same remote spelling because distinct SSH users or paths can select different repositories. The importer rejects conflicting repository URLs. If either side lacks a comparable remote, verify the report’s origin before confirming.
 
 ## Evidence and repeat imports
 
-- Only language-package vulnerabilities from repository/filesystem reports are in scope. Image, Kubernetes/Operator, and SARIF reports are rejected. In a mixed native report, unsupported sections (such as OS packages, secrets, misconfigurations, and licenses) are reported as exclusions; their contents are not imported.
-- The evidence identifies the advisory and package, takes the ecosystem from the package URL when available (otherwise the Trivy analyzer), and retains the manifest when known. It keeps the reported installed and fixed versions, severity, original vulnerability, and available Git revision and declaration locations. A missing line is not replaced with line 1.
-- Reimporting the same report is unchanged. With the same source key, a change in commit, installed version, severity, or declaration line updates the same occurrence. Distinct manifests remain distinct. Ambiguous duplicate identities are reported as exclusions, not arbitrarily overwritten.
-- `Status: fixed` describes upstream fix availability, not remediation in the checkout. Omission from a later report does not close the earlier record. Package detection does not establish exploitability or reachability: imported evidence remains `not_assessed`.
+The importer accepts language-package vulnerabilities in repository and filesystem reports. It rejects image, Kubernetes/Operator, and SARIF reports. In mixed reports, it lists unsupported sections such as OS packages, secrets, misconfigurations, and licenses as exclusions.
+
+Each finding retains the original vulnerability, advisory, package, reported versions and severity. The original `FixedVersion` field preserves the vendor’s exact expression. The ecosystem comes from the package URL when present and otherwise from the Trivy analyzer. The importer preserves the manifest and declaration lines when available. Trivy can report the checkout’s HEAD while scanning uncommitted files. The reported commit stays in `source_data.report.Metadata.Commit`, and `code_revision` remains unknown.
+
+The importer uses Trivy’s v0.36.0 path convention. It treats `/` as a directory separator and preserves backslashes as literal filename characters. If an older Windows report uses backslashes as separators, regenerate it from the same checkout and scan root with Trivy v0.36.0 or later before importing. [Trivy v0.36.0 filesystem walker](https://github.com/aquasecurity/trivy/blob/4813cf5cfdaf22d3caf8ca2a2cc89448a5ef994f/pkg/fanal/walker/fs.go#L32-L37)
+
+Trivy can report the same package path for a JAR inside a WAR file and a JAR inside an unpacked directory named `site.war`. The importer retains the ambiguous path in the original evidence and occurrence identity and omits it from file locations.
+
+With the same source key and identifying paths, a change in version, severity, commit, or declaration line updates the existing occurrence. Replaying identical evidence leaves it unchanged. A different manifest or package path, including a versioned JAR filename, identifies a new occurrence. If several records have the same identity, the importer excludes all of them.
+
+If you tested an earlier development build of this importer, finish any interrupted Cloud upload with the build that created it before switching builds. The saved request includes that build’s evidence format.
+
+A Trivy status of `fixed` means an upstream fix is available. Imported evidence starts as `not_assessed`. Omitting an occurrence from a later report leaves its earlier record open.

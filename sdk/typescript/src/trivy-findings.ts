@@ -1,4 +1,4 @@
-import { posix } from "node:path";
+import { posix, sep } from "node:path";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
@@ -26,13 +26,18 @@ import {
 
 type NativeRecord = Record<string, unknown>;
 
+const urlScheme = /^[a-z][a-z\d+.-]*:\/\//iu;
+const javaArchiveAncestor = /\.(?:jar|war|ear|par)\//iu;
+
+const sshProtocols = new Set(["ssh:", "git+ssh:", "ssh+git:"]);
+
 function networkRepository(value: unknown): string | null {
   const source = text(value);
   if (!source || /^(?:[a-z]:|[./\\])/iu.test(source)) return null;
   const remote = parseGitRemote(source);
   if (!remote) return null;
   const { url } = remote;
-  const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+  const ssh = sshProtocols.has(url.protocol);
   if (url.password || (!ssh && url.username) || /[?#\t\r\n]/u.test(source))
     throw new Error(
       "Use a Trivy repository URL without credentials, a query, or a fragment.",
@@ -53,16 +58,26 @@ function comparableGitHubRemote(
   cloudRepositoryUrl?: string,
 ): string | undefined {
   if (/[?#\t\r\n]/u.test(remote)) return undefined;
-  if (remote.startsWith("ssh://")) {
-    const pathStart = remote.indexOf("/", "ssh://".length);
-    if (pathStart < 0 || remote.slice(pathStart) !== new URL(remote).pathname)
+  const parsed = parseGitRemote(remote);
+  if (!parsed) return undefined;
+  const host = parsed.url.hostname.toLowerCase();
+  const githubUrl =
+    cloudRepositoryUrl ??
+    (isGitHubCloudHost(host) ? `https://${host}` : undefined);
+  if (!parsed.scpStyle && sshProtocols.has(parsed.url.protocol)) {
+    const authorityStart = remote.indexOf("://") + 3;
+    const pathStart = remote.indexOf("/", authorityStart);
+    if (pathStart < 0 || remote.slice(pathStart) !== parsed.url.pathname)
       return undefined;
+    // Trivy omits SSH userinfo. The shared normalizer accepts GitHub's supported
+    // SSH users and ports for the known or explicitly selected host.
+    const authority = remote.slice(authorityStart, pathStart);
+    remote = `ssh://${authority.includes("@") ? "" : "git@"}${authority}${parsed.url.pathname}`;
   }
-  const normalized = normalizeGitRepositoryUrl(remote, cloudRepositoryUrl);
+  const normalized = normalizeGitRepositoryUrl(remote, githubUrl);
   if (!/^https?:\/\//iu.test(normalized)) return undefined;
-  const host = new URL(normalized).hostname;
   if (
-    !isGitHubCloudHost(host) &&
+    !isGitHubCloudHost(new URL(normalized).hostname) &&
     (!cloudRepositoryUrl || new URL(cloudRepositoryUrl).hostname !== host)
   )
     return undefined;
@@ -72,61 +87,104 @@ function comparableGitHubRemote(
 export function trivyRemoteKey(
   remote: string,
   cloudRepositoryUrl?: string,
+  checkout = false,
 ): string {
   const normalized = comparableGitHubRemote(remote, cloudRepositoryUrl);
   if (!normalized) return remote;
+  // GitHub identifies an HTTPS repository by host and path. Other Git servers
+  // may use the HTTP username to select the repository.
+  const url = checkout
+    ? normalized.replace(/^(https?:\/\/)[^/\\?#]*@/iu, "$1")
+    : normalized;
   return cloudRepositoryUrl
-    ? cloudRepositoryUrlKey(normalized)
-    : repositoryUrlKey(normalized);
+    ? cloudRepositoryUrlKey(url)
+    : repositoryUrlKey(url);
 }
 
-function trivyReportRemotes(sourceData: Record<string, unknown> | undefined): {
-  repository: string | null;
-  artifact: string | null;
-} {
-  const report = sourceData?.["report"];
+/** Findings are stored and published individually, without the batch repository URLs. */
+export function validateNormalizedTrivySources(input: ExternalFindings): void {
+  for (const { evidence } of input.findings) {
+    const report = evidence.source_data?.["report"];
+    if (isRecord(report) && report["SchemaVersion"] === 2) {
+      const name = text(report["ArtifactName"]);
+      if (name && urlScheme.test(name)) networkRepository(name);
+    }
+    if (
+      input.sourceRepositoryUrls?.length &&
+      !evidence.details?.repository?.url &&
+      !trivyReportRemotes(report).urls.length
+    )
+      throw new Error(
+        "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
+      );
+  }
+}
+
+export function trivyReportRemotes(report: unknown) {
   if (!isRecord(report) || report["SchemaVersion"] !== 2)
-    return { repository: null, artifact: null };
+    return { urls: [], artifactRepository: undefined };
   const metadata = report["Metadata"];
   const repository = networkRepository(
     isRecord(metadata) && metadata["RepoURL"],
   );
-  const name = text(report["ArtifactName"]);
-  const artifact =
-    name && /^[a-z][a-z\d+.-]*:\/\//iu.test(name)
-      ? networkRepository(name)
-      : null;
-  return { repository, artifact };
+  // Only an explicitly identified filesystem artifact uses its name as a display label.
+  const name =
+    report["ArtifactType"] !== "filesystem" && text(report["ArtifactName"]);
+  let artifact: string | null = null;
+  if (name && urlScheme.test(name)) {
+    artifact = networkRepository(name);
+  } else if (
+    name &&
+    /^[^./:\\][^/:\\]*\//u.test(name) &&
+    repository === `https://${name}`
+  ) {
+    // Trivy can omit the HTTPS scheme, but also accepts relative checkout paths.
+    artifact = repository;
+  }
+  return {
+    urls: [repository, artifact].filter((url) => url !== null),
+    artifactRepository:
+      artifact && artifact !== repository ? artifact : undefined,
+  };
+}
+
+export function requireMatchingTrivyRemotes(
+  urls: readonly string[],
+  githubUrl?: string,
+): void {
+  if (
+    urls.length > 1 &&
+    new Set(urls.map((url) => trivyRemoteKey(url, githubUrl))).size > 1
+  )
+    throw new Error("Trivy source URLs identify different repositories.");
 }
 
 /** Compare the report's claims using the authenticated host when available. */
 export function trivyRepositoryUrl(
-  sourceData: Record<string, unknown> | undefined,
+  report: unknown,
   cloudRepositoryUrl?: string,
 ): string | null {
-  const { repository, artifact } = trivyReportRemotes(sourceData);
-  if (
-    repository &&
-    artifact &&
-    trivyRemoteKey(repository, cloudRepositoryUrl) !==
-      trivyRemoteKey(artifact, cloudRepositoryUrl)
-  )
-    throw new Error(
-      "Trivy Metadata.RepoURL and ArtifactName identify different repositories.",
-    );
-  const remote = repository ?? artifact;
+  const { urls } = trivyReportRemotes(report);
+  requireMatchingTrivyRemotes(urls, cloudRepositoryUrl);
+  const remote = urls[0];
   return remote && cloudRepositoryUrl
     ? (comparableGitHubRemote(remote, cloudRepositoryUrl) ?? remote)
-    : remote;
+    : (remote ?? null);
 }
 
-function repositoryPath(value: unknown): string | null {
-  const relative = relativePath(value);
-  if (!relative) return null;
-  const path = posix.normalize(relative);
-  return path !== "." &&
-    !path.endsWith("/") &&
-    !/^(?:[a-z][a-z\d+.-]*:\/|[^/]+@[^/]+:)/iu.test(path)
+function repositoryPath(value: unknown, directory = false): string | null {
+  const raw = text(value);
+  if (!raw || !relativePath(raw)) return null;
+  // Check the emitted spelling across platforms while retaining literal POSIX backslashes.
+  const path = posix.normalize(raw);
+  const portable = posix.normalize(path.replaceAll("\\", "/"));
+  const firstComponent = portable.split("/", 1)[0]!;
+  const at = firstComponent.indexOf("@", 1);
+  const scpStyle = at !== -1 && firstComponent.indexOf(":", at + 2) !== -1;
+  return relativePath(portable) &&
+    (directory || (portable !== "." && !portable.endsWith("/"))) &&
+    !scpStyle &&
+    !/^[a-z][a-z\d+.-]*:\//iu.test(portable)
     ? path
     : null;
 }
@@ -156,9 +214,11 @@ function resolveScanRoot(
       "Specify --trivy-scan-root relative to the repository; use . for a whole-checkout scan.",
     );
   }
-  const relative = relativePath(scanRoot);
-  const root = relative && posix.normalize(relative).replace(/\/$/u, "");
-  if (!root || (root !== "." && !repositoryPath(root)))
+  const root = repositoryPath(scanRoot.split(sep).join("/"), true)?.replace(
+    /\/$/u,
+    "",
+  );
+  if (!root)
     throw new Error(
       "--trivy-scan-root must be a repository-relative directory without traversal.",
     );
@@ -305,11 +365,11 @@ export function normalizeTrivyFindings(
       "Only Trivy repository and filesystem reports are supported.",
     );
   const metadata = record(document["Metadata"] ?? {}, "Trivy Metadata");
+  const { urls, artifactRepository } = trivyReportRemotes(document);
   const report = {
     ...pick(document, [
       "SchemaVersion",
       "ArtifactType",
-      "ArtifactName",
       "ArtifactID",
       "ReportID",
       "CreatedAt",
@@ -317,13 +377,22 @@ export function normalizeTrivyFindings(
     ...(isRecord(document["Trivy"])
       ? { Trivy: pick(document["Trivy"], ["Version"]) }
       : {}),
+    ...(artifactRepository ? { ArtifactName: artifactRepository } : {}),
     Metadata: pick(metadata, ["RepoURL", "Branch", "Commit"]),
   };
-  const { artifact } = trivyReportRemotes({ report });
-  const root = resolveScanRoot(
-    scanRoot,
-    document["ArtifactType"] === "repository" && artifact !== null,
-  );
+  const [repository, artifact] = urls;
+  if (repository && artifact && repository !== artifact) {
+    // The destination verifies these possible Enterprise aliases before import.
+    const { url } = parseGitRemote(repository)!;
+    const githubTransport =
+      ["http:", "https:"].includes(url.protocol) ||
+      sshProtocols.has(url.protocol);
+    requireMatchingTrivyRemotes(
+      urls,
+      githubTransport ? `https://${url.hostname}` : undefined,
+    );
+  }
+  const root = resolveScanRoot(scanRoot, urls.length === 2);
 
   const entries: (Entry | string)[] = [];
   for (const group of array(document["Results"] ?? [], "Trivy Results")) {
@@ -363,7 +432,7 @@ export function normalizeTrivyFindings(
       entries.push({ result: context, packages, value });
   }
 
-  return normalizeRecords(
+  const findings = normalizeRecords(
     entries,
     (entry, id) => {
       const {
@@ -373,6 +442,7 @@ export function normalizeTrivyFindings(
         advisory,
         name,
         targetPath,
+        pkgPath,
         packagePath,
       } = occurrence(entry, root);
       const identifier = vulnerability["PkgIdentifier"];
@@ -396,17 +466,16 @@ export function normalizeTrivyFindings(
           )
             starts.add(start);
         }
-      const locations = [
-        ...(targetPath
-          ? (starts.size ? [...starts] : [null]).map((line) => ({
-              path: targetPath,
-              line,
-            }))
-          : []),
-        ...(packagePath && packagePath !== targetPath
-          ? [{ path: packagePath, line: null }]
-          : []),
-      ];
+      const locations: { path: string; line: number | null }[] = [];
+      if (targetPath) {
+        if (starts.size === 0) locations.push({ path: targetPath, line: null });
+        for (const line of starts) locations.push({ path: targetPath, line });
+      }
+      // Trivy uses the same spelling for archive members and files in exploded archives.
+      const ambiguousJavaPath =
+        result.Type === "jar" && javaArchiveAncestor.test(pkgPath ?? "");
+      if (packagePath && packagePath !== targetPath && !ambiguousJavaPath)
+        locations.push({ path: packagePath, line: null });
       const severity = text(vulnerability["Severity"])?.toLowerCase();
       return {
         source_finding_id: id,
@@ -438,7 +507,6 @@ export function normalizeTrivyFindings(
             ],
             locations,
             branch: text(metadata["Branch"]),
-            code_revision: text(metadata["Commit"]),
             source_scan_id: text(document["ReportID"]),
             source_data: structuredClone({
               scanRoot: root,
@@ -480,6 +548,8 @@ export function normalizeTrivyFindings(
     },
     target,
   );
+  if (urls.length) findings.sourceRepositoryUrls = [...new Set(urls)];
+  return findings;
 }
 
 export async function readTrivyFindings(

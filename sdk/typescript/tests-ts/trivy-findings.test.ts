@@ -14,21 +14,40 @@ function normalizeAtRoot(input: unknown) {
   return normalizeTrivyFindings(input, "cloud", ".");
 }
 
-test("only a network repository ArtifactName establishes a whole-checkout scan", () => {
+test("infers a whole checkout only when Git metadata corroborates the remote", () => {
   const report = trivyReport();
   for (const ArtifactName of [".", "apps/web", "/checkout/apps/web", undefined])
     expect(() => normalizeTrivyFindings({ ...report, ArtifactName })).toThrow(
       "--trivy-scan-root",
     );
+  const ambiguousOrigin = { ...report, Metadata: { RepoURL: "r:org/repo" } };
+  expect(() => normalizeTrivyFindings(ambiguousOrigin)).toThrow(
+    "--trivy-scan-root",
+  );
+  expect(normalizeAtRoot(ambiguousOrigin).sourceRepositoryUrls).toBeUndefined();
   const remote = { ...report, ArtifactName: report.Metadata.RepoURL };
+  const labelOnly = { ...remote, Metadata: {} };
+  expect(() => normalizeTrivyFindings(labelOnly)).toThrow("--trivy-scan-root");
+  const scoped = normalizeTrivyFindings(labelOnly, "cloud", "apps/web")
+    .findings[0]!;
+  expect(scoped.evidence.packages![0]!.manifest_path).toBe(
+    "apps/web/package-lock.json",
+  );
+  expect(scoped.evidence.source_data?.["report"]).toMatchObject({
+    ArtifactName: remote.ArtifactName,
+  });
+  const displayName = "arbitrary filesystem display label";
+  expect(
+    JSON.stringify(normalizeAtRoot({ ...report, ArtifactName: displayName })),
+  ).not.toContain(displayName);
   const colonDirectory = { ...report, ArtifactName: "apps:web" };
   expect(() => normalizeTrivyFindings(colonDirectory)).toThrow(
     "--trivy-scan-root",
   );
   expect(
-    normalizeTrivyFindings(colonDirectory, "local", "packages/apps:web")
+    normalizeTrivyFindings(colonDirectory, "local", "packages@v2/apps:web")
       .findings[0]!.evidence.packages![0]!.manifest_path,
-  ).toBe("packages/apps:web/package-lock.json");
+  ).toBe("packages@v2/apps:web/package-lock.json");
   expect(
     normalizeTrivyFindings(colonDirectory, "local", "apps:web").findings[0]!
       .evidence.packages![0]!.manifest_path,
@@ -42,6 +61,70 @@ test("only a network repository ArtifactName establishes a whole-checkout scan",
   expect(() =>
     normalizeTrivyFindings({ ...remote, ArtifactType: "filesystem" }),
   ).toThrow("--trivy-scan-root");
+});
+
+test("corroborates Trivy's scheme-less repository target", () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "github.com/example/project",
+  };
+  const inferred = normalizeTrivyFindings(report);
+  expect(inferred.findings[0]!.evidence.packages![0]!.manifest_path).toBe(
+    "package-lock.json",
+  );
+  expect(() => normalizeTrivyFindings(report, "cloud", "apps/web")).toThrow(
+    "must be .",
+  );
+  for (const uncorroborated of [
+    { ...report, Metadata: {} },
+    { ...report, ArtifactName: "github.com/example/other" },
+    { ...report, ArtifactType: "filesystem" },
+    { ...report, Metadata: { RepoURL: "http://github.com/example/project" } },
+  ])
+    expect(() => normalizeTrivyFindings(uncorroborated)).toThrow(
+      "--trivy-scan-root",
+    );
+});
+
+test("retains a provisional Enterprise SSH alias until the destination is known", () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "https://git.example.test/org/project",
+    Metadata: { RepoURL: "git@git.example.test:org/project.git" },
+  };
+  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
+  expect(() => normalizeTrivyFindings(report, "cloud", "apps/web")).toThrow(
+    "--trivy-scan-root",
+  );
+  expect(normalizeTrivyFindings(report, "local").sourceRepositoryUrls).toEqual([
+    report.Metadata.RepoURL,
+    report.ArtifactName,
+  ]);
+  for (const [ArtifactName, RepoURL] of [
+    [report.ArtifactName, "https://git.example.test/org/other"],
+    [report.ArtifactName, "https://other.example.test/org/project"],
+    [report.ArtifactName, "https://git.example.test:8443/org/project"],
+    [
+      "http://git.example.test/org/project",
+      "http://git.example.test/ORG/other",
+    ],
+    [
+      "ssh://other@git.example.test/org/project",
+      "ssh://git.example.test/org/project",
+    ],
+    [
+      "ssh://git@git.example.test:2222/org/project",
+      "ssh://git.example.test:2222/org/project",
+    ],
+  ]) {
+    expect(() =>
+      normalizeTrivyFindings({
+        ...report,
+        ArtifactName,
+        Metadata: { RepoURL },
+      }),
+    ).toThrow("different repositories");
+  }
 });
 
 test("rejects unsafe scan directories before importing even a clean local report", () => {
@@ -84,21 +167,23 @@ test("whole-checkout and scoped scans resolve the same manifest and package occu
       root,
     ).findings[0]!;
   };
-  const full = run("apps/web/", ".");
+  const directory = process.platform === "win32" ? "apps/web" : "apps\\web";
+  const full = run(directory + "/", ".");
   const scoped = run("", "./apps\\web/");
   expect(scoped.source_finding_id).toBe(full.source_finding_id);
   expect(scoped.source_finding_id).not.toBe(
-    run("", "apps/api").source_finding_id,
+    run("", directory === "apps/web" ? "apps/api" : "apps/web")
+      .source_finding_id,
   );
   expect(scoped.evidence.locations).toEqual(full.evidence.locations);
   expect(scoped.evidence).toMatchObject({
-    packages: [{ manifest_path: "apps/web/package-lock.json" }],
+    packages: [{ manifest_path: `${directory}/package-lock.json` }],
     locations: [
-      { path: "apps/web/package-lock.json", line: 12 },
-      { path: "apps/web/vendor/package.json", line: null },
+      { path: `${directory}/package-lock.json`, line: 12 },
+      { path: `${directory}/vendor/package.json`, line: null },
     ],
     source_data: {
-      scanRoot: "apps/web",
+      scanRoot: directory,
       result: { Target: "package-lock.json" },
       vulnerability: { PkgPath: "vendor/package.json" },
       package: { FilePath: "vendor/package.json" },
@@ -152,6 +237,7 @@ test.each([
 
 test("retains the detected vulnerability and only its package declarations and scan context", () => {
   const report = trivyReport();
+  report.ArtifactName = report.Metadata.RepoURL;
   const result = report.Results[0]!;
   const pkg = result.Packages[0]!;
   pkg.Locations.push({ StartLine: 42, EndLine: 45 });
@@ -191,9 +277,10 @@ test("retains the detected vulnerability and only its package declarations and s
       { path: result.Target, line: 42 },
     ],
     branch: "main",
-    code_revision: report.Metadata.Commit,
+    code_revision: null,
     source_scan_id: report.ReportID,
     source_data: {
+      report: { Metadata: { Commit: report.Metadata.Commit } },
       result: { Type: "npm", Target: result.Target },
       package: { ID: pkg.ID, Locations: pkg.Locations },
     },
@@ -232,32 +319,30 @@ test("filesystem scans without inventory or Git metadata do not invent lines, ve
       {
         installed_version: null,
         fixed_versions: [],
-        manifest_path: "app/package-lock.json",
+        manifest_path: "app\\package-lock.json",
       },
     ],
-    locations: [{ path: "app/package-lock.json", line: null }],
+    locations: [{ path: "app\\package-lock.json", line: null }],
   });
-  expect(trivyRepositoryUrl(evidence.source_data)).toBeNull();
+  expect(trivyRepositoryUrl(evidence.source_data?.["report"])).toBeNull();
 });
 
+function normalizeResult(result: unknown) {
+  return normalizeAtRoot({ ...trivyReport(), Results: [result] });
+}
+
 test("a later PURL enriches the ecosystem without changing a Poetry occurrence's identity", () => {
-  const report = trivyReport();
-  const result = report.Results[0]!;
+  const result = trivyReport().Results[0]!;
   const run = (PkgIdentifier?: { PURL: string }) =>
-    normalizeAtRoot({
-      ...report,
-      Results: [
+    normalizeResult({
+      ...result,
+      Type: "poetry",
+      Target: "poetry.lock",
+      Vulnerabilities: [
         {
-          ...result,
-          Type: "poetry",
-          Target: "poetry.lock",
-          Vulnerabilities: [
-            {
-              VulnerabilityID: "CVE-2099-0001",
-              PkgName: "example",
-              PkgIdentifier,
-            },
-          ],
+          VulnerabilityID: "CVE-2099-0001",
+          PkgName: "example",
+          PkgIdentifier,
         },
       ],
     }).findings[0]!;
@@ -305,7 +390,8 @@ test("manifests, analyzers, names, advisories and concrete package paths disting
   const result = report.Results[0]!;
   const vuln = result.Vulnerabilities[0]!;
   const results = [
-    { ...result, Target: "nested/package-lock.json" },
+    { ...result, Target: "apps/web/package-lock.json" },
+    { ...result, Target: "apps\\web/package-lock.json" },
     { ...result, Type: "yarn" },
     {
       ...result,
@@ -314,7 +400,7 @@ test("manifests, analyzers, names, advisories and concrete package paths disting
         { ...vuln, PkgName: "other" },
         { ...vuln, VulnerabilityID: "CVE-2099-0002" },
         { ...vuln, PkgPath: "a/package.json" },
-        { ...vuln, PkgPath: "b/package.json" },
+        { ...vuln, PkgPath: "a\\package.json" },
       ],
     },
   ];
@@ -322,7 +408,12 @@ test("manifests, analyzers, names, advisories and concrete package paths disting
   const first = run();
   expect(first.excluded).toEqual([]);
   const ids = first.findings.map((finding) => finding.source_finding_id).sort();
-  expect(new Set(ids).size).toBe(7);
+  expect(new Set(ids).size).toBe(8);
+  expect(first.findings[1]!.evidence).toMatchObject({
+    packages: [{ manifest_path: "apps\\web/package-lock.json" }],
+    locations: [{ path: "apps\\web/package-lock.json", line: 12 }],
+    source_data: { result: { Target: "apps\\web/package-lock.json" } },
+  });
   results.reverse();
   for (const group of results) group.Vulnerabilities.reverse();
   expect(
@@ -335,22 +426,17 @@ test("manifests, analyzers, names, advisories and concrete package paths disting
 test("different installed versions alone cannot disambiguate two detections in a manifest", () => {
   const result = trivyReport().Results[0]!;
   const vuln = result.Vulnerabilities[0]!;
-  const output = normalizeAtRoot({
-    ...trivyReport(),
-    Results: [
+  const output = normalizeResult({
+    ...result,
+    Vulnerabilities: [
+      vuln,
       {
-        ...result,
-        Vulnerabilities: [
-          vuln,
-          {
-            ...vuln,
-            PkgID: "other-version",
-            InstalledVersion: "2.0.0",
-            PkgPath: result.Target,
-          },
-          { ...vuln, VulnerabilityID: "another-advisory" },
-        ],
+        ...vuln,
+        PkgID: "other-version",
+        InstalledVersion: "2.0.0",
+        PkgPath: result.Target,
       },
+      { ...vuln, VulnerabilityID: "another-advisory" },
     ],
   });
   expect(output.read).toBe(3);
@@ -375,16 +461,11 @@ test.each([
     const result = trivyReport().Results[0]!;
     const vuln = result.Vulnerabilities[0]!;
     const path = "app/installed/package.json";
-    const output = normalizeAtRoot({
-      ...trivyReport(),
-      Results: [
-        {
-          ...result,
-          Type: type,
-          Target: label,
-          Vulnerabilities: [vuln, { ...vuln, PkgPath: path }],
-        },
-      ],
+    const output = normalizeResult({
+      ...result,
+      Type: type,
+      Target: label,
+      Vulnerabilities: [vuln, { ...vuln, PkgPath: path }],
     });
     expect(output.excluded).toEqual([]);
     expect(output.findings[0]!.evidence.locations).toEqual([]);
@@ -395,6 +476,28 @@ test.each([
   },
 );
 
+test("keeps ambiguous Java package paths in the original evidence", () => {
+  const result = trivyReport().Results[0]!;
+  const paths = ["service.war/lib/dep.jar", "lib/dep.jar"] as const;
+  const { findings, excluded } = normalizeResult({
+    ...result,
+    Type: "jar",
+    Target: "Java",
+    Vulnerabilities: paths.map((PkgPath) => ({
+      ...result.Vulnerabilities[0]!,
+      PkgPath,
+    })),
+  });
+  expect(excluded).toEqual([]);
+  expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+    [],
+    [{ path: paths[1], line: null }],
+  ]);
+  expect(findings[0]!.evidence.source_data?.["vulnerability"]).toMatchObject({
+    PkgPath: paths[0],
+  });
+});
+
 test("declaration ranges come from an unambiguous package at the reported path", () => {
   const result = trivyReport().Results[0]!;
   const vuln = result.Vulnerabilities[0]!;
@@ -402,7 +505,7 @@ test("declaration ranges come from an unambiguous package at the reported path",
   const selected = { ...pkg, FilePath: "a/package.json" };
   const other = {
     ...pkg,
-    FilePath: "b/package.json",
+    FilePath: "a\\package.json",
     Locations: [{ StartLine: 24, EndLine: 28 }],
   };
   const group = {
@@ -410,9 +513,7 @@ test("declaration ranges come from an unambiguous package at the reported path",
     Packages: [other, selected],
     Vulnerabilities: [{ ...vuln, PkgPath: selected.FilePath }],
   };
-  const run = () =>
-    normalizeAtRoot({ ...trivyReport(), Results: [group] }).findings[0]!
-      .evidence;
+  const run = () => normalizeResult(group).findings[0]!.evidence;
   expect(run().locations).toEqual([
     { path: result.Target, line: 12 },
     { path: selected.FilePath, line: null },
@@ -423,8 +524,7 @@ test("declaration ranges come from an unambiguous package at the reported path",
 });
 
 test("only ID-less detections use a unique name/version match from inventory", () => {
-  const report = trivyReport();
-  const result = report.Results[0]!;
+  const result = trivyReport().Results[0]!;
   const pkg = result.Packages[0]!;
   const vuln = result.Vulnerabilities[0]!;
   const sparse = {
@@ -433,10 +533,8 @@ test("only ID-less detections use a unique name/version match from inventory", (
     InstalledVersion: pkg.Version,
   };
   const line = (value: unknown, packages = [pkg]) =>
-    normalizeAtRoot({
-      ...report,
-      Results: [{ ...result, Packages: packages, Vulnerabilities: [value] }],
-    }).findings[0]!.evidence.locations![0]!.line;
+    normalizeResult({ ...result, Packages: packages, Vulnerabilities: [value] })
+      .findings[0]!.evidence.locations![0]!.line;
   expect(line(sparse)).toBe(12);
   expect(
     line(sparse, [
@@ -458,13 +556,12 @@ test("only ID-less detections use a unique name/version match from inventory", (
 });
 
 test("conflicting package names or installed versions suppress enrichment even with matching IDs", () => {
-  const report = trivyReport();
-  const result = report.Results[0]!;
+  const result = trivyReport().Results[0]!;
   const pkg = result.Packages[0]!;
   for (const mismatch of [{ Name: "unrelated" }, { Version: "9.0.0" }]) {
-    const output = normalizeAtRoot({
-      ...report,
-      Results: [{ ...result, Packages: [{ ...pkg, ...mismatch }] }],
+    const output = normalizeResult({
+      ...result,
+      Packages: [{ ...pkg, ...mismatch }],
     });
     expect(output.excluded).toEqual([]);
     const { evidence } = output.findings[0]!;
@@ -482,15 +579,10 @@ test.each([
   "https://example.invalid/file",
 ])("keeps %s out of repository paths", (path) => {
   const result = trivyReport().Results[0]!;
-  const output = normalizeAtRoot({
-    ...trivyReport(),
-    Results: [
-      {
-        ...result,
-        Target: path,
-        Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath: path }],
-      },
-    ],
+  const output = normalizeResult({
+    ...result,
+    Target: path,
+    Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath: path }],
   });
   const { evidence } = output.findings[0]!;
   expect(evidence.locations).toEqual([]);
@@ -508,6 +600,7 @@ test("clean native reports differ from unsupported, mixed and malformed findings
   ])
     expect(normalizeAtRoot({ ...report, Results })).toEqual({
       read: 0,
+      sourceRepositoryUrls: [report.Metadata.RepoURL],
       excluded: [],
       findings: [],
     });
@@ -551,6 +644,16 @@ test("clean native reports differ from unsupported, mixed and malformed findings
   );
 });
 
+test("Trivy's userless GitHub SSH origin matches the selected Cloud repository", () => {
+  const report = {
+    ...trivyReport(),
+    Metadata: { RepoURL: "ssh://github.com/example/project" },
+  };
+  expect(trivyRepositoryUrl(report, "https://github.com/example/project")).toBe(
+    "https://github.com/example/project",
+  );
+});
+
 test.each([
   [
     ".",
@@ -573,14 +676,20 @@ test.each([
     "https://github.com/example/project.git",
   ],
   ["relative/project", "file:///work/project", null],
+  ["C:\\work\\checkout", "D:mirrors\\project.git", null],
+  ["\\\\server\\share\\checkout", "D:mirrors/project.git", null],
+  ["//server/share/checkout", "D:mirror.git", null],
+  [".", "r:org/repo", null],
+  [".", "user@r:org/repo", "user@r:org/repo"],
+  [".", "ssh://r/org/repo", "ssh://r/org/repo"],
 ] as const)(
-  "extracts raw repository provenance from %s and %s",
+  "retains Git repository provenance for artifact %s and remote %s",
   (ArtifactName, RepoURL, expected) => {
     const report = { ...trivyReport(), ArtifactName, Metadata: { RepoURL } };
     expect(
       trivyRepositoryUrl(
         normalizeTrivyFindings(report, "cloud", ".").findings[0]!.evidence
-          .source_data,
+          .source_data?.["report"],
       ),
     ).toBe(expected);
   },
@@ -590,7 +699,8 @@ test("binding rejects conflicting repository claims; clean reports still reject 
   const report = { ...trivyReport(), Results: [] };
   expect(() =>
     trivyRepositoryUrl({
-      report: { ...report, ArtifactName: "https://example.invalid/other" },
+      ...report,
+      ArtifactName: "https://example.invalid/other",
     }),
   ).toThrow(/different repositories/);
   for (const source of [

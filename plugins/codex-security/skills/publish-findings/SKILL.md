@@ -33,9 +33,11 @@ Local records remain unassessed source evidence, separate from `findings list` a
 
 ## Trivy dependency vulnerabilities
 
-Use native schema-v2 JSON from `trivy repo` or `trivy fs` run at the repository root, or the same report saved by CI. For a new dependency scan, use `--scanners vuln --list-all-pkgs --format json` to include package declaration locations when available. Do not substitute a container image, Kubernetes report, SARIF file, or secret scan.
+Import an existing Trivy schema-v2 JSON report for one checkout. Use a report saved by CI or produced in an isolated scanner job with only approved inputs and no credentials. Accept repository and filesystem reports, including gzip.
 
-Use `--provider trivy` and a stable project/branch `--source-key`. For local-path reports, supply the actual repository-relative directory scanned via `--trivy-scan-root` (`.` for a root scan); do not guess it from a CI checkout path. Review the source repository, manifest paths, installed and fixed versions, and exclusions. If the report or checkout has no comparable remote, confirm its origin independently. Trivy’s `Status: fixed` means an upstream fix is available; neither that status nor package detection assesses reachability or closes a finding. Cloud requires the `trivy` source provider on the selected deployment.
+For a local preview, pass the checkout to `--repository` and select `--provider trivy` with a stable project/branch `--source-key`. Set `--trivy-scan-root` to the scanned directory relative to the Git root (`.` for the whole checkout). Omit the flag only when the report's Git metadata confirms a remote repository scan.
+
+Check the source repository, manifest paths, installed and fixed versions, and exclusions in the preview. If the report or checkout lacks a comparable remote, confirm its origin independently. Trivy's `Status: fixed` means an upstream fix is available. Imported findings remain unassessed. Cloud requires a deployment that accepts the `trivy` provider.
 
 ## Endor Labs findings
 

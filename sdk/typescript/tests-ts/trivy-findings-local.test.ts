@@ -1,14 +1,54 @@
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { listLocalExternalFindings } from "../src/external-findings-local.js";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
+import type { ExternalFindings } from "../src/external-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import { trivyReport } from "./support/trivy-import-fixtures.js";
 
 const checkoutUrl = "https://github.com/example/project";
 const foreignUrl = "https://github.com/example/other";
 const mismatch = "does not match a configured remote";
+
+async function trivyCheckout(remote?: string, githubSource?: string) {
+  const fixture = await localFindingsFixture({ remote });
+  const options = {
+    provider: "trivy" as const,
+    repository: fixture.repository,
+    sourceKey: "example/project/main",
+  };
+  const deps = {
+    environment: fixture.environment,
+    sourceRepositories: githubSource
+      ? [{ url: githubSource, platform: "github" as const }]
+      : [],
+  };
+  const file = join(fixture.root, "trivy.json");
+  const prepare = (input: ExternalFindings, repository = fixture.repository) =>
+    prepareNormalizedLocalImport(input, { ...options, repository }, deps);
+  return {
+    [Symbol.asyncDispose]: fixture.dispose,
+    repository: fixture.repository,
+    prepare,
+    async fromFile(report: unknown, trivyScanRoot?: string) {
+      await writeFile(file, JSON.stringify(report));
+      return prepareLocalExternalImport(
+        file,
+        { ...options, trivyScanRoot },
+        deps,
+      );
+    },
+    async fromNormalized(report: unknown, scanRoot?: string) {
+      return prepare(normalizeTrivyFindings(report, "cloud", scanRoot));
+    },
+    list: () => listLocalExternalFindings(options, deps),
+  };
+}
 
 test.each([
   ["foreign empty report", {}, foreignUrl, mismatch],
@@ -31,6 +71,33 @@ test.each([
     "identify different repositories",
   ],
   [
+    "unverified Enterprise aliases without a checkout remote",
+    {
+      ArtifactName: "https://git.example.test/example/project",
+      Metadata: { RepoURL: "git@git.example.test:example/project.git" },
+    },
+    undefined,
+    "identify different repositories",
+  ],
+  [
+    "case-sensitive HTTPS claims without a GitHub source",
+    {
+      ArtifactName: "https://git.example.test/Example/Project",
+      Metadata: { RepoURL: "https://git.example.test/example/project.git" },
+    },
+    undefined,
+    "identify different repositories",
+  ],
+  [
+    "case-sensitive HTTP claims without a GitHub source",
+    {
+      ArtifactName: "http://git.example.test/Example/Project",
+      Metadata: { RepoURL: "http://git.example.test/example/project.git" },
+    },
+    undefined,
+    "identify different repositories",
+  ],
+  [
     "matching SSH alias",
     {
       Metadata: { RepoURL: "ssh://git@ssh.github.com:443/example/project.git" },
@@ -39,124 +106,297 @@ test.each([
     checkoutUrl,
     null,
   ],
+  [
+    "matching artifact URL only",
+    { Metadata: {}, ArtifactName: checkoutUrl },
+    checkoutUrl,
+    null,
+  ],
+  [
+    "filesystem display URL",
+    { ArtifactType: "filesystem", Metadata: {}, ArtifactName: foreignUrl },
+    checkoutUrl,
+    null,
+  ],
+  [
+    "Windows checkout with a drive-relative origin",
+    { ArtifactName: "C:\\ci\\checkout", Metadata: { RepoURL: "D:mirror.git" } },
+    checkoutUrl,
+    null,
+  ],
   ["no report remote", { Metadata: {} }, foreignUrl, null],
   ["no comparable checkout remote", {}, "file:///synthetic/mirror", null],
 ] as const)(
   "Trivy checks report provenance without accepted findings: %s",
   async (_name, overrides, remote, error) => {
-    const fixture = await localFindingsFixture({ remote });
-    try {
-      const file = join(fixture.root, "trivy.json");
-      const report = { ...trivyReport(), Results: [], ...overrides };
-      await writeFile(file, JSON.stringify(report));
-      const prepared = prepareLocalExternalImport(
-        file,
-        {
-          repository: fixture.repository,
-          provider: "trivy",
-          trivyScanRoot: ".",
-          sourceKey: "example/project/main",
-        },
-        { environment: fixture.environment },
-      );
-      if (error) await expect(prepared).rejects.toThrow(error);
+    await using checkout = await trivyCheckout(remote);
+    const report = { ...trivyReport(), Results: [], ...overrides };
+    for (const prepare of [checkout.fromFile, checkout.fromNormalized]) {
+      const pending = prepare(report, ".");
+      if (error) await expect(pending).rejects.toThrow(error);
       else {
-        const { preview } = await prepared;
+        const { preview } = await pending;
         expect(preview.findings).toEqual([]);
         expect(preview.excluded).toHaveLength(report.Results.length);
       }
-    } finally {
-      await fixture.dispose();
     }
   },
 );
 
-test("Trivy import preserves the occurrence across revisions without assessing it", async () => {
-  const fixture = await localFindingsFixture({
-    remote: "git@github.com:example/project.git",
-  });
-  try {
-    const file = join(fixture.root, "trivy.json");
-    const report = trivyReport();
-    const options = {
-      repository: fixture.repository,
-      provider: "trivy" as const,
-      trivyScanRoot: ".",
-      sourceKey: "example/project/main",
+test.each([
+  [
+    "http://git.example.test/example/project.git",
+    "http://git.example.test/Example/Project",
+    true,
+  ],
+  [
+    "https://git.example.test/example/project.git",
+    "https://git.example.test/Example/Project",
+    true,
+  ],
+  [
+    "ssh://git.example.test/example/project",
+    "ssh://git@git.example.test/example/project",
+    true,
+  ],
+  [
+    "ssh://git.example.test/example/other",
+    "ssh://git@git.example.test/example/other",
+    false,
+  ],
+  [
+    "ssh://git.example.test/example/project",
+    "ssh://other@git.example.test/example/project",
+    false,
+  ],
+] as const)(
+  "a local GitHub source hint corroborates report %s and artifact %s: %j",
+  async (remote, artifact, accepts) => {
+    const scheme = remote.startsWith("http:") ? "http" : "https";
+    const url = `${scheme}://git.example.test/example/project`;
+    await using checkout = await trivyCheckout(url, url);
+    const report = {
+      ...trivyReport(),
+      ArtifactName: artifact,
+      Metadata: { RepoURL: remote },
     };
-    const dependencies = { environment: fixture.environment };
-    const prepare = () =>
-      prepareLocalExternalImport(file, options, dependencies);
-    await writeFile(file, JSON.stringify(report));
-    const preview = await prepare();
-    expect(preview.preview.excluded).toEqual([]);
-    expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
-    expect((await preview.import()).counts.created).toBe(1);
-    expect((await (await prepare()).import()).counts.unchanged).toBe(1);
+    for (const prepare of [checkout.fromNormalized, checkout.fromFile]) {
+      const pending = prepare(report);
+      if (accepts) expect((await pending).preview.findings).toHaveLength(1);
+      else
+        await expect(pending).rejects.toThrow(
+          /different repositories|does not match/,
+        );
+    }
+  },
+);
 
-    const updatedCommit = "b".repeat(40);
-    await writeFile(
-      file,
-      JSON.stringify({
-        ...report,
-        Metadata: { ...report.Metadata, Commit: updatedCommit },
-      }),
+test("selected and stored Trivy findings retain their artifact-only checkout binding", async () => {
+  await using source = await trivyCheckout(checkoutUrl);
+  await using other = await trivyCheckout(foreignUrl);
+  const artifact = "ssh://git@github.com/example/project.git";
+  const report = trivyReport();
+  report.Results.push({
+    ...report.Results[0]!,
+    Target: "nested/package-lock.json",
+  });
+  const input = normalizeTrivyFindings(
+    { ...report, ArtifactName: artifact, Metadata: {} },
+    "local",
+    ".",
+  );
+  const prepared = await source.prepare(input);
+  const reloaded = JSON.parse(JSON.stringify(prepared.preview));
+  await prepared.import();
+  const stored = await source.list();
+  expect(stored).toHaveLength(2);
+  const record = stored[0]!;
+  expect(record.evidence.source_data).toMatchObject({
+    report: { ArtifactName: artifact },
+  });
+  const storedFinding = {
+    source_finding_id: record.sourceFindingId,
+    evidence: record.evidence,
+  };
+  for (const selected of [
+    reloaded,
+    { read: 1, findings: [input.findings[0]!], excluded: [] },
+    { read: 1, findings: [storedFinding], excluded: [] },
+  ])
+    await expect(source.prepare(selected, other.repository)).rejects.toThrow(
+      mismatch,
     );
-    expect((await (await prepare()).import()).counts).toEqual({
-      created: 0,
-      updated: 1,
-      unchanged: 0,
-    });
-    const stored = await listLocalExternalFindings(options, dependencies);
-    expect(stored).toHaveLength(1);
-    expect(stored[0]).toMatchObject({
-      provider: "trivy",
-      sourceFindingId: preview.preview.findings[0]!.source_finding_id,
-      version: 2,
-      evidence: { code_revision: updatedCommit },
-      assessment: { state: "not_assessed" },
-    });
-  } finally {
-    await fixture.dispose();
-  }
 });
 
+test("Trivy import preserves the occurrence across revisions without assessing it", async () => {
+  await using checkout = await trivyCheckout(
+    "git@github.com:example/project.git",
+  );
+  const report = trivyReport();
+  const prepare = () => checkout.fromFile(report, ".");
+  const preview = await prepare();
+  expect(preview.preview.excluded).toEqual([]);
+  expect(await checkout.list()).toEqual([]);
+  expect((await preview.import()).counts.created).toBe(1);
+  expect((await (await prepare()).import()).counts.unchanged).toBe(1);
+
+  const updatedCommit = "b".repeat(40);
+  report.Metadata.Commit = updatedCommit;
+  expect((await (await prepare()).import()).counts).toEqual({
+    created: 0,
+    updated: 1,
+    unchanged: 0,
+  });
+  const stored = await checkout.list();
+  expect(stored).toHaveLength(1);
+  expect(stored[0]).toMatchObject({
+    provider: "trivy",
+    sourceFindingId: preview.preview.findings[0]!.source_finding_id,
+    version: 2,
+    evidence: {
+      code_revision: null,
+      source_data: { report: { Metadata: { Commit: updatedCommit } } },
+    },
+    assessment: { state: "not_assessed" },
+  });
+});
+
+test("local Trivy paths use the checkout root even without a report remote", async () => {
+  await using checkout = await trivyCheckout();
+  const nested = join(checkout.repository, "apps", "web");
+  await mkdir(nested, { recursive: true });
+  const findings = normalizeTrivyFindings(
+    { ...trivyReport(), Metadata: {} },
+    "local",
+    "apps/web",
+  );
+  await expect(checkout.prepare(findings, nested)).rejects.toThrow(
+    `--repository ${JSON.stringify(checkout.repository)} and set --trivy-scan-root`,
+  );
+  await expect(
+    checkout.prepare(findings, join(checkout.repository, ".git", "objects")),
+  ).rejects.toThrow("must be run in a work tree");
+  const { preview } = await checkout.prepare(findings);
+  expect(
+    join(preview.repository, preview.findings[0]!.evidence.locations![0]!.path),
+  ).toBe(join(nested, "package-lock.json"));
+});
+
+const enterpriseUrl = "https://git.example.test/Example/Project";
+
 test.each([
-  ["https://github.com/example/project", "https://github.com/example/other"],
-  ["tenant-a@git.example.test:project", "tenant-b@git.example.test:project"],
-  ["alice@git.example.test:project.git", "alice@git.example.test:project"],
+  [foreignUrl, checkoutUrl, undefined, false],
+  [
+    enterpriseUrl,
+    "git@git.example.test:example/project.git",
+    enterpriseUrl,
+    true,
+  ],
+] as const)(
+  "normalized Trivy report %s and finding %s must agree without a checkout remote",
+  async (reportUrl, findingUrl, githubSource, matches) => {
+    await using checkout = await trivyCheckout(undefined, githubSource);
+    const plainDirectory = join(dirname(checkout.repository), "unpacked");
+    await mkdir(plainDirectory);
+    const input = normalizeTrivyFindings(
+      { ...trivyReport(), Metadata: { RepoURL: findingUrl } },
+      "local",
+      ".",
+    );
+    input.sourceRepositoryUrls = [reportUrl];
+    for (const repository of [checkout.repository, plainDirectory]) {
+      const prepared = checkout.prepare(input, repository);
+      if (matches) expect((await prepared).preview.findings).toHaveLength(1);
+      else await expect(prepared).rejects.toThrow("different repositories");
+    }
+  },
+);
+
+test.each([
+  [checkoutUrl, foreignUrl, true, false],
+  [
+    "git@git.example.test:/example/project",
+    "git@git.example.test:example/project",
+    false,
+    false,
+  ],
+  [
+    "tenant-a@git.example.test:project",
+    "tenant-b@git.example.test:project",
+    true,
+    false,
+  ],
+  [
+    "alice@git.example.test:project.git",
+    "alice@git.example.test:project",
+    true,
+    false,
+  ],
   [
     "git@github.com:example/project.git",
     "ssh://git@github.com/example/project?",
+    true,
+    false,
   ],
-])(
-  "Trivy source %s cannot be attached to checkout %s",
-  async (source, checkout) => {
-    const fixture = await localFindingsFixture({
-      remote: checkout,
-    });
-    try {
-      const file = join(fixture.root, "trivy.json");
-      const report = trivyReport();
-      report.Metadata.RepoURL = source;
-      await writeFile(file, JSON.stringify(report));
-      await expect(
-        prepareLocalExternalImport(
-          file,
-          {
-            repository: fixture.repository,
-            provider: "trivy",
-            trivyScanRoot: ".",
-            sourceKey: "example/project/main",
-          },
-          {
-            environment: fixture.environment,
-            sourceRepositories: [{ url: source, platform: "github" }],
-          },
-        ),
-      ).rejects.toThrow("does not match a configured remote");
-    } finally {
-      await fixture.dispose();
-    }
+  [checkoutUrl, "g:team/two", false, process.platform === "win32"],
+  ["user@g:team/one", "user@g:team/two", false, false],
+  [
+    "ssh://github.com/example/project",
+    "git@github.com:example/project.git",
+    false,
+    true,
+  ],
+  [
+    checkoutUrl,
+    "https://checkout-user@github.com/example/project.git",
+    false,
+    true,
+  ],
+  [
+    checkoutUrl,
+    "https://checkout-user@github.com/example/other.git",
+    false,
+    false,
+  ],
+  [
+    "ssh://tenant.ghe.com/team/project",
+    "ssh://tenant@tenant.ghe.com/team/project",
+    false,
+    true,
+  ],
+  [
+    "ssh://tenant.ghe.com/team/project",
+    "ssh://other@tenant.ghe.com/team/project",
+    false,
+    false,
+  ],
+  [checkoutUrl, "git+ssh://git@github.com/example/project.git", false, true],
+  [checkoutUrl, "ssh+git://git@github.com/example/project.git", false, true],
+  [
+    enterpriseUrl,
+    "https://checkout-user@git.example.test/Example/Project",
+    false,
+    false,
+  ],
+  [
+    enterpriseUrl,
+    "https://checkout-user@git.example.test/Example/Project",
+    true,
+    true,
+  ],
+  [enterpriseUrl, enterpriseUrl.toLowerCase(), true, true],
+  [enterpriseUrl, enterpriseUrl.toLowerCase(), false, false],
+] as const)(
+  "Trivy checks source %s against checkout %s (GitHub hint %j, match %j)",
+  async (source, checkout, githubHint, matches) => {
+    await using local = await trivyCheckout(
+      checkout,
+      githubHint ? source : undefined,
+    );
+    const report = trivyReport();
+    report.Metadata.RepoURL = source;
+    const pending = local.fromFile(report, ".");
+    if (matches) expect((await pending).preview.findings).toHaveLength(1);
+    else await expect(pending).rejects.toThrow(mismatch);
   },
 );

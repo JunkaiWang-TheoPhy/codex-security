@@ -33,6 +33,10 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
+import {
+  trivyRemoteKey,
+  validateNormalizedTrivySources,
+} from "./trivy-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
@@ -369,6 +373,7 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   dependencies.signal?.throwIfAborted();
+  if (options.provider === "trivy") validateNormalizedTrivySources(input);
   return preparePublicationInput(
     normalizedPublicationInput(input),
     options,
@@ -407,10 +412,16 @@ function normalizedPublicationInput(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  const identity =
+  const evidence =
     current.report === undefined
       ? current.findings
       : { findings: current.findings, report: reportForJson(current.report) };
+  const identity = current.sourceRepositoryUrls?.length
+    ? {
+        evidence,
+        sourceRepositoryUrls: [...new Set(current.sourceRepositoryUrls)].sort(),
+      }
+    : evidence;
   return {
     current,
     legacy: current,
@@ -448,6 +459,7 @@ async function preparePublicationInput(
     currentIdentity,
     legacyIdentity,
   } = input;
+  const { sourceRepositoryUrls = [] } = parsed;
   if (parsed.findings.length === 0) {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
@@ -599,7 +611,8 @@ async function preparePublicationInput(
   );
   const legacyKeys = new Set([
     hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
-    historicalKey,
+    // Historical filenames predate destination checks on report-level URLs.
+    ...(sourceRepositoryUrls.length ? [] : [historicalKey]),
   ]);
   async function rejectUnidentifiedLegacyCheckpoint(): Promise<void> {
     const entries = await readdir(state, { withFileTypes: true }).catch(
@@ -732,14 +745,18 @@ async function preparePublicationInput(
   }
   let requests = saved?.requests;
   if (!requests) {
-    if (
-      reportRepositoryUrl &&
-      cloudRepositoryUrlKey(reportRepositoryUrl) !==
-        cloudRepositoryUrlKey(destination.url)
-    )
-      throw new CodexSecurityError(
-        `Source report belongs to ${JSON.stringify(reportRepositoryUrl)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
-      );
+    for (const url of [reportRepositoryUrl, ...sourceRepositoryUrls]) {
+      if (
+        url &&
+        (options.provider === "trivy"
+          ? trivyRemoteKey(url, destination.url)
+          : cloudRepositoryUrlKey(url)) !==
+          cloudRepositoryUrlKey(destination.url)
+      )
+        throw new CodexSecurityError(
+          `Source report belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
+        );
+    }
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
