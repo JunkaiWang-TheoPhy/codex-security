@@ -97,7 +97,7 @@ test("unusable or long hints and other HTTP errors fail on the first response wi
     await expect(
       getHostedJson(url, "Bearer synthetic", { fetch }),
     ).rejects.toThrow(
-      `GET ${url.origin}${url.pathname} failed (HTTP ${status})${hint === null ? "" : `; Retry-After: ${hint}`}: ${detail}`,
+      `GET ${url.origin}${url.pathname} failed (HTTP ${status})${hint ? `; Retry-After: ${hint}` : ""}: ${detail}`,
     );
     expect(fetch).toHaveBeenCalledTimes(1);
   }

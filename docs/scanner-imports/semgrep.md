@@ -76,12 +76,11 @@ required when publishing the self-contained report. For Cloud use `--to cloud`
 and a connected repository URL or ID. SDK callers can use
 `collectSemgrepPlatformFindings` and `normalizeSemgrepPlatformFindings`.
 
-Pages start at zero and are read sequentially through the last page. On HTTP 429,
-the collector retries the same GET once if `Retry-After` gives a whole number of
-seconds or an HTTP date at most 10 seconds away. Zero or an elapsed date means
-retry immediately; longer, missing or invalid hints are not retried. Cancellation
-also stops the wait. If throttling persists or collection otherwise fails, rerun
-collection; no partial report is returned. No time or status filters are applied;
+The collector reads pages in order, starting at zero. On HTTP 429, it retries the
+same GET once if `Retry-After` specifies a wait of 10 seconds or less, in whole
+seconds or as an HTTP date. Zero or a past date triggers an immediate retry.
+Cancellation stops the wait. The collector returns a report only after it reads
+every page. It applies no time or status filters.
 Semgrep never returns removed findings from this endpoint. It is a paged view,
 not a transactional snapshot. Native numeric finding IDs are scoped to the
 deployment, project, ref and product. Integers outside JavaScript's safe range,

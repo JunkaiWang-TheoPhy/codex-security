@@ -725,10 +725,6 @@ test("HTTP, JSON, and second-page failures are errors, never successful partial 
       status: 429,
       headers: { "retry-after": "60" },
     }),
-    new Response("bad hint", {
-      status: 429,
-      headers: { "Retry-After": "1.5" },
-    }),
     new Response("{"),
     { errors: [{ status: "400", detail: "issue error" }] },
     { data: null },

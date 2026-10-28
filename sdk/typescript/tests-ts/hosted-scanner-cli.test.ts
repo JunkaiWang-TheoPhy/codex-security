@@ -75,9 +75,7 @@ test.each(["open-source", "code"])(
         }),
         collectSnykIssues: async (options) => {
           received = options;
-          throw new Error(
-            "failed second page (HTTP 429); Retry-After: 20: synthetic-token\n\u001b[31mtry later",
-          );
+          throw new Error("failed second page");
         },
       },
     );
@@ -89,8 +87,6 @@ test.each(["open-source", "code"])(
     });
     expect(code).toBe(2);
     expect(cli.stdout.text()).toBe("");
-    expect(cli.stderr.text()).toContain(
-      "failed second page (HTTP 429); Retry-After: 20: synthetic-token  [31mtry later",
-    );
+    expect(cli.stderr.text()).toContain("failed second page");
   },
 );

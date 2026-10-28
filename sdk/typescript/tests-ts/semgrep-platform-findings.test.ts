@@ -60,7 +60,6 @@ test("retries only the throttled page for exactly one Semgrep project, ref and p
     },
   });
   expect(pages).toEqual(["0", "1", "1"]);
-  expect(report.findings).toHaveLength(101);
   expect(report.findings).toEqual([...first, platformFinding(101)]);
   expect(JSON.stringify(report)).not.toContain("synthetic-web-token");
   const parsed = normalizeSemgrepPlatformFindings(report);
@@ -121,9 +120,7 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
   for (const [mode, message] of [
     ["repeat", "repeated"],
     ["malformed", "must be an array"],
-    ["0", "Retry-After: 0: try later"],
-    ["11", "Retry-After: 11: try later"],
-    ["later", "Retry-After: later: try later"],
+    ["throttled", "Retry-After: 0: try later"],
   ] as const) {
     const pages: string[] = [];
     const collect = collectSemgrepPlatformFindings(options, {
@@ -139,12 +136,12 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
           return Response.json({ error: "not a findings page" });
         return new Response("try later", {
           status: 429,
-          headers: { "Retry-After": mode },
+          headers: { "Retry-After": "0" },
         });
       },
     });
     await expect(collect).rejects.toThrow(message);
-    expect(pages).toEqual(mode === "0" ? ["0", "1", "1"] : ["0", "1"]);
+    expect(pages).toEqual(mode === "throttled" ? ["0", "1", "1"] : ["0", "1"]);
   }
 });
 

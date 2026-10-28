@@ -50,7 +50,9 @@ function httpDate(hint: string, now: number): number {
     : NaN;
 }
 
-function retryAfterMs(hint: string | null): number | undefined {
+function retryAfterMs(response: Response): number | undefined {
+  if (response.status !== 429) return;
+  const hint = response.headers.get("retry-after");
   if (!hint) return;
   const now = Date.now();
   const delay = /^\d+$/u.test(hint)
@@ -78,19 +80,17 @@ export async function getHostedJson(
     });
   };
   let response = await get();
-  if (response.status === 429) {
-    const delay = retryAfterMs(response.headers.get("Retry-After"));
-    if (delay !== undefined) {
-      void response.body?.cancel().catch(() => undefined);
-      if (delay > 0) await waitForRetry(delay, options.signal);
-      response = await get();
-    }
+  const delay = retryAfterMs(response);
+  if (delay !== undefined) {
+    void response.body?.cancel().catch(() => undefined);
+    if (delay > 0) await waitForRetry(delay, options.signal);
+    response = await get();
   }
   if (!response.ok) {
     const retry = response.headers.get("retry-after");
     const detail = await response.text();
     throw new CodexSecurityError(
-      `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry !== null ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
+      `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
     );
   }
   return parse ? parse(await response.text()) : response.json();
