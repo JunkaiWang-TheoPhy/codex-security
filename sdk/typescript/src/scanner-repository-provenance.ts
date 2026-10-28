@@ -54,6 +54,7 @@ export function boundScannerRepositories(
   provider: Provider,
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
+  inspectorProjectMap?: ReadonlyMap<string, string>,
 ): Map<string, ExternalSourceRepository> {
   for (const [name, scanner] of Object.entries(repositoryBoundScanners)) {
     if (
@@ -67,7 +68,10 @@ export function boundScannerRepositories(
       );
   }
   return (
-    repositoryBoundScanners[provider]?.repositories(findings, target) ??
-    new Map()
+    repositoryBoundScanners[provider]?.repositories(
+      findings,
+      target,
+      inspectorProjectMap,
+    ) ?? new Map()
   );
 }

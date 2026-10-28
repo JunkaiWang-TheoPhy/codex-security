@@ -40,6 +40,7 @@ export const EXTERNAL_FINDINGS_READERS = Object.keys(
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -120,7 +121,12 @@ export async function readExternalFindings(
   if (scanner) {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: await scanner.read(path, url, target),
+      findings: await scanner.read(
+        path,
+        url,
+        target,
+        options.inspectorProjectMap,
+      ),
       sourceRepositories: [{ url }],
     };
   }

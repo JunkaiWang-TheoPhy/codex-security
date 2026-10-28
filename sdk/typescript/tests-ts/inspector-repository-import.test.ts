@@ -58,6 +58,54 @@ test("matching native Enterprise GitHub URLs bind to case-varied SSH remotes", a
   }
 });
 
+test("SQLite replay checks the Inspector project mapping independently of retained evidence", async () => {
+  const otherUrl = "https://git.example.test/example/project";
+  const fixture = await localFindingsFixture({
+    remote: inspectorRepositoryUrl,
+  });
+  const other = await localFindingsFixture({ remote: otherUrl });
+  try {
+    const finding = inspectorPackageFinding();
+    const project = finding.resources[0]!;
+    project.details.codeRepository.projectName = "example/project";
+    const path = join(fixture.root, "native.json");
+    await writeFile(path, JSON.stringify({ findings: [finding] }));
+    const options = {
+      provider: "inspector" as const,
+      repository: fixture.repository,
+      sourceKey: "inspector/example/project",
+      sourceRepositoryUrl: inspectorRepositoryUrl,
+      inspectorProjectMap: new Map([[project.id, inspectorRepositoryUrl]]),
+    };
+    const deps = { environment: fixture.environment };
+    const prepared = await prepareLocalExternalImport(path, options, deps);
+    expect((await prepared.import()).counts.created).toBe(1);
+    const saved = (await listLocalExternalFindings(options, deps))[0]!;
+    const replay = {
+      findings: [
+        { source_finding_id: saved.sourceFindingId, evidence: saved.evidence },
+      ],
+      read: 1,
+      excluded: [],
+    };
+    const same = await prepareNormalizedLocalImport(replay, options, deps);
+    expect((await same.import()).counts.unchanged).toBe(1);
+
+    // The forged source and the second checkout agree. Only the trusted project
+    // mapping identifies the original host.
+    saved.evidence.source_data!["sourceRepositoryUrl"] = otherUrl;
+    await expect(
+      prepareNormalizedLocalImport(
+        replay,
+        { ...options, repository: other.repository },
+        { environment: other.environment },
+      ),
+    ).rejects.toThrow(/project|repository/i);
+  } finally {
+    await Promise.all([fixture.dispose(), other.dispose()]);
+  }
+});
+
 test("an omitted Inspector provider cannot erase a known platform or disguise conflicting providers", async () => {
   const url = "https://git.example.test/example/project";
   const fixture = await localFindingsFixture({

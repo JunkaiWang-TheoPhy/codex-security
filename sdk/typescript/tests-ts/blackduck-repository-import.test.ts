@@ -30,7 +30,10 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
       await writeFile(path, gzipSync(JSON.stringify(input)));
       return prepareLocalExternalImport(path, options, dependencies);
     };
-    const row = blackDuckBomRow();
+    const row = {
+      ...blackDuckBomRow(),
+      packageUrl: "pkg:golang/git.example.test/team/module/v2@v2.1.0",
+    };
     const first = await prepare(blackDuckBomReport([row]));
     expect((await first.import()).counts.created).toBe(1);
     expect((await (await prepare([row])).import()).counts.unchanged).toBe(1);
@@ -61,6 +64,15 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
       provider: "blackduck",
       sourceFindingId: first.preview.findings[0]!.source_finding_id,
       version: 2,
+      evidence: {
+        packages: [
+          {
+            name: "git.example.test/team/module/v2",
+            ecosystem: "golang",
+            installed_version: "v2.1.0",
+          },
+        ],
+      },
       assessment: { state: "not_assessed" },
     });
     await expect(

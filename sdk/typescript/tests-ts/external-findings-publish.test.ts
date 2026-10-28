@@ -302,6 +302,7 @@ async function fixture(
   const receipts = new Map<string, FindingImportReceipt>();
   const posts: string[] = [];
   const state = {
+    repositoryUrl,
     marker: "generation-1",
     environmentId: "environment-example" as string | null,
     materializeDefaults: false,
@@ -316,7 +317,7 @@ async function fixture(
     id: options.repository,
     object: "security.repository",
     repo_connector_id: repoConnectorId,
-    url: repositoryUrl,
+    url: state.repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -989,8 +990,59 @@ test("Inspector publication keeps repository provenance and reuses the source oc
   ).rejects.toThrow(/ARN|identity|source finding/i);
 });
 
+test("a pending Inspector request rechecks its project mapping and destination host before replay", async () => {
+  const input = inspectorPackageFinding();
+  const project = input.resources[0]!;
+  project.details.codeRepository.projectName = "example/project";
+  const f = await fixture({ findings: [input] });
+  const base = {
+    ...options,
+    provider: "inspector" as const,
+    sourceRepositoryUrl: inspectorRepositoryUrl,
+  };
+  const map = new Map([[project.id, inspectorRepositoryUrl]]);
+  const otherUrl = "https://git.example.test/example/project";
+  const prepared = await prepareExternalPublication(
+    f.file,
+    { ...base, inspectorProjectMap: map },
+    f.deps,
+  );
+  f.state.loseResponse = true;
+  await expect(prepared.publish()).rejects.toThrow("resume the saved request");
+  expect(f.posts).toHaveLength(1);
+  const firstBody = f.posts[0]!;
+  const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
+    prepareNormalizedExternalPublication(
+      prepared.preview,
+      { ...base, inspectorProjectMap },
+      f.deps,
+    );
+
+  await expect(resume()).rejects.toThrow(/project|repository/i);
+  await expect(resume(new Map([[project.id, otherUrl]]))).rejects.toThrow(
+    /project|repository/i,
+  );
+  // Connector and repository IDs stay stable while the host changes.
+  f.state.repositoryUrl = otherUrl;
+  await expect(resume(map)).rejects.toThrow(/repository/i);
+  expect(f.posts).toHaveLength(1);
+
+  f.state.repositoryUrl = inspectorRepositoryUrl;
+  const retry = await resume(map);
+  expect(retry.preview.resumed).toBe(true);
+  retry.preview.requests[0]!.items[0]!.evidence.source_data![
+    "sourceRepositoryUrl"
+  ] = otherUrl;
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([firstBody, firstBody]);
+});
+
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
-  const report = blackDuckBomReport([blackDuckBomRow()]);
+  const row = {
+    ...blackDuckBomRow(),
+    packageUrl: "pkg:composer/example/library@2.0",
+  };
+  const report = blackDuckBomReport([row]);
   const correct = await fixture(report);
   const selected = {
     ...options,
@@ -1004,6 +1056,13 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   expect(correct.posts).toHaveLength(0);
   expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
   expect((await first.publish()).counts.created).toBe(1);
+  expect([...correct.reports.values()][0]!.evidence.packages).toMatchObject([
+    {
+      name: "example/library",
+      ecosystem: "composer",
+      installed_version: "2.0",
+    },
+  ]);
   expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   const foreign = await fixture(report, "https://github.com/example/other");
   await expect(
