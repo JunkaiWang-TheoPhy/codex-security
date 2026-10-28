@@ -21,7 +21,9 @@ import {
   ExternalPublicationError,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
+  type ExternalPublicationOptions,
   type ExternalPublicationProgress,
+  type NormalizedExternalPublicationOptions,
 } from "../src/external-findings-publish.js";
 import { snykRepositoryUrls } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
@@ -106,7 +108,7 @@ test("external publication requires opt-in before reading input or accessing Clo
   await expect(readdir(state)).rejects.toThrow("ENOENT");
 });
 
-test("concurrent external publications use their own opt-in environments", async () => {
+test("concurrent external publications enforce opt-in and provider options before Cloud access", async () => {
   const f = await fixture();
   const parsed = await readVendorFindings(f.file);
   let disabledSideEffects = 0;
@@ -146,6 +148,19 @@ test("concurrent external publications use their own opt-in environments", async
       );
     }
   }
+  const incompatible = { ...options, inspectorProjectMap: new Map() };
+  const enabled = { ...disabled, environment: f.environment };
+  const message = "map requires the inspector provider";
+  await expect(
+    prepareNormalizedExternalPublication(parsed, incompatible, enabled),
+  ).rejects.toThrow(message);
+  await expect(
+    prepareExternalPublication(
+      join(f.root, "missing.json"),
+      incompatible,
+      enabled,
+    ),
+  ).rejects.toThrow(message);
   expect(disabledSideEffects).toBe(0);
   expect(f.posts).toHaveLength(0);
 });
@@ -880,27 +895,35 @@ test("request and pagination metadata retain Cloud byte limits and distinct iden
   ).toThrow("4096 UTF-8");
 });
 
-test("Inspector publication keeps repository provenance and reuses the source occurrence", async () => {
+const inspectorOptions = {
+  ...options,
+  provider: "inspector" as const,
+  sourceRepositoryUrl: inspectorRepositoryUrl,
+};
+
+async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   const input = inspectorPackageFinding();
-  const fixtureResult = await fixture({ findings: [input] });
-  const inspectorOptions = {
-    ...options,
-    provider: "inspector" as const,
-    sourceRepositoryUrl: inspectorRepositoryUrl,
+  const project = input.resources[0]!;
+  project.details.codeRepository.projectName = name;
+  const f = await fixture({ findings: [input] });
+  const map = new Map([[project.id, inspectorRepositoryUrl]]);
+  const prepare = (settings: ExternalPublicationOptions = inspectorOptions) =>
+    prepareExternalPublication(f.file, settings, f.deps);
+  return { f, input, project, map, prepare };
+}
+
+test("Inspector publication keeps repository provenance and reuses the source occurrence", async () => {
+  const { f, input, prepare } = await inspectorPublicationFixture();
+  const settings = {
+    ...inspectorOptions,
     sourceKey: "inspector/example/project",
   };
-  const prepare = () =>
-    prepareExternalPublication(
-      fixtureResult.file,
-      inspectorOptions,
-      fixtureResult.deps,
-    );
-  const prepared = await prepare();
-  expect(fixtureResult.posts).toHaveLength(0);
+  const prepared = await prepare(settings);
+  expect(f.posts).toHaveLength(0);
   expect(prepared.preview.requests[0]!.source.provider).toBe("inspector");
   expect((await prepared.publish()).counts.created).toBe(1);
-  expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
-  expect(fixtureResult.reports.has(input.findingArn)).toBe(true);
+  expect((await (await prepare(settings)).publish()).counts.unchanged).toBe(1);
+  expect(f.reports.has(input.findingArn)).toBe(true);
 
   const wrongDestination = await fixture(
     { findings: [input] },
@@ -909,7 +932,7 @@ test("Inspector publication keeps repository provenance and reuses the source oc
   await expect(
     prepareExternalPublication(
       wrongDestination.file,
-      inspectorOptions,
+      settings,
       wrongDestination.deps,
     ),
   ).rejects.toThrow(/does not match/i);
@@ -918,118 +941,178 @@ test("Inspector publication keeps repository provenance and reuses the source oc
     { findings: [input] },
     inspectorRepositoryUrl,
   );
-  await expect(
-    prepareNormalizedExternalPublication(
-      retained,
-      { ...inspectorOptions, provider: "wiz" },
-      wrongDestination.deps,
-    ),
-  ).rejects.toThrow("requires the inspector provider");
-  for (const format of [undefined, "aws-inspector2-list-findings/v2"]) {
-    const changed = structuredClone(retained);
-    const data = changed.findings[0]!.evidence.source_data!;
-    if (format) data["format"] = format;
-    else delete data["format"];
-    await expect(
-      prepareNormalizedExternalPublication(
-        changed,
-        inspectorOptions,
-        wrongDestination.deps,
-      ),
-    ).rejects.toThrow("Expected retained Inspector");
-  }
-  const unwrapped = structuredClone(retained);
-  unwrapped.findings[0]!.source_finding_id =
-    input.packageVulnerabilityDetails.vulnerabilityId;
-  unwrapped.findings[0]!.evidence.source_data = input;
-  await expect(
-    prepareNormalizedExternalPublication(
-      unwrapped,
-      inspectorOptions,
-      wrongDestination.deps,
-    ),
-  ).rejects.toThrow("Expected retained Inspector");
-  const partial = structuredClone(retained);
-  partial.findings[0]!.evidence.source_data = { finding: input };
-  await expect(
-    prepareNormalizedExternalPublication(
-      partial,
-      { ...inspectorOptions, provider: "wiz" },
-      wrongDestination.deps,
-    ),
-  ).rejects.toThrow("requires the inspector provider");
-  const stripped = structuredClone(retained);
-  delete stripped.findings[0]!.evidence.source_data;
-  await expect(
-    prepareNormalizedExternalPublication(
-      stripped,
-      inspectorOptions,
-      wrongDestination.deps,
-    ),
-  ).rejects.toThrow("Expected retained Inspector");
-  expect(wrongDestination.posts).toHaveLength(0);
-  const wrongArn = normalizeInspectorFindings(
-    { findings: [input] },
-    inspectorRepositoryUrl,
-  );
-  wrongArn.findings[0]!.source_finding_id = input.findingArn.replace(
-    /a$/u,
-    "b",
-  );
-  await expect(
-    prepareNormalizedExternalPublication(
-      wrongArn,
-      inspectorOptions,
-      fixtureResult.deps,
-    ),
-  ).rejects.toThrow(/ARN|identity|source finding/i);
-});
-
-test("a pending Inspector request rechecks its project mapping and destination host before replay", async () => {
-  const input = inspectorPackageFinding();
-  const project = input.resources[0]!;
-  project.details.codeRepository.projectName = "example/project";
-  const f = await fixture({ findings: [input] });
-  const base = {
-    ...options,
-    provider: "inspector" as const,
-    sourceRepositoryUrl: inspectorRepositoryUrl,
+  const { source_data: data, ...evidence } = retained.findings[0]!.evidence;
+  const replay = (
+    provider: "inspector" | "wiz",
+    sourceData: typeof data,
+    id = input.findingArn,
+    destination = wrongDestination,
+  ) => {
+    const ready = sourceData
+      ? { ...evidence, source_data: sourceData }
+      : evidence;
+    const findings = [{ source_finding_id: id, evidence: ready }];
+    return prepareNormalizedExternalPublication(
+      { ...retained, findings },
+      { ...settings, provider },
+      destination.deps,
+    );
   };
-  const map = new Map([[project.id, inspectorRepositoryUrl]]);
-  const otherUrl = "https://git.example.test/example/project";
-  const prepared = await prepareExternalPublication(
-    f.file,
-    { ...base, inspectorProjectMap: map },
-    f.deps,
-  );
-  f.state.loseResponse = true;
-  await expect(prepared.publish()).rejects.toThrow("resume the saved request");
-  expect(f.posts).toHaveLength(1);
-  const firstBody = f.posts[0]!;
-  const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
-    prepareNormalizedExternalPublication(
-      prepared.preview,
-      { ...base, inspectorProjectMap },
-      f.deps,
+  for (const inspectorData of [data, { finding: input }])
+    await expect(replay("wiz", inspectorData)).rejects.toThrow(
+      "requires the inspector provider",
     );
 
-  await expect(resume()).rejects.toThrow(/project|repository/i);
-  await expect(resume(new Map([[project.id, otherUrl]]))).rejects.toThrow(
-    /project|repository/i,
+  const { format: _format, ...withoutFormat } = data!;
+  for (const unrecognized of [
+    undefined,
+    withoutFormat,
+    { ...data, format: "aws-inspector2-list-findings/v2" },
+  ])
+    await expect(replay("inspector", unrecognized)).rejects.toThrow(
+      "Expected retained Inspector",
+    );
+  const advisoryId = input.packageVulnerabilityDetails.vulnerabilityId;
+  await expect(replay("inspector", input, advisoryId)).rejects.toThrow(
+    "Expected retained Inspector",
   );
-  // Connector and repository IDs stay stable while the host changes.
-  f.state.repositoryUrl = otherUrl;
-  await expect(resume(map)).rejects.toThrow(/repository/i);
-  expect(f.posts).toHaveLength(1);
+  expect(wrongDestination.posts).toHaveLength(0);
+  const otherArn = input.findingArn.replace(/a$/u, "b");
+  await expect(replay("inspector", data, otherArn, f)).rejects.toThrow(
+    /ARN|identity|source finding/i,
+  );
+});
 
+test.each(["example/project", inspectorRepositoryUrl])(
+  "pending Inspector requests for %s recheck their project mapping and destination host",
+  async (name) => {
+    const { f, project, map, prepare } =
+      await inspectorPublicationFixture(name);
+    const otherUrl = "https://git.example.test/example/project";
+    const supplied = new Map(map);
+    const settings: ExternalPublicationOptions = {
+      ...inspectorOptions,
+      inspectorProjectMap: supplied,
+    };
+    const preparing = prepare(settings);
+    if (name === inspectorRepositoryUrl) delete settings.inspectorProjectMap;
+    else supplied.clear();
+    const prepared = await preparing;
+    f.state.loseResponse = true;
+    await expect(prepared.publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    expect(f.posts).toHaveLength(1);
+    const firstBody = f.posts[0]!;
+    const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
+      prepareNormalizedExternalPublication(
+        prepared.preview,
+        { ...inspectorOptions, inspectorProjectMap },
+        f.deps,
+      );
+
+    await expect(resume()).rejects.toThrow(/project|repository/i);
+    await expect(resume(new Map([[project.id, otherUrl]]))).rejects.toThrow(
+      /project|repository/i,
+    );
+    // Connector and repository IDs stay stable while the host changes.
+    f.state.repositoryUrl = otherUrl;
+    await expect(resume(map)).rejects.toThrow(/repository/i);
+    expect(f.posts).toHaveLength(1);
+
+    f.state.repositoryUrl = inspectorRepositoryUrl;
+    const retry = await resume(map);
+    expect(retry.preview.resumed).toBe(true);
+    retry.preview.requests[0]!.items[0]!.evidence.source_data![
+      "sourceRepositoryUrl"
+    ] = otherUrl;
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([firstBody, firstBody]);
+  },
+);
+
+test("a repository reset retires the mapped Inspector request before a fresh native replay", async () => {
+  const { f, map, prepare } = await inspectorPublicationFixture();
+  const first = await prepare({
+    ...inspectorOptions,
+    inspectorProjectMap: map,
+  });
+  f.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  f.state.marker = "generation-2";
+  await expect(prepare()).rejects.toThrow("retired without uploading");
+  expect(f.posts).toHaveLength(1);
+  const fresh = await prepare();
+  expect(fresh.preview.resumed).toBe(false);
+  const request = fresh.preview.requests[0]!;
+  expect(request.repository.reset_marker).toBe("generation-2");
+  expect(request.request_id).not.toBe(first.preview.requests[0]!.request_id);
+});
+
+test("publishing an Inspector retry adopts its project map without changing the pending request", async () => {
+  const { f, map, prepare } = await inspectorPublicationFixture();
+  const mappedOptions = { ...inspectorOptions, inspectorProjectMap: map };
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  const body = f.posts[0]!;
+  const mapped = await prepare(mappedOptions);
+  const withoutMap = await prepare(); // Previewing the map does not change the checkpoint.
+  f.state.loseResponse = true;
+  await expect(mapped.publish()).rejects.toThrow("resume the saved request");
+  await expect(prepare()).rejects.toThrow("Supply the trusted mapping again");
+  await expect(withoutMap.publish()).rejects.toThrow(
+    "Another publication prepared this input",
+  );
+  expect((await (await prepare(mappedOptions)).publish()).verified).toBe(1);
+  expect(f.posts).toEqual([body, body, body]);
+});
+
+test("a pending normalized import retains its validated map requirement and rechecks the destination", async () => {
+  const f = await fixture();
+  const finding = {
+    source_finding_id: "vendor-1",
+    evidence: {
+      title: "Synthetic code finding",
+      severity: "high" as const,
+      details: {
+        kind: "sast" as const,
+        repository: { url: inspectorRepositoryUrl },
+      },
+    },
+  };
+  const prepare = () => {
+    const settings: NormalizedExternalPublicationOptions = {
+      ...options,
+      provider: "inspector",
+    };
+    return prepareNormalizedExternalPublication(
+      { read: 1, findings: [finding], excluded: [] },
+      settings,
+      {
+        ...f.deps,
+        onProgress: ({ phase, completed }) => {
+          if (phase === "preparing" && completed === 1)
+            settings.inspectorProjectMap = new Map();
+        },
+      },
+    );
+  };
+  const first = await prepare();
+  f.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+
+  f.state.repositoryUrl = "https://github.com/different/project";
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(f.posts).toHaveLength(1);
   f.state.repositoryUrl = inspectorRepositoryUrl;
-  const retry = await resume(map);
+  const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
-  retry.preview.requests[0]!.items[0]!.evidence.source_data![
-    "sourceRepositoryUrl"
-  ] = otherUrl;
+  expect(retry.preview.requests).toEqual(first.preview.requests);
   expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([firstBody, firstBody]);
 });
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
@@ -3053,7 +3136,7 @@ test("normalized SDK publication preserves caller evidence and exclusion account
   const original = structuredClone(input);
   const prepared = await prepareNormalizedExternalPublication(
     input as Parameters<typeof prepareNormalizedExternalPublication>[0],
-    options,
+    Object.create(options) as typeof options,
     f.deps,
   );
   expect(input).toEqual(original);

@@ -12,6 +12,7 @@ import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { repositoryBoundScanners } from "./scanner-repository-provenance.js";
+import { readScannerJson } from "./scanner-import.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -116,12 +117,12 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  const boundReader = repositoryBoundScanners[options.provider];
-  if (boundReader) {
+  const normalize = repositoryBoundScanners[options.provider];
+  if (normalize) {
     const url = options.sourceRepositoryUrl ?? "";
     return {
-      findings: await boundReader(
-        path,
+      findings: normalize(
+        await readScannerJson(path),
         url,
         target,
         options.inspectorProjectMap,

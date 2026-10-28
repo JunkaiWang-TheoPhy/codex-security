@@ -5,23 +5,45 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
+import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
   hasInspectorEvidence,
   inspectorReportRepositories,
-  readInspectorFindings,
+  normalizeInspectorFindings,
 } from "./inspector-findings.js";
 import {
   blackDuckReportRepositories,
   hasBlackDuckEvidence,
-  readBlackDuckFindings,
+  normalizeBlackDuckFindings,
 } from "./blackduck-findings.js";
 
 export const repositoryBoundScanners: Partial<
-  Record<Provider, typeof readInspectorFindings>
+  Record<Provider, typeof normalizeInspectorFindings>
 > = {
-  inspector: readInspectorFindings,
-  blackduck: readBlackDuckFindings,
+  inspector: normalizeInspectorFindings,
+  blackduck: normalizeBlackDuckFindings,
 };
+
+/** Capture the caller's import settings before reading an export or resolving its destination. */
+export function snapshotImportOptions<
+  P extends ExternalPublicationOptions["provider"],
+>({
+  repository,
+  provider,
+  sourceKey,
+  inspectorProjectMap,
+}: ExternalPublicationOptions & { provider: P }) {
+  if (inspectorProjectMap !== undefined && provider !== "inspector")
+    throw new CodexSecurityError(
+      "An Inspector project map requires the inspector provider.",
+    );
+  return {
+    repository,
+    provider,
+    sourceKey,
+    inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
+  };
+}
 
 export function boundScannerRepositories(
   provider: Provider,
