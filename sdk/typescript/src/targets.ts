@@ -167,17 +167,16 @@ interface GitWorktreeContext {
   runGit?: (args: readonly string[]) => Promise<string>;
 }
 
-export async function enclosingGitWorktreeRoot(
+function worktreeGit(
   repository: string,
-  signal?: AbortSignal,
-  options: GitWorktreeContext & { requireIfPresent?: boolean } = {},
-): Promise<string | null> {
-  const strict = options.requireIfPresent === true;
+  signal: AbortSignal | undefined,
+  options: GitWorktreeContext,
+) {
   const objectEnvironment =
     options.objectDirectory === undefined
       ? {}
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
-  const output = (args: readonly string[]) =>
+  return (args: readonly string[]) =>
     options.runGit?.(args) ??
     gitOutput(
       options.protectedRoot ?? repository,
@@ -186,6 +185,15 @@ export async function enclosingGitWorktreeRoot(
       objectEnvironment,
       repository,
     );
+}
+
+export async function enclosingGitWorktreeRoot(
+  repository: string,
+  signal?: AbortSignal,
+  options: GitWorktreeContext & { requireIfPresent?: boolean } = {},
+): Promise<string | null> {
+  const strict = options.requireIfPresent === true;
+  const output = worktreeGit(repository, signal, options);
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -332,19 +340,7 @@ export async function gitMetadataDirectories(
   signal?: AbortSignal,
   options: GitWorktreeContext & { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
-  const environment =
-    options.objectDirectory === undefined
-      ? {}
-      : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
-  const output = (args: readonly string[]) =>
-    options.runGit?.(args) ??
-    gitOutput(
-      options.protectedRoot ?? repository,
-      args,
-      signal,
-      environment,
-      repository,
-    );
+  const output = worktreeGit(repository, signal, options);
   const [directory, commonDirectory] = await Promise.all([
     output(["rev-parse", "--absolute-git-dir"]),
     output(["rev-parse", "--git-common-dir"]),
@@ -522,19 +518,8 @@ async function requireGitWorktreeBinding(
       return;
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
-      if (
-        await (options.runGit?.(["config", "--get", "core.worktree"]) ??
-          gitOutput(
-            options.protectedRoot ?? repository,
-            ["config", "--get", "core.worktree"],
-            signal,
-            options.objectDirectory === undefined
-              ? {}
-              : { GIT_OBJECT_DIRECTORY: options.objectDirectory },
-            repository,
-          ))
-      )
-        return;
+      const output = worktreeGit(repository, signal, options);
+      if (await output(["config", "--get", "core.worktree"])) return;
     } else {
       // A copied backlink is not registration in the common Git directory.
       const worktreesDirectory = await abortable(
