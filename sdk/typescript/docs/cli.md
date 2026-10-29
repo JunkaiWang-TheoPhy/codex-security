@@ -1875,11 +1875,15 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` resolves the shared default severity rubric from Statsig.
-New scans use the same default. Each operation makes one optional request to
-`https://ab.chatgpt.com/v1/initialize` without account credentials or finding data,
-with a three-second timeout. Missing, invalid, or unavailable configuration uses
-the [bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+Omitting `--rubric` uses the
+[bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+New scans use the same default. Remote rubric fetching is off by default.
+Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1`
+to opt in to the shared default from Statsig; unset it or set it to `0` to disable
+fetching. Only the exact value `1` enables it. Each opted-in operation makes one
+request to `https://ab.chatgpt.com/v1/initialize` without account credentials or
+finding data, with a three-second timeout. Missing, invalid, or unavailable
+configuration uses the bundled rubric.
 The selected policy stays fixed throughout that scan or classification; saved
 scan resumes and reruns retain their original snapshot. SDK `ScanOptions.severityRubric`
 accepts an explicit `{ markdown, revision, sha256 }` snapshot instead.

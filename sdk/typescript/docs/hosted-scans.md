@@ -76,9 +76,13 @@ local profiles and other local scan options are not accepted.
 
 Pass optional `severityRubric: { markdown, revision, sha256 }` to bind execution
 to a host-resolved policy. The revision must be a positive safe integer and the
-hash must match the exact UTF-8 Markdown. Without it, the SDK resolves the shared
-Statsig default once, with a three-second timeout and the bundled rubric as its
-offline fallback. The same snapshot appears in `execution.run`, the terminal
+hash must match the exact UTF-8 Markdown. Without it, the SDK uses the bundled
+rubric without fetching rubric configuration by default. Set
+`CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` in the CLI environment or SDK
+options' `environment` to opt in to fetching the shared Statsig default once,
+with a three-second timeout and the bundled rubric as its fallback. Unset the
+variable or use `0` to disable fetching; only the exact value `1` enables it.
+An explicit host snapshot always takes precedence. The same snapshot appears in `execution.run`, the terminal
 receipt, and the saved scan recipe. All scan workers use that policy instead of
 the bundled plugin severity guidance. Hosts should verify this binding alongside
 the frozen checkout and retain it when reconciling or retrying a run.

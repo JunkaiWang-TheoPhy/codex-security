@@ -1973,11 +1973,9 @@ export async function main(
     let exitCode: number;
     try {
       const runProtocol =
-        argv[0] === "scan"
-          ? runHostedScanProtocol
-          : argv[0] === "validate"
-            ? runValidationRecordsProtocol
-            : runRecordsProtocol;
+        argv[0] === "validate"
+          ? runValidationRecordsProtocol
+          : runRecordsProtocol;
       const code =
         argv[0] === "classify-severity"
           ? await runHostRecordsProtocol(
@@ -1987,6 +1985,7 @@ export async function main(
                 classifySeverityRecords(value as ClassifySeverityRecordsInput, {
                   ...options,
                   classificationRuns,
+                  environment: dependencies.environment,
                 }),
               controller.signal,
             )
@@ -1997,11 +1996,20 @@ export async function main(
                 controller.signal,
                 remediationOperation,
               )
-            : await runProtocol(
-                dependencies.recordsInput ?? process.stdin,
-                output,
-                controller.signal,
-              );
+            : argv[0] === "scan"
+              ? await runHostedScanProtocol(
+                  dependencies.recordsInput ?? process.stdin,
+                  output,
+                  {
+                    signal: controller.signal,
+                    environment: dependencies.environment,
+                  },
+                )
+              : await runProtocol(
+                  dependencies.recordsInput ?? process.stdin,
+                  output,
+                  controller.signal,
+                );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -4644,7 +4652,7 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "Use --rubric to override the shared default policy or --records for host-provided classification.",
+      hint: "Uses the bundled severity policy by default. Set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 to opt in to the shared remote policy. Use --rubric to override or --records for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -4674,7 +4682,7 @@ export async function main(
         rubric: optionValue("--rubric")
           .optional()
           .describe(
-            "Classification policy document; omit to resolve the shared default severity rubric.",
+            "Classification policy document; defaults to the bundled severity rubric unless remote policy is enabled.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))

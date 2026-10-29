@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
@@ -5,7 +6,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import * as rubricSource from "../src/severity-rubric.js";
 import {
   classifySeverity,
@@ -20,11 +21,6 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   false,
 );
 afterEach(cleanup);
-beforeEach(() => {
-  spyOn(rubricSource, "getDefaultSeverityRubric").mockResolvedValue({
-    ...rubricSource.bundledSeverityRubric,
-  });
-});
 afterEach(() => mock.restore());
 
 async function document(contents: string): Promise<string> {
@@ -75,6 +71,45 @@ function fakeCodex(response: unknown) {
   };
   return { codex, calls };
 }
+
+test.each([
+  { optIn: undefined, custom: false },
+  { optIn: "0", custom: false },
+  { optIn: "1", custom: false },
+  { optIn: "1", custom: true },
+])(
+  "classification honors the selected environment and explicit policy: %j",
+  async ({ optIn, custom }) => {
+    const config = { markdown: "# Remote classification policy", revision: 9 };
+    const key = createHash("sha256")
+      .update("codex_security_default_severity_rubric")
+      .digest("base64");
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        hash_used: "sha256",
+        dynamic_configs: { [key]: { value: config } },
+      }),
+    );
+    const customPolicy = "Use this explicit classification policy.";
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: optIn },
+      ...(custom ? { rubricPath: await document(customPolicy) } : {}),
+    });
+    const markdown = custom
+      ? customPolicy
+      : optIn === "1"
+        ? config.markdown
+        : defaultSeverityRubric;
+    expect(request).toHaveBeenCalledTimes(optIn === "1" && !custom ? 1 : 0);
+    expect(result.rubricSha256).toBe(workflowDigest([markdown]));
+    for (const call of calls)
+      expect(JSON.parse(call.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+        markdown,
+      ]);
+  },
+);
 
 test("reclassification freezes one shared default across independent reviews", async () => {
   const policy = { ...rubricSource.bundledSeverityRubric, revision: 7 };

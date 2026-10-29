@@ -1,10 +1,9 @@
-import { CodexSecurity, type ScanOptions } from "../../src/api.js";
+import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
 import { throwing } from "./errors.js";
 import { readFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 import type { TurnOptions } from "@openai/codex-sdk";
-import { bundledSeverityRubric } from "../../src/severity-rubric.js";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 type Dependencies = NonNullable<ClientArguments[1]>;
@@ -112,16 +111,6 @@ export function mockWorkbench(
 }
 
 export class TestClient extends CodexSecurity {
-  public override run(repository: string, options: ScanOptions = {}) {
-    return super.run(repository, {
-      ...options,
-      ...(options.severityRubric === undefined &&
-      options.resumeScanId === undefined
-        ? { severityRubric: { ...bundledSeverityRubric } }
-        : {}),
-    });
-  }
-
   static withDependencies(
     dependencies: Partial<NonNullable<ClientArguments[1]>>,
   ) {

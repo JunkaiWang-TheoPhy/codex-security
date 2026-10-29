@@ -187,6 +187,7 @@ export interface HostedScanOptions {
     };
   };
   signal?: AbortSignal;
+  environment?: NodeJS.ProcessEnv;
   onEvent?: (event: ScanExecutionEvent) => void;
 }
 
@@ -199,7 +200,7 @@ export async function runHostedScan(
   const context = {
     ...(await prepareHostedScan(input, options.signal)),
     severityRubric:
-      input.severityRubric ?? (await getDefaultSeverityRubric(options.signal)),
+      input.severityRubric ?? (await getDefaultSeverityRubric(options)),
   };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;

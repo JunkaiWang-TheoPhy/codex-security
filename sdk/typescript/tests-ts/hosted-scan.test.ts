@@ -53,6 +53,7 @@ test("hosted scans echo one immutable default snapshot and preserve explicit hos
     ...rubricSource.bundledSeverityRubric,
     revision: 19,
   });
+  const environment = { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1" };
   try {
     for (const explicit of [false, true]) {
       const input = await fixture();
@@ -61,7 +62,7 @@ test("hosted scans echo one immutable default snapshot and preserve explicit hos
         ? input.severityRubric!
         : { ...rubricSource.bundledSeverityRubric, revision: 19 };
       const executor = draftExecutor();
-      const result = await runHostedScan(input, { executor });
+      const result = await runHostedScan(input, { executor, environment });
       expect(result.status).toBe("completed");
       expect(result.severityRubric).toEqual(expected);
       const request = executor.run.mock.calls[0]![0];
@@ -71,10 +72,126 @@ test("hosted scans echo one immutable default snapshot and preserve explicit hos
       );
     }
     expect(resolve).toHaveBeenCalledTimes(1);
+    expect(resolve.mock.calls[0]?.[0]?.environment).toBe(environment);
   } finally {
     resolve.mockRestore();
   }
 });
+
+test.each([undefined, "0", "1"])(
+  "hosted scans resolve the default using selected remote policy setting %p",
+  async (enabled) => {
+    const policy = { markdown: "# Remote severity policy\n", revision: 13 };
+    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        hash_used: "sha256",
+        dynamic_configs: {
+          [createHash("sha256")
+            .update("codex_security_default_severity_rubric")
+            .digest("base64")]: { value: policy },
+        },
+      }),
+    );
+    try {
+      const input = await fixture();
+      delete input.severityRubric;
+      const executor = draftExecutor();
+      const result = await runHostedScan(input, {
+        executor,
+        environment:
+          enabled === undefined
+            ? {}
+            : { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: enabled },
+      });
+      const expected =
+        enabled === "1"
+          ? {
+              ...policy,
+              sha256: createHash("sha256")
+                .update(policy.markdown)
+                .digest("hex"),
+            }
+          : rubricSource.bundledSeverityRubric;
+      expect(result.status).toBe("completed");
+      expect(result.severityRubric).toEqual(expected);
+      expect(executor.run.mock.calls[0]?.[0].severityRubric).toEqual(expected);
+      expect(fetch).toHaveBeenCalledTimes(enabled === "1" ? 1 : 0);
+    } finally {
+      fetch.mockRestore();
+    }
+  },
+);
+
+test.each(["0", "1"])(
+  "CLI hosted protocol uses selected remote policy setting %p",
+  async (enabled) => {
+    const policy = { markdown: "# Remote severity policy\n", revision: 14 };
+    const fetch = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        hash_used: "sha256",
+        dynamic_configs: {
+          [createHash("sha256")
+            .update("codex_security_default_severity_rubric")
+            .digest("base64")]: { value: policy },
+        },
+      }),
+    );
+    const stream = new PassThrough();
+    const responses: unknown[] = [];
+    const requests: ScanExecutionRequest[] = [];
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        const message = JSON.parse(chunk.toString());
+        responses.push(message);
+        if (message.method === "execution.run") {
+          requests.push(message.params);
+          void writeDraft(message.params).then(() => {
+            send(stream, { id: message.id, result: receipt(message.params) });
+            callback();
+          }, callback);
+        } else callback();
+      },
+    });
+    try {
+      const input = await fixture();
+      delete input.severityRubric;
+      const deps = dependencies();
+      deps.recordsInput = stream;
+      deps.environment = {
+        ...deps.environment,
+        CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: enabled,
+      };
+      const completed = main(
+        ["scan", "--host"],
+        output,
+        capture().stream,
+        deps,
+      );
+      send(stream, { id: "run", method: "run", params: input });
+      expect(await completed).toBe(0);
+      const expected =
+        enabled === "1"
+          ? {
+              ...policy,
+              sha256: createHash("sha256")
+                .update(policy.markdown)
+                .digest("hex"),
+            }
+          : rubricSource.bundledSeverityRubric;
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.severityRubric).toEqual(expected);
+      expect(responses.at(-1)).toMatchObject({
+        id: "run",
+        result: { status: "completed", severityRubric: expected },
+      });
+      expect(fetch).toHaveBeenCalledTimes(enabled === "1" ? 1 : 0);
+    } finally {
+      stream.destroy();
+      output.destroy();
+      fetch.mockRestore();
+    }
+  },
+);
 
 test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
   for (const enabled of [false, true]) {
@@ -1200,7 +1317,9 @@ test.each(["cancel", "disconnect", "signal"])(
     const { output, writing, release } = blockedOutput();
     const run = spyOn(hostedScan, "runHostedScan");
     try {
-      const finished = runHostedScanProtocol(input, output, controller.signal);
+      const finished = runHostedScanProtocol(input, output, {
+        signal: controller.signal,
+      });
       send(input, { id: "run", method: "run", params });
       await writing;
       if (action === "cancel")

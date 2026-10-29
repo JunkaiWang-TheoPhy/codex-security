@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -31,6 +32,62 @@ function testClient(
     { surface: "sdk" },
   );
 }
+
+test.each(["standard", "deep"] as const)(
+  "%s scans isolate default-off and opted-in policies across concurrent clients",
+  async (mode) => {
+    const config = { markdown: "# Remote scan policy", revision: 9 };
+    const remotePolicy = {
+      ...config,
+      sha256: createHash("sha256").update(config.markdown).digest("hex"),
+    };
+    const key = createHash("sha256")
+      .update("codex_security_default_severity_rubric")
+      .digest("base64");
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        hash_used: "sha256",
+        dynamic_configs: { [key]: { value: config } },
+      }),
+    );
+    const policies = await Promise.all(
+      [undefined, "0", "1"].map(async (value) => {
+        const root = await temporaryDirectory();
+        const repository = join(root, "repository");
+        const home = join(root, "home");
+        const scan = join(root, "scan");
+        await Promise.all([repository, home, scan].map((path) => mkdir(path)));
+        const runtime = scanRuntimeDependencies(home, scan);
+        let savedPolicy: unknown;
+        await using client = testClient({
+          ...runtime,
+          environment: {
+            CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: value,
+          },
+          canRunDirectDeepScan: () => false,
+          runWorkbench: async (_options, args, input) => {
+            if (args[0] === "register-cli-scan")
+              savedPolicy = JSON.parse(input!).recipe.severityRubric;
+            return mockWorkbench(args, input);
+          },
+          createCodex: codexFactory(async () => {
+            throw new Error("Captured scan policy");
+          }),
+        });
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "Captured scan policy",
+        );
+        return savedPolicy;
+      }),
+    );
+    expect(policies).toEqual([
+      bundledSeverityRubric,
+      bundledSeverityRubric,
+      remotePolicy,
+    ]);
+    expect(request).toHaveBeenCalledTimes(1);
+  },
+);
 
 test.each(["standard", "deep"] as const)(
   "%s scans retain one resolved policy in the model and persisted worker context",

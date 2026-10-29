@@ -10,7 +10,19 @@ const key = createHash("sha256")
   .update("codex_security_default_severity_rubric")
   .digest("base64");
 
-afterEach(() => mock.restore());
+const enabledEnvironment = {
+  CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
+};
+const previousOptIn =
+  process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"];
+
+afterEach(() => {
+  mock.restore();
+  if (previousOptIn === undefined)
+    delete process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"];
+  else
+    process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"] = previousOptIn;
+});
 
 function response(value: unknown, hash = "sha256") {
   return Response.json({
@@ -18,6 +30,66 @@ function response(value: unknown, hash = "sha256") {
     dynamic_configs: { [key]: { value } },
   });
 }
+
+test("uses the bundled policy by default without a request or timeout", async () => {
+  delete process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"];
+  const request = spyOn(globalThis, "fetch").mockRejectedValue(
+    new Error("Unexpected remote rubric request"),
+  );
+  const timeout = spyOn(AbortSignal, "timeout");
+  expect(await getDefaultSeverityRubric()).toEqual(bundledSeverityRubric);
+  expect(request).not.toHaveBeenCalled();
+  expect(timeout).not.toHaveBeenCalled();
+});
+
+test.each([undefined, "", "0", "false", "true", " 1", "1 "])(
+  "selected environment value %j disables fetching even when the parent opted in",
+  async (value) => {
+    process.env["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"] = "1";
+    const request = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Unexpected remote rubric request"),
+    );
+    const timeout = spyOn(AbortSignal, "timeout");
+    expect(
+      await getDefaultSeverityRubric({
+        environment: { CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: value },
+      }),
+    ).toEqual(bundledSeverityRubric);
+    expect(request).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
+  },
+);
+
+test("concurrent operations keep their opt-in and selected policies isolated", async () => {
+  const config = { markdown: "# Selected remote policy", revision: 9 };
+  const request = spyOn(globalThis, "fetch").mockResolvedValue(
+    response(config),
+  );
+  const [enabled, disabled] = await Promise.all([
+    getDefaultSeverityRubric({ environment: enabledEnvironment }),
+    getDefaultSeverityRubric({ environment: {} }),
+  ]);
+  expect(enabled).toMatchObject(config);
+  expect(disabled).toEqual(bundledSeverityRubric);
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
+test.each([{}, enabledEnvironment])(
+  "already canceled operations reject without fetching with environment %j",
+  async (environment) => {
+    const reason = new Error("Owner canceled");
+    const request = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Unexpected remote rubric request"),
+    );
+    await expect(
+      getDefaultSeverityRubric({
+        environment,
+        signal: AbortSignal.abort(reason),
+      }),
+    ).rejects.toBe(reason);
+    expect(request).not.toHaveBeenCalled();
+  },
+);
 
 test("resolves the shared config without account credentials and refreshes each operation", async () => {
   const config = {
@@ -27,7 +99,9 @@ test("resolves the shared config without account credentials and refreshes each 
   const request = spyOn(globalThis, "fetch").mockResolvedValue(
     response(config),
   );
-  const first = await getDefaultSeverityRubric();
+  const first = await getDefaultSeverityRubric({
+    environment: enabledEnvironment,
+  });
   expect(first).toEqual({
     ...config,
     sha256: createHash("sha256").update(config.markdown).digest("hex"),
@@ -42,7 +116,10 @@ test("resolves the shared config without account credentials and refreshes each 
   });
   expect(init?.redirect).toBe("error");
   request.mockResolvedValue(response({ ...config, revision: 9 }));
-  expect((await getDefaultSeverityRubric()).revision).toBe(9);
+  expect(
+    (await getDefaultSeverityRubric({ environment: enabledEnvironment }))
+      .revision,
+  ).toBe(9);
   expect(first.revision).toBe(8);
 });
 
@@ -61,14 +138,18 @@ test.each([
   { markdown: "Policy", revision: 1, extra: true },
 ])("invalid config %j uses the bundled SDK policy", async (config) => {
   spyOn(globalThis, "fetch").mockResolvedValue(response(config));
-  expect(await getDefaultSeverityRubric()).toEqual(bundledSeverityRubric);
+  expect(
+    await getDefaultSeverityRubric({ environment: enabledEnvironment }),
+  ).toEqual(bundledSeverityRubric);
 });
 
 test("oversized UTF-8 Markdown uses the bundled policy", async () => {
   spyOn(globalThis, "fetch").mockResolvedValue(
     response({ markdown: "😀".repeat(196_608 / 4 + 1), revision: 1 }),
   );
-  expect(await getDefaultSeverityRubric()).toEqual(bundledSeverityRubric);
+  expect(
+    await getDefaultSeverityRubric({ environment: enabledEnvironment }),
+  ).toEqual(bundledSeverityRubric);
 });
 
 test.each(["missing", "wrong-hash", "json", "http", "network", "timeout"])(
@@ -96,7 +177,9 @@ test.each(["missing", "wrong-hash", "json", "http", "network", "timeout"])(
       spyOn(AbortSignal, "timeout").mockReturnValue(timeout);
       request.mockRejectedValue(timeout.reason);
     }
-    expect(await getDefaultSeverityRubric()).toEqual(bundledSeverityRubric);
+    expect(
+      await getDefaultSeverityRubric({ environment: enabledEnvironment }),
+    ).toEqual(bundledSeverityRubric);
   },
 );
 
@@ -105,9 +188,12 @@ test("caller cancellation rejects instead of silently selecting a fallback", asy
   const reason = new Error("Owner canceled");
   spyOn(globalThis, "fetch").mockRejectedValue(reason);
   queueMicrotask(() => controller.abort(reason));
-  await expect(getDefaultSeverityRubric(controller.signal)).rejects.toBe(
-    reason,
-  );
+  await expect(
+    getDefaultSeverityRubric({
+      signal: controller.signal,
+      environment: enabledEnvironment,
+    }),
+  ).rejects.toBe(reason);
 });
 
 test("explicit snapshots require the exact Markdown hash", () => {

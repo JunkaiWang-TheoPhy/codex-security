@@ -35,7 +35,7 @@ export interface ClassifySeverityOptions extends Pick<
   | "signal"
   | "workingDirectory"
 > {
-  /** Classification policy override. Omit to resolve the shared default rubric. */
+  /** Classification policy override. Omit for the bundled default, or opt in to the remote default through environment. */
   rubricPath?: string;
   /** Independent reviews per finding: integer 1–10, default 3. */
   classificationRuns?: number;
@@ -122,7 +122,7 @@ export async function classifySeverityInternal(
   }
   const rubric =
     options.rubricPath === undefined
-      ? [(await getDefaultSeverityRubric(options.signal)).markdown]
+      ? [(await getDefaultSeverityRubric(options)).markdown]
       : await readDocuments([options.rubricPath], options.signal);
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)

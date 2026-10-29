@@ -10,8 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import * as rubricSource from "../src/severity-rubric.js";
+import { afterEach, expect, test } from "bun:test";
 import {
   classifyScanDirectorySeverity,
   classifyScanSeverityInternal,
@@ -30,13 +29,6 @@ import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-
-beforeEach(() => {
-  spyOn(rubricSource, "getDefaultSeverityRubric").mockResolvedValue({
-    ...rubricSource.bundledSeverityRubric,
-  });
-});
-afterEach(() => mock.restore());
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "classify-scan-",

@@ -336,7 +336,7 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
-  /** Frozen severity policy. Omit to resolve the shared default for a new scan. */
+  /** Frozen severity policy. Omit for the bundled default, or opt in to the remote default through environment. */
   severityRubric?: SeverityRubricSnapshot;
   /** @internal Reuse captured knowledge inputs for related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
@@ -2079,7 +2079,10 @@ export class CodexSecurity {
       const severityRubric =
         options.severityRubric === undefined
           ? options.resumeScanId === undefined
-            ? await getDefaultSeverityRubric(signal)
+            ? await getDefaultSeverityRubric({
+                signal,
+                environment: this.#dependencies.environment,
+              })
             : undefined
           : options.severityRubric;
       checkOpen();

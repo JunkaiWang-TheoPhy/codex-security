@@ -41,10 +41,16 @@ export const bundledSeverityRubric: SeverityRubricSnapshot = Object.freeze({
 });
 
 /** Resolve once per operation; callers retain this snapshot for retries and workers. */
-export async function getDefaultSeverityRubric(
-  signal?: AbortSignal,
-): Promise<SeverityRubricSnapshot> {
+export async function getDefaultSeverityRubric({
+  signal,
+  environment = process.env,
+}: {
+  signal?: AbortSignal;
+  environment?: NodeJS.ProcessEnv;
+} = {}): Promise<SeverityRubricSnapshot> {
   signal?.throwIfAborted();
+  if (environment["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"] !== "1")
+    return { ...bundledSeverityRubric };
   const timeout = AbortSignal.timeout(3_000);
   try {
     const response = await fetch("https://ab.chatgpt.com/v1/initialize", {

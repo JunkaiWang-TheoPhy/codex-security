@@ -93,6 +93,7 @@ export interface ClassifySeverityRecordsOptions {
     ): Promise<unknown>;
   };
   signal?: AbortSignal;
+  environment?: NodeJS.ProcessEnv;
 }
 
 export type CanonicalSeverityAssessment = Omit<
@@ -141,8 +142,7 @@ export async function classifySeverityRecords(
     .default(3)
     .parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
-  const rubric =
-    data.rubric ?? (await getDefaultSeverityRubric(options.signal));
+  const rubric = data.rubric ?? (await getDefaultSeverityRubric(options));
   if (sha256(rubric.markdown) !== rubric.sha256)
     throw new Error("Rubric SHA-256 does not match its exact UTF-8 Markdown.");
   const ids = new Set<string>();

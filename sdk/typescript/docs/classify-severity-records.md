@@ -24,12 +24,15 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 }
 ```
 
-The `rubric` field is optional. Omit it to resolve the shared Statsig default,
-using the same configured independent host reviews and usage accounting.
-The optional request sends no account credentials or report data and has a
-three-second timeout; missing, invalid, or unavailable configuration uses the
+The `rubric` field is optional. Omitting it uses the
 [bundled severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts)
-at revision `1`. The policy is resolved once before the first review. The result
+at revision `1`, without fetching rubric configuration by default. To opt in to the shared
+Statsig default, set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` in the CLI
+environment or SDK options' `environment`. Unset it or use `0` to disable fetching;
+only the exact value `1` enables it. The opted-in request sends no account
+credentials or report data and has a three-second timeout; missing, invalid, or
+unavailable configuration uses the bundled rubric. Independent host reviews and
+usage accounting are unchanged. The policy is resolved once before the first review. The result
 echoes the selected revision and exact Markdown SHA-256. Supplying a custom rubric
 replaces the default completely and preserves the supplied revision/hash binding.
 Do not reuse cached results across differing rubric hashes; preserve the default
