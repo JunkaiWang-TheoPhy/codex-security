@@ -8,7 +8,7 @@ import {
   normalizeGitRepositoryUrl,
 } from "./git-remote.js";
 import type { ExternalSourceRepository } from "./external-findings.js";
-import Ajv2020 from "ajv/dist/2020.js";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
   ExternalFindingEvidence,
@@ -271,11 +271,12 @@ function validator<T>(
   name: keyof typeof schema.$defs,
   target: ExternalImportTarget = "cloud",
 ) {
-  const check = ajv.compile<T>({
-    $defs: (target === "local" ? localSchema : schema).$defs,
-    $ref: `#/$defs/${name}`,
-  });
+  let check: ValidateFunction<T> | undefined;
   return (input: unknown): T => {
+    check ??= ajv.compile<T>({
+      $defs: (target === "local" ? localSchema : schema).$defs,
+      $ref: `#/$defs/${name}`,
+    });
     if (name === "ImportedFindingEvidence")
       normalizeEvidenceDetails(input, target);
     else if (input && typeof input === "object") {
