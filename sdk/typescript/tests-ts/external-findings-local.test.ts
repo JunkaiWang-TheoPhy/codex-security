@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFile,
+  link,
   mkdir,
   mkdtemp,
   rm,
@@ -1822,6 +1823,7 @@ describe("local normalized scanner findings", () => {
     ["/synthetic/repos/source", true, []],
     ["file:///C:/repos/source", true, []],
     [sourceUrl, true, [`example::foreign\n${sourceUrl}\nforeign`]],
+    [`example::foreign\n${sourceUrl}\nforeign`, true, [sourceUrl]],
     ["https://github.com/example/old", true, ["", sourceUrl]],
     [
       "https://github.com/example/foreign",
@@ -1881,6 +1883,37 @@ describe("local normalized scanner findings", () => {
         ),
       ).rejects.toThrow("does not match a configured remote");
       expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
+  test.each([sourceUrl.replace("https:", "HTTPS:"), `HTTPS::${sourceUrl}`])(
+    "recognizes %s when its helper is the installed HTTPS helper",
+    async (remote) => {
+      const { repository, root, environment } = await fixture({ remote });
+      const execPath = join(root, "git-helpers");
+      await mkdir(execPath);
+      const suffix = process.platform === "win32" ? ".exe" : "";
+      const stock = join(execPath, `git-remote-https${suffix}`);
+      const requested = join(execPath, `git-remote-HTTPS${suffix}`);
+      await writeFile(stock, "synthetic standard helper", { mode: 0o755 });
+      const prepare = () =>
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          {
+            environment: { ...environment, GIT_EXEC_PATH: execPath },
+            sourceRepositories: [{ url: sourceUrl }],
+          },
+        );
+      if (!existsSync(requested)) {
+        await writeFile(requested, "synthetic alternate helper", {
+          mode: 0o755,
+        });
+        await expect(prepare()).rejects.toThrow("does not match");
+        await rm(requested);
+        await link(stock, requested);
+      }
+      await prepare();
     },
   );
 

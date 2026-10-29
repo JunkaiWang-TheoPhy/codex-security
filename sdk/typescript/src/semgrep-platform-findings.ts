@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
   hostedRepositoryUrlKey,
   repositoryUrlKey,
@@ -384,6 +385,12 @@ export function normalizePlatformReport(
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
       const description =
         text(rule["message"]) ?? text(finding["rule_message"]);
+      const messageTitle =
+        target === "cloud" &&
+        description &&
+        Buffer.byteLength(description) > DEFAULT_CLOUD_STRING_BYTES
+          ? `Semgrep finding ${finding["id"]}`
+          : description;
       let productEvidence;
       if (product === "sca") {
         const {
@@ -417,7 +424,7 @@ export function normalizePlatformReport(
         }
         productEvidence = {
           title: requiredText(
-            name ?? advisory ?? packages[0]?.name ?? description,
+            name ?? advisory ?? packages[0]?.name ?? messageTitle,
             "Semgrep finding title",
           ),
           advisory_ids: advisory ? [advisory] : [],
@@ -432,7 +439,7 @@ export function normalizePlatformReport(
             "Supply Chain evidence is not a Semgrep Code finding.",
           );
         productEvidence = {
-          title: requiredText(name ?? description, "Semgrep finding title"),
+          title: requiredText(name ?? messageTitle, "Semgrep finding title"),
           details: {
             kind: "sast",
             repository: { url: selected.url },

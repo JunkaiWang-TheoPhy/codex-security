@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
@@ -59,6 +59,7 @@ import {
   expandHome,
   requireOutputOutsideRepositories,
   runWorkbench,
+  sameFile,
   workbenchEnvironment,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
@@ -523,13 +524,38 @@ async function requireMatchingRepository(
       "config",
       "--null",
       "--get-regexp",
-      "^remote\\..*\\.(url|vcs)$",
+      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof)$",
     ]).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === 1)
         return "";
       throw error;
     })
   ).split("\0");
+  let execPath = environmentEntry(environment ?? process.env, "GIT_EXEC_PATH");
+  const isCurlHelper = async (name: string) => {
+    const standard = name.toLowerCase();
+    if (!/^(?:https?|ftps?)$/u.test(standard)) return false;
+    if (name === standard) return true;
+    // Git searches its exec path first. A differently cased name may be a distinct helper.
+    execPath ||= utf8(await readGit(["--exec-path"]));
+    if (!execPath) return false;
+    const first = execPath.split(delimiter, 1)[0]!;
+    const directory = isAbsolute(first) ? first : repository + sep + first;
+    const prefix = directory + sep + "git-remote-";
+    const suffix = process.platform === "win32" ? ".exe" : "";
+    const candidate = prefix + name + suffix;
+    const file = await stat(candidate).catch(() => null);
+    return (
+      !!file?.isFile() &&
+      (process.platform === "win32" || (file.mode & 0o100) !== 0) &&
+      sameFile(candidate, prefix + standard + suffix)
+    );
+  };
+  const multilineRewrite = remoteConfig.some(
+    (entry) =>
+      entry.startsWith("url.") &&
+      entry.indexOf("\n") !== entry.lastIndexOf("\n"),
+  );
   const remotes: { url: string; forcedHelper: boolean }[] = [];
   let hasUnverifiedRemote = false;
   for (const rawName of remoteNames.split("\n").filter(Boolean)) {
@@ -545,18 +571,23 @@ async function requireMatchingRepository(
     const output = await readGit(["remote", "get-url", "--all", "--", name]);
     const lines = output.split("\n");
     const urlKey = `remote.${rawName}.url\n`;
-    // Effective URLs form a suffix after a Git list reset. Each contributes at least one output line.
-    const ambiguous =
+    const configured = remoteConfig
+      .filter((entry) => entry.startsWith(urlKey))
+      .map((entry) => entry.slice(urlKey.length));
+    let urls = lines;
+    // Each effective URL after a list reset contributes at least one line.
+    if (
       lines.length > 1 &&
-      remoteConfig
-        .filter((entry) => entry.startsWith(urlKey))
-        .slice(-lines.length)
-        .some((entry) => entry.includes("\n", urlKey.length));
-    // With no LF boundary guarantee, Git's singular query identifies the primary as one record.
-    if (ambiguous) hasUnverifiedRemote = true;
-    const urls = ambiguous
-      ? [await readGit(["remote", "get-url", "--", name])]
-      : lines;
+      configured.slice(-lines.length).some((url) => url.includes("\n"))
+    ) {
+      const literals = configured.slice(configured.lastIndexOf("") + 1);
+      // NUL-delimited config proves these boundaries if no rewrite can move a newline.
+      if (!multilineRewrite && literals.join("\n") === output) urls = literals;
+      else {
+        hasUnverifiedRemote = true;
+        urls = [await readGit(["remote", "get-url", "--", name])];
+      }
+    }
     for (const rawUrl of urls) {
       // Explicit helper:: takes precedence over remote.<name>.vcs.
       const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
@@ -568,16 +599,16 @@ async function requireMatchingRepository(
         hasUnverifiedRemote = true;
         continue;
       }
-      const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1];
-      const curl = /^(?:https?|ftps?):$/iu.test(transport ?? "");
-      const recognized =
-        helper === undefined
-          ? !url.includes("://") ||
-            (transport && Object.hasOwn(gitTransportPorts, transport)) ||
+      const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1] ?? "";
+      const curl = /^(?:https?|ftps?):$/u.test(transport.toLowerCase());
+      const recognized = curl
+        ? await isCurlHelper(helper ?? transport.slice(0, -1))
+        : helper === undefined &&
+          (!url.includes("://") ||
+            Object.hasOwn(gitTransportPorts, transport) ||
             // Inspector can retain an unrecognized spelling as a literal repository key.
             (provider === "inspector" &&
-              remoteRepository(url, provider, true)?.key === url)
-          : curl && /^(?:https?|ftps?)$/u.test(helper);
+              remoteRepository(url, provider, true)?.key === url));
       // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
       if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
         hasUnverifiedRemote = true;

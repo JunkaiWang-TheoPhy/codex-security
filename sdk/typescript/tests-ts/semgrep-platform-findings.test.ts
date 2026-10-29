@@ -597,3 +597,22 @@ test("keeps message-only findings and preserves ambiguous hosted paths as native
     });
   }
 });
+
+test("keeps a long rule message in the Cloud description and native evidence", () => {
+  const message = "é".repeat(257);
+  const finding = { ...platformFinding(42), rule: { message } };
+  for (const product of ["sast", "ai_sast", "sca"] as const) {
+    const report = platformReport([finding], product);
+    expect(
+      normalizeSemgrepPlatformFindings(report).findings[0]?.evidence,
+    ).toMatchObject({
+      title: "Semgrep finding 42",
+      description: message,
+      source_data: { finding },
+    });
+    expect(
+      normalizeSemgrepPlatformFindings(report, {}, "local").findings[0]
+        ?.evidence.title,
+    ).toBe(message);
+  }
+});

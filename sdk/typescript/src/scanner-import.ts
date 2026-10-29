@@ -112,6 +112,11 @@ export function parseHostedScannerJson(source: string): unknown {
   );
 }
 
+// Only numbers with 16 or more integer digits or a positive exponent can exceed
+// the safe integer range. A match inside a string only triggers an extra parse.
+const possiblyUnsafeJsonNumber =
+  /(?:\[|[:,])\s*-?(?:\d{16}|\d+(?:\.\d+)?e\+?\d)/iu;
+
 export async function readScannerJson(
   path: string,
   hostedFormat?: string,
@@ -120,7 +125,10 @@ export async function readScannerJson(
   try {
     const json = decoded.replace(/^\uFEFF/u, "");
     const report: unknown = JSON.parse(json);
-    return hostedFormat && isRecord(report) && report["format"] === hostedFormat
+    return hostedFormat &&
+      isRecord(report) &&
+      report["format"] === hostedFormat &&
+      possiblyUnsafeJsonNumber.test(json)
       ? parseHostedScannerJson(json)
       : report;
   } catch (error) {

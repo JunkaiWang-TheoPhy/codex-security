@@ -138,6 +138,18 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
   );
   expect((await prepared.import()).counts.created).toBe(2);
 
+  const amount = "-9.007199254740993E+15";
+  const exponential = platformReport([
+    { ...platformFinding(1), measurements: [amount] },
+  ]);
+  await writeFile(
+    fixture.file,
+    JSON.stringify(exponential).replace(JSON.stringify(amount), amount),
+  );
+  expect(await readSemgrepFindings(fixture.file)).toEqual(
+    normalizeSemgrepPlatformFindings(exponential),
+  );
+
   // Native imports ignore timing data, even when a JSON reviver would overflow.
   const timing = "[".repeat(12000) + "0" + "]".repeat(12000);
   const native = JSON.stringify({ ...semgrepJson(), time: "timing-data" })
