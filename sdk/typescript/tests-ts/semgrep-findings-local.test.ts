@@ -276,6 +276,7 @@ test.each([
   "ssh://git@github.com/example/other/../project.git",
   "https://github.com/example/other/%2e%2e/project.git",
   "https://github.com/example\\project.git",
+  "https://github.com/example%2Fproject.git",
   "https://github.com/example/project.git?other",
   "https://github.com:8443/example/project.git",
   "other@github.com:example/project.git",
@@ -349,6 +350,39 @@ test.each([
         sourceRepositories: [{ url: otherSource }],
       }),
     ).rejects.toThrow("does not match");
+  },
+);
+
+const gitlabUrl = "https://gitlab.com/Group/My-Repo";
+const escapedGitlabUrl = "https://gitlab.com/%47roup/My%2dRepo";
+test.each([
+  [escapedGitlabUrl, gitlabUrl],
+  [gitlabUrl, escapedGitlabUrl],
+  [escapedGitlabUrl, "ssh://git@gitlab.com/Group/My-Repo.git"],
+])(
+  "hosted source %s and checkout %s compare unreserved path escapes",
+  async (source, remote) => {
+    await using fixture = await platformCheckout(remote);
+    const report = platformReport([
+      { ...platformFinding(7), repository: { url: source } },
+    ]);
+    const input = normalizeSemgrepPlatformFindings({
+      ...report,
+      project: { ...report.project, url: source },
+    });
+    input.findings[0]!.evidence.details!.repository!.url = gitlabUrl;
+    const prepare = (url: string) =>
+      prepareNormalizedLocalImport(input, fixture.options, {
+        ...fixture.dependencies,
+        sourceRepositories: [{ url }],
+      });
+    expect((await prepare(gitlabUrl)).preview.findings).toHaveLength(1);
+    await expect(prepare("https://gitlab.com/Group%2FMy-Repo")).rejects.toThrow(
+      "does not match",
+    );
+    await expect(prepare("https://gitlab.com/group/My-Repo")).rejects.toThrow(
+      "does not match",
+    );
   },
 );
 

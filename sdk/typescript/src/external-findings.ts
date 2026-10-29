@@ -16,7 +16,7 @@ export interface ExternalSourceRepository {
 
 export interface ExternalFindings {
   read: number;
-  /** Source repository retained by hosted collectors, including empty reports. */
+  /** Source repository for this report, including empty hosted collections. */
   sourceRepositoryUrl?: string;
   /** Platform established by a hosted project's verified native target. */
   sourceRepositoryPlatform?: "github" | "other";

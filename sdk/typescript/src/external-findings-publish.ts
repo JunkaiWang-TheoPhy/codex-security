@@ -54,6 +54,7 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  hostedRepositoryUrlKey,
   repositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
@@ -518,6 +519,33 @@ async function preparePublicationInput(
     }
     return response.json();
   }
+  // Hosted rows establish platform from their original project and target, independently of the current destination.
+  const hostedSnyk = new Map<
+    string,
+    ReturnType<typeof snykRestFindingRepository>
+  >();
+  if (options.provider === "snyk") {
+    for (const { source_finding_id, evidence } of parsed.findings) {
+      const data = evidence.source_data;
+      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+        hostedSnyk.set(source_finding_id, snykRestFindingRepository(data));
+    }
+  }
+  const hostedSemgrep =
+    options.provider === "semgrep" &&
+    (parsed.sourceRepositoryUrl ||
+      parsed.findings.some(({ evidence }) =>
+        isSemgrepPlatformReport(evidence.source_data),
+      ));
+  const hostedReport =
+    hostedSemgrep ||
+    (options.provider === "snyk" &&
+      (hostedSnyk.size > 0 ||
+        parsed.sourceRepositoryUrl ||
+        parsed.sourceRepositoryPlatform));
+  const catalogKey = hostedReport
+    ? (url: string) => hostedRepositoryUrlKey(url, true)
+    : cloudRepositoryUrlKey;
   const destinations: ImportRepository[] = [];
   let page: string | null = null;
   const seenPages = new Set<string>();
@@ -531,8 +559,7 @@ async function preparePublicationInput(
       ...result.data.filter(
         (item) =>
           item.id === options.repository ||
-          cloudRepositoryUrlKey(item.url) ===
-            cloudRepositoryUrlKey(options.repository),
+          catalogKey(item.url) === catalogKey(options.repository),
       ),
     );
     page = result.next;
@@ -567,18 +594,6 @@ async function preparePublicationInput(
     source,
   ];
   // Keep the lookup key stable so a changed declaration cannot stage a second request.
-  // Hosted rows establish platform from their original project and target, independently of the current destination.
-  const hostedSnyk = new Map<
-    string,
-    ReturnType<typeof snykRestFindingRepository>
-  >();
-  if (options.provider === "snyk") {
-    for (const { source_finding_id, evidence } of parsed.findings) {
-      const data = evidence.source_data;
-      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
-        hostedSnyk.set(source_finding_id, snykRestFindingRepository(data));
-    }
-  }
   const strictSnyk =
     options.provider === "snyk" &&
     (parsed.sourceRepositoryPlatform === "other" ||
@@ -794,8 +809,16 @@ async function preparePublicationInput(
       "cloud",
       inspectorProjectMap,
     );
-    function requireDestination(url: string | null | undefined, id?: string) {
-      if (url && reportKey(url) !== reportKey(destination.url)) {
+    function requireDestination(
+      url: string | null | undefined,
+      id?: string,
+      gitAlias = false,
+    ) {
+      const key =
+        hostedReport || gitAlias
+          ? (value: string) => hostedRepositoryUrlKey(value, !strictSnyk)
+          : reportKey;
+      if (url && key(url) !== key(destination.url)) {
         const label =
           id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
         throw new CodexSecurityError(
@@ -806,31 +829,24 @@ async function preparePublicationInput(
     if (!saved) requireDestination(parsed.sourceRepositoryUrl);
     if (binding) requireDestination(binding.url, binding.findingId);
     for (const [id, source] of hostedSnyk) requireDestination(source.url, id);
-    const hostedSemgrep =
-      options.provider === "semgrep" &&
-      (parsed.sourceRepositoryUrl ||
-        findings.some(({ evidence }) =>
-          isSemgrepPlatformReport(evidence.source_data),
-        ));
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const data = evidence.source_data;
+      if (options.provider === "snyk" && !hostedSnyk.has(id)) {
+        for (const { url } of snykRepositoryClaims(data)) {
+          const alias = normalizeGitRepositoryUrl(url, destination.url);
+          requireDestination(alias, id, alias !== url);
+        }
+      }
       const urls = [
         evidence.details?.repository?.url,
         options.provider === "semgrep"
           ? semgrepPlatformFindingRepository(
               data,
-              (url) =>
-                cloudRepositoryUrlKey(url) ===
-                cloudRepositoryUrlKey(destination.url),
+              (url) => catalogKey(url) === catalogKey(destination.url),
             )
           : undefined,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
-        ...(options.provider === "snyk" && !hostedSnyk.has(id)
-          ? snykRepositoryClaims(data).map(({ url }) =>
-              normalizeGitRepositoryUrl(url, destination.url, !strictSnyk),
-            )
-          : []),
         ...(hostedSemgrep && !isSemgrepPlatformReport(data)
           ? semgrepSarifSourceRepositories(data).map(({ url }) => url)
           : []),

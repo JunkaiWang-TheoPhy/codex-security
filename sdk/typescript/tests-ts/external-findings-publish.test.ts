@@ -1417,7 +1417,7 @@ test("a pending Snyk publication binds the projected report's repository and com
 });
 
 test("hosted Semgrep accepts Enterprise casing against the connected Cloud repository", async () => {
-  const url = "https://scm.example.test/Team/Project";
+  const url = "https://scm.example.test/Team/Proj%65ct";
   const report = platformReport();
   const row = platformFinding(7);
   const cloud = await fixture({
@@ -1428,16 +1428,16 @@ test("hosted Semgrep accepts Enterprise casing against the connected Cloud repos
         ...row,
         repository: {
           name: "physical-monorepo",
-          url: "ssh://git@scm.example.test/team/project.git",
+          url: "ssh://g%69t@%73cm.example.test/team/project.git",
         },
       },
     ],
   });
-  cloud.state.repositoryUrl = url.toLowerCase();
+  cloud.state.repositoryUrl = "https://scm.example.test/team/project";
   const selected = {
     ...options,
     provider: "semgrep" as const,
-    sourceRepositoryUrl: url.toLowerCase(),
+    sourceRepositoryUrl: cloud.state.repositoryUrl,
   };
   const prepare = () =>
     prepareExternalPublication(cloud.file, selected, cloud.deps);
@@ -1502,7 +1502,15 @@ test("hosted Semgrep binds retained SARIF provenance after typed evidence is pro
   const valid = mixed(hosted.sourceRepositoryUrl);
   const prepare = () =>
     prepareNormalizedExternalPublication(valid, settings, cloud.deps);
-  const first = await prepare();
+  cloud.state.repositoryUrl = hosted.sourceRepositoryUrl.replace(
+    "/project",
+    "/proj%65ct",
+  );
+  const first = await prepareNormalizedExternalPublication(
+    valid,
+    { ...settings, repository: hosted.sourceRepositoryUrl },
+    cloud.deps,
+  );
   cloud.state.loseResponse = true;
   await expect(first.publish()).rejects.toThrow("resume the saved request");
   cloud.state.repositoryUrl += "-renamed";

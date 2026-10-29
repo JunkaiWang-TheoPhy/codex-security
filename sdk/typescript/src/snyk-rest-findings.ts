@@ -1,5 +1,5 @@
 import {
-  cloudRepositoryUrlKey,
+  hostedRepositoryUrlKey,
   repositoryUrlKey,
   validateExternalEvidence,
   type ExternalImportTarget,
@@ -9,7 +9,9 @@ import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   isKnownGitHost,
+  isPublicGitHost,
   normalizeHostedGitRepositoryUrl,
+  publicGitSsh443Host,
 } from "./git-remote.js";
 import {
   checkSnykTokenOrigin,
@@ -211,15 +213,21 @@ function matchesCliRepository(remote: string, source: string) {
   if (!parts) return false;
   const authority = parts[1]!.toLowerCase();
   const hostname = authority.replace(/:\d+$/u, "");
-  if (
-    isKnownGitHost(hostname) &&
-    repositoryUrlKey(`https://${authority}${parts[2]}`) === source
-  )
-    return true;
-  const ssh = `ssh://git@${authority}${parts[2]}`;
+  const path = parts[2]!;
+  const publicWebHost =
+    isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
+  const sshHost =
+    isPublicGitHost(hostname) && authority === `${hostname}:22`
+      ? hostname
+      : publicGitSsh443Host(authority);
+  // A private server may host both literal SCP "my%2Drepo" and HTTP "my-repo".
+  if (!publicWebHost && !sshHost && /%[\da-f]{2}/iu.test(path)) return false;
   return (
-    repositoryUrlKey(normalizeHostedGitRepositoryUrl(ssh, source, false)) ===
-    source
+    repositoryUrlKey(remote) === source ||
+    (publicWebHost &&
+      repositoryUrlKey(`https://${authority}${path}`) === source) ||
+    (sshHost !== undefined &&
+      repositoryUrlKey(`https://${sshHost}${path}`) === source)
   );
 }
 
@@ -233,11 +241,15 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
-  const key = enterprise ? cloudRepositoryUrlKey : repositoryUrlKey;
-  const target = key(normalized);
-  const source = key(selected.sourceRepositoryUrl);
-  const cliTarget = origin === "cli" && matchesCliRepository(url, source);
-  if (/[?#]/u.test(url) || (target !== source && !cliTarget))
+  const matches =
+    origin === "cli" && /^http:\/\//iu.test(url)
+      ? matchesCliRepository(
+          url,
+          repositoryUrlKey(selected.sourceRepositoryUrl),
+        )
+      : hostedRepositoryUrlKey(normalized, enterprise) ===
+        hostedRepositoryUrlKey(selected.sourceRepositoryUrl, enterprise);
+  if (/[?#]/u.test(url) || !matches)
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
@@ -269,7 +281,7 @@ function projectContext(project: Resource, selected: Scope) {
     manifest: scm ? hostedRepositoryPath(attributes["target_file"]) : null,
   };
   if (project["relationships"] === undefined)
-    return { ...context, targetId: undefined, expandedUrl: undefined };
+    return { ...context, lookupTargetId: undefined, expandedUrl: undefined };
   const relationships = record(
     project["relationships"],
     "Snyk project relationships",
@@ -280,9 +292,11 @@ function projectContext(project: Resource, selected: Scope) {
     link["attributes"] === undefined
       ? undefined
       : record(link["attributes"], "Snyk expanded target attributes")["url"];
+  const targetId = resourceId(link, "target");
   return {
     ...context,
-    targetId: resourceId(link, "target"),
+    lookupTargetId:
+      expandedUrl == null || expandedUrl === "" ? targetId : undefined,
     expandedUrl,
   };
 }
@@ -290,19 +304,20 @@ function projectContext(project: Resource, selected: Scope) {
 function checkTarget(
   value: unknown,
   selected: Scope,
-  { expandedUrl, targetId, origin }: ReturnType<typeof projectContext>,
+  { expandedUrl, lookupTargetId, origin }: ReturnType<typeof projectContext>,
 ) {
-  if (targetId === undefined || expandedUrl !== undefined) {
-    if (value !== null)
-      throw new Error(
-        "Unexpected separate Snyk target without a project target lookup.",
-      );
+  if (value === null) {
+    // Earlier v1 exports saved no detail for an explicitly null or empty expanded URL.
     if (expandedUrl !== undefined)
       return checkRemote(expandedUrl, selected, origin);
-    return;
+    if (lookupTargetId === undefined) return;
   }
+  if (lookupTargetId === undefined)
+    throw new Error(
+      "Unexpected separate Snyk target without a project target lookup.",
+    );
   const target = record(value, "Snyk target resource");
-  if (resourceId(target, "target") !== targetId)
+  if (resourceId(target, "target") !== lookupTargetId)
     throw new Error(
       "Snyk target does not match the selected project's target.",
     );
@@ -450,10 +465,10 @@ export async function collectSnykIssues(
   const project = await getResource(projectUrl, "project");
   const context = projectContext(project, selected);
   const target =
-    context.targetId === undefined || context.expandedUrl !== undefined
+    context.lookupTargetId === undefined
       ? null
       : await getResource(
-          endpoint(selected, `targets/${context.targetId}`),
+          endpoint(selected, `targets/${context.lookupTargetId}`),
           "target",
         );
   checkTarget(target, selected, context);

@@ -1,7 +1,4 @@
-import {
-  cloudRepositoryUrlKey,
-  repositoryUrlKey,
-} from "../src/external-import-contract.js";
+import { hostedRepositoryUrlKey } from "../src/external-import-contract.js";
 import { expect, test } from "bun:test";
 import {
   isGitHubCloudHost,
@@ -115,8 +112,42 @@ test.each([
         ? `git@${host}:org/${path}.git`
         : `ssh://git@${host}/org/${path}.git`;
     const alias = normalizeHostedGitRepositoryUrl(remote, source, false);
-    const key =
-      host === "github.com" ? cloudRepositoryUrlKey : repositoryUrlKey;
-    expect(key(alias) === key(source)).toBe(matches);
+    expect(
+      hostedRepositoryUrlKey(alias) === hostedRepositoryUrlKey(source),
+    ).toBe(matches);
   },
 );
+
+test.each([
+  ["ssh://g%69t@%67ithub.com", true],
+  ["ssh://git@github%2Ecom:2%32", true],
+  ["ssh://%67it@ssh.github.com:443", true],
+  ["ssh://git@github.com%3A22", false],
+  ["ssh://git@github.com%40other", false],
+  ["ssh://git@github.com%2Fother", false],
+  ["ssh://git@github.com%23suffix", false],
+  ["ssh://g%00it@github.com", false],
+  ["ssh://git@github.com ", false],
+  ["ssh://git@%2567ithub.com", false],
+] as const)("compares Git SSH authority %j", (authority, matches) => {
+  const source = "https://github.com/org/repo";
+  const remote = authority + "/org/repo";
+  expect(normalizeHostedGitRepositoryUrl(remote, source, false)).toBe(
+    matches ? source : remote,
+  );
+});
+
+test.each([
+  ["/org/my%2Drepo", "/org/my-repo", true],
+  ["/org/%252Drepo", "/org/%2Drepo", false],
+  ["/org/my%2Frepo", "/org/my/repo", false],
+  ["/org/%2e%2e/repo", "/org/../repo", false],
+  ["/org/my%2Drepo?x=%2D#%41", "/org/my-repo?x=-#A", false],
+  ["/Org/my%2Drepo", "/org/my-repo", false],
+] as const)("compares hosted paths %j and %j", (first, second, matches) => {
+  const host = "https://scm.example.test";
+  expect(
+    hostedRepositoryUrlKey(host + first) ===
+      hostedRepositoryUrlKey(host + second),
+  ).toBe(matches);
+});

@@ -263,7 +263,10 @@ test("the Semgrep CLI emits a replayable report without a framework wrapper", as
     },
   );
   expect({ code, stderr: cli.stderr.text() }).toEqual({ code: 0, stderr: "" });
-  expect(JSON.parse(cli.stdout.text())).toEqual(report);
+  expect(JSON.parse(cli.stdout.text())).toEqual({
+    ...report,
+    repositoryAliases: ["project"],
+  });
 });
 
 test.each(["open-source", "code"] as const)(

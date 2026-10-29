@@ -105,6 +105,41 @@ describe("local normalized scanner findings", () => {
       await expect(prepare(url, url)).rejects.toThrow("does not match");
     },
   );
+  test("normalized Wiz reports check their repository URL alongside finding URLs", async () => {
+    const url = "https://git.example.test/owner/selected";
+    const other = "https://git.example.test/owner/other";
+    const f = await fixture({ remote: url });
+    const prepare = (report: ExternalFindings) =>
+      prepareNormalizedLocalImport(
+        report,
+        { ...source, provider: "wiz", repository: f.repository },
+        { environment: f.environment },
+      );
+    const report = { ...input(), sourceRepositoryUrl: other };
+    await expect(prepare(report)).rejects.toThrow(
+      "does not match a configured remote",
+    );
+    await expect(
+      prepare({ ...report, read: 0, findings: [], excluded: [] }),
+    ).rejects.toThrow("does not match a configured remote");
+    report.sourceRepositoryUrl = url;
+    report.findings[0]!.evidence.details = {
+      kind: "sast",
+      repository: { url: other },
+    };
+    await expect(prepare(report)).rejects.toThrow(
+      "does not match a configured remote",
+    );
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "remote",
+      "add",
+      "upstream",
+      other,
+    ]);
+    expect((await prepare(report)).preview.findings).toEqual(report.findings);
+  });
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };

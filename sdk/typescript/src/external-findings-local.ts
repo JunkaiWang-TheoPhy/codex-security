@@ -22,6 +22,7 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  hostedRepositoryUrlKey,
   repositoryUrlKey,
   isVerifiedGitHubRepository,
   validateExternalReport,
@@ -32,6 +33,7 @@ import type {
 } from "./external-import-models.js";
 import {
   gitPathToHttpPath,
+  decodeUnreserved,
   gitTransportBytes,
   isGitHubCloudHost,
   normalizeHostedGitRepositoryUrl,
@@ -137,6 +139,7 @@ function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
+  key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey,
 ): { key: string; account?: string; homeRelative?: boolean } | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   const transport = bound
@@ -172,9 +175,6 @@ function remoteRepository(
     githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
-  // A GitHub source identifies a case-insensitive repository on custom Enterprise
-  // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
   if (!bound) return { key: key(origin + path) };
 
@@ -418,9 +418,11 @@ function hostedRepositoryMatches(
   expectedKey?: string,
 ): boolean {
   const github = source.platform === "github";
-  const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
-  return key(url) === (expectedKey ?? key(source.url));
+  return (
+    hostedRepositoryUrlKey(url, github) ===
+    (expectedKey ?? hostedRepositoryUrlKey(source.url, github))
+  );
 }
 
 async function requireMatchingRepository(
@@ -483,13 +485,15 @@ async function requireMatchingRepository(
   }
   if (hosted) {
     const platform = hosted.platform ?? provider;
+    const key = (url: string) =>
+      hostedRepositoryUrlKey(url, hosted.platform === "github");
     const http = /^https?:\/\//iu;
     const httpKey = http.test(hosted.url)
-      ? remoteRepository(hosted.url, platform, true)?.key
+      ? remoteRepository(hosted.url, platform, true, key)?.key
       : undefined;
     let hasNetworkRemote = false;
     for (const remote of remotes) {
-      const parsed = remoteRepository(remote, platform, true);
+      const parsed = remoteRepository(remote, platform, true, key);
       if (!parsed) continue;
       hasNetworkRemote = true;
       // Git's HTTP credentials and default port don't change the checkout repository.
@@ -660,11 +664,12 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
+  const reportUrl = current.sourceRepositoryUrl || undefined;
+  if (reportUrl) sources.set(reportUrl, { url: reportUrl });
   let hostedUrl =
     options.provider === "snyk" || options.provider === "semgrep"
-      ? current.sourceRepositoryUrl || undefined
+      ? reportUrl
       : undefined;
-  if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
   const reportPlatform =
     options.provider === "snyk" ? current.sourceRepositoryPlatform : undefined;
   const singleProject = Boolean(
@@ -750,8 +755,12 @@ export async function prepareLocalImport(
     // candidate host; only a supported hosted SSH alias can establish its HTTPS URL.
     let url = source;
     if (projectedUrl) {
+      const address = source.replace(
+        /^(?:ssh|git\+ssh|ssh\+git):\/\/[^/]+/u,
+        decodeUnreserved,
+      );
       const reference =
-        remoteRepository(source, options.provider, true)?.key ?? source;
+        remoteRepository(address, options.provider, true)?.key ?? source;
       url = hostedRepositoryUrl(
         normalizeHostedGitRepositoryUrl(source, reference, github),
         "Projected source repository URL",

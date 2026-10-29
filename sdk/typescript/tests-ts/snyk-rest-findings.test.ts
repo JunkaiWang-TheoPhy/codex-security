@@ -292,7 +292,7 @@ test("collects hosted Code, retaining source locations, ranges, flow omissions, 
     token: "explicit-test-token",
   };
   const { collect, requests } = transport(
-    document(project({ manager: "sast", remote: null })),
+    document(project({ manager: "sast" })),
     document([finding]),
   );
   const report = await collect(selected);
@@ -448,79 +448,103 @@ test.each(["open-source", "code"] as const)(
   },
 );
 
-test("looks up an unexpanded target by org and ID, never follows a relationship link", async () => {
-  const integration = (type: string) => ({
-    data: {
-      type: "integration",
-      id: otherId,
-      attributes: { integration_type: type },
-    },
-  });
-  const target = {
-    id: targetId,
-    type: "target",
-    attributes: {
-      display_name: "not/the-mapping",
-      url: "git@github.com:EXAMPLE/repository.git",
-    },
-    relationships: {
-      organization: { data: { type: "organization", id: organizationId } },
-      integration: integration("github-cloud-app"),
-    },
-  };
-  const lookup = document(project({ expanded: false }));
-  const { collect, requests } = transport(
-    lookup,
-    document(target),
-    document([]),
-  );
-  const report = await collect();
-  expect(requests[1]!.url.href).toBe(
-    `${apiOrigin}/rest/orgs/${organizationId}/targets/${targetId}?version=${version}`,
-  );
-  expect(report.target).toEqual(target);
-  expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(
-    sourceRepositoryUrl,
-  );
-  for (const bad of [
-    { ...target, id: otherId },
-    { ...target, attributes: { url: "https://github.com/example/other" } },
-    ...["gitlab", "docker-hub", "github-cr", "unknown-integration"].map(
-      (type) => ({
+test.each([undefined, null, ""])(
+  "looks up the linked target by org and ID when its URL is %j",
+  async (expandedUrl) => {
+    const integration = (type: string) => ({
+      data: {
+        type: "integration",
+        id: otherId,
+        attributes: { integration_type: type },
+      },
+    });
+    const target = {
+      id: targetId,
+      type: "target",
+      attributes: {
+        display_name: "not/the-mapping",
+        url: "git@github.com:EXAMPLE/repository.git",
+      },
+      relationships: {
+        organization: { data: { type: "organization", id: organizationId } },
+        integration: integration("github-cloud-app"),
+      },
+    };
+    const expansion = {
+      expanded: expandedUrl !== undefined,
+      remote: expandedUrl,
+    };
+    const lookup = document(project(expansion));
+    const { collect, requests } = transport(
+      lookup,
+      document(target),
+      document([issue()]),
+    );
+    const report = await collect();
+    expect(requests[1]!.url.href).toBe(
+      `${apiOrigin}/rest/orgs/${organizationId}/targets/${targetId}?version=${version}`,
+    );
+    expect(report.target).toEqual(target);
+    expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(
+      sourceRepositoryUrl,
+    );
+    for (const bad of [
+      { ...target, id: otherId },
+      { ...target, attributes: { url: "https://github.com/example/other" } },
+      ...["gitlab", "docker-hub", "github-cr", "unknown-integration"].map(
+        (type) => ({
+          ...target,
+          relationships: {
+            ...target.relationships,
+            integration: integration(type),
+          },
+        }),
+      ),
+      {
         ...target,
         relationships: {
-          ...target.relationships,
-          integration: integration(type),
+          organization: { data: { id: otherId, type: "organization" } },
         },
-      }),
-    ),
-    {
-      ...target,
-      relationships: {
-        organization: { data: { id: otherId, type: "organization" } },
       },
-    },
-  ]) {
-    const attempt = transport(lookup, document(bad));
-    await expect(attempt.collect()).rejects.toThrow(/target|organization/i);
-    expect(attempt.requests).toHaveLength(2);
-    const saved = { ...report, target: bad };
-    expect(() => normalizeSnykIssues(saved)).toThrow();
-    expect(() =>
-      snykRestFindingRepository({ ...saved, issue: issue() }),
-    ).toThrow();
-  }
-  expect(() => normalizeSnykIssues({ ...report, target: null })).toThrow();
-  for (const origin of ["cli", "api"]) {
-    const generic = {
+    ]) {
+      const attempt = transport(lookup, document(bad));
+      await expect(attempt.collect()).rejects.toThrow(/target|organization/i);
+      expect(attempt.requests).toHaveLength(2);
+      const saved = { ...report, target: bad };
+      expect(() => normalizeSnykIssues(saved)).toThrow();
+      expect(() =>
+        snykRestFindingRepository({ ...saved, issue: issue() }),
+      ).toThrow();
+    }
+    const enterprise = {
       ...report,
-      project: project({ expanded: false, origin }),
+      project: project({ ...expansion, origin: "github-enterprise" }),
     };
-    expect(
-      normalizeSnykIssues(generic).sourceRepositoryPlatform,
-    ).toBeUndefined();
-  }
-});
+    expect(normalizeSnykIssues(enterprise).sourceRepositoryPlatform).toBe(
+      "github",
+    );
+    const noDetail = { ...enterprise, target: null };
+    if (expandedUrl === undefined) {
+      expect(() => normalizeSnykIssues(noDetail)).toThrow();
+    } else {
+      const legacy = normalizeSnykIssues(noDetail);
+      expect(legacy.sourceRepositoryPlatform).toBeUndefined();
+      expect(
+        snykRestFindingRepository(legacy.findings[0]!.evidence.source_data!)
+          .platform,
+      ).toBeUndefined();
+    }
+    for (const origin of ["cli", "api"]) {
+      const generic = {
+        ...report,
+        project: project({ expanded: false, origin }),
+      };
+      expect(
+        normalizeSnykIssues(generic).sourceRepositoryPlatform,
+      ).toBeUndefined();
+    }
+  },
+);
 
 test("uses the declared repository when Snyk omits the project's relationships", async () => {
   const { relationships: _links, ...withoutLinks } = project();
@@ -844,6 +868,10 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
       "github.com:443/example/repository",
     ],
     ["ssh.github.com:443/Example/repository.git", github],
+    [
+      "ssh.github.com:443/example%2Frepository.git",
+      "github.com/example%2Frepository",
+    ],
     ["altssh.gitlab.com:443/Group/repo.git", "gitlab.com/Group/repo"],
     ["altssh.bitbucket.org:443/Group/repo.git", "bitbucket.org/Group/repo"],
     ["gitlab.com:8443/Group/repo.git", "gitlab.com:8443/Group/repo"],
@@ -876,6 +904,10 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["other.github.com:443/example/repository", github],
     ["gitlab.com/team/project", "gitlab.com/Team/project"],
     ["git.example.test/group/project", "git.example.test/group/project"],
+    ["github.com/example%2Frepository", github],
+    ["github.com:22/example%2Frepository", github],
+    ["ssh.github.com:443/example/%72epository", github],
+    ["github.com/example/repository", "github.com/example/%72epository"],
   ] as const) {
     const { collect, requests } = transport(
       document(project({ origin, remote: "http://" + remote })),
@@ -885,6 +917,33 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ).rejects.toThrow("target URL");
     expect(requests).toHaveLength(1);
   }
+});
+
+test("compares native HTTP repository escapes while preserving Snyk CLI's ambiguous path bytes", () => {
+  const plain = "gitlab.com/Group/my-project";
+  const escaped = "gitlab.com/Group/my%2Dproject";
+  const check = (native: string, declared: string, origin: string) =>
+    normalizeSnykIssues({
+      ...envelope(),
+      sourceRepositoryUrl: "http://" + declared,
+      project: project({ origin, remote: "http://" + native }),
+    });
+  for (const [native, declared] of [
+    [plain, escaped],
+    [escaped, plain],
+  ] as const) {
+    const report = check(native, declared, "gitlab");
+    expect(report.sourceRepositoryUrl).toBe("http://" + declared);
+    expect(report.findings[0]!.evidence.source_data).toMatchObject({
+      project: project({ origin: "gitlab", remote: "http://" + native }),
+    });
+    expect(() => check(native, declared, "cli")).toThrow("target URL");
+  }
+  const privateRepo = "git.example.test/Group/my%2Dproject";
+  expect(() => check(privateRepo, privateRepo, "cli")).toThrow("target URL");
+  expect(check(privateRepo, privateRepo, "gitlab").sourceRepositoryUrl).toBe(
+    "http://" + privateRepo,
+  );
 });
 
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {
@@ -1230,7 +1289,17 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
       url: "git@scm.example.test:owner/project.git",
       platform: "github" as const,
     };
-    for (const refs of [[ssh], [ssh, { url }], [{ url }, ssh]])
+    for (const refs of [
+      [ssh],
+      [ssh, { url }],
+      [{ url }, ssh],
+      [
+        {
+          ...ssh,
+          url: "ssh://%67it@%73cm.example.test/owner/project.git",
+        },
+      ],
+    ])
       expect(
         (await fixture.prepareNormalized(sca, refs)).preview.findings,
       ).toHaveLength(1);

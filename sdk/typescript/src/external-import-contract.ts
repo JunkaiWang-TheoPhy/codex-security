@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import { isNumberObject } from "node:util/types";
-import { normalizeGitRepositoryUrl } from "./git-remote.js";
+import { decodeUnreserved, normalizeGitRepositoryUrl } from "./git-remote.js";
 import type { ExternalSourceRepository } from "./external-findings.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
@@ -65,17 +65,35 @@ export function cloudRepositoryUrlKey(value: string): string {
   return repositoryUrlKey(value).toLowerCase();
 }
 
+/** Compare hosted HTTP path spellings without changing retained evidence or checkpoint keys. */
+export function hostedRepositoryUrlKey(value: string, github = false): string {
+  const url = value.replace(
+    /^(https?:\/\/[^/?#]+\/)([^?#]*)/iu,
+    (_, origin: string, path: string) =>
+      origin +
+      path
+        .split("/")
+        .map((segment) => {
+          const decoded = decodeUnreserved(segment);
+          // Git's HTTP transport removes literal dot segments but sends escaped ones as written.
+          return decoded === "." || decoded === ".." ? segment : decoded;
+        })
+        .join("/"),
+  );
+  return github ? cloudRepositoryUrlKey(url) : repositoryUrlKey(url);
+}
+
 /** An independently identified GitHub repository can establish its SSH alias and casing. */
 export function isVerifiedGitHubRepository(
   value: string,
   references?: readonly ExternalSourceRepository[],
 ): boolean {
-  const githubKey = cloudRepositoryUrlKey(value);
+  const githubKey = hostedRepositoryUrlKey(value, true);
   return (
     references?.some(
       ({ url, platform }) =>
         platform === "github" &&
-        cloudRepositoryUrlKey(normalizeGitRepositoryUrl(url, value)) ===
+        hostedRepositoryUrlKey(normalizeGitRepositoryUrl(url, value), true) ===
           githubKey,
     ) ?? false
   );

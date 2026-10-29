@@ -47,6 +47,11 @@ provenance from the Snyk project. When a separately fetched target identifies
 its integration, an SCM project requires a supported integration from the same
 provider family, such as GitHub Enterprise and its GitHub Server App.
 
+Snyk CLI can record both SCP and HTTP remotes as the same HTTP target. On a
+private Git server, `my%2Drepo` can select a literal `%` name over SCP and
+`my-repo` over HTTP. The importer rejects a CLI target when its percent
+escapes leave the repository ambiguous.
+
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.
 The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`

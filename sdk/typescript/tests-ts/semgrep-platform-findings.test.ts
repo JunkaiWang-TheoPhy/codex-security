@@ -313,32 +313,72 @@ test("replays only the repository names observed for each collected split projec
   );
 });
 
-test("normalizes in-memory Enterprise reports against the caller's identified GitHub repository", () => {
-  const url = "https://scm.example.test/Team/Repo";
-  const row = {
-    ...platformFinding(1),
-    repository: { url: "git@scm.example.test:team/repo.git" },
-  };
-  const report = {
-    ...platformReport([row]),
-    project: { ...platformProject, url },
-  };
-  for (const normalize of [
-    normalizeSemgrepFindings,
-    normalizeSemgrepPlatformFindings,
-  ]) {
-    const source = { url: url.toLowerCase(), platform: "github" as const };
-    expect(
-      normalize(report, { sourceRepositories: [source] }).findings,
-    ).toHaveLength(1);
-    expect(() =>
-      normalize(report, {
-        sourceRepositories: [{ ...source, url: source.url + "-other" }],
-      }),
-    ).toThrow();
-    expect(() => normalize(report)).toThrow();
-  }
-});
+test.each([
+  ["my-repo", "my%2Drepo", true],
+  ["my%2Drepo", "my-repo", true],
+  ["nested/repo", "nested%2Frepo", false],
+  ["my-repo", "my%252Drepo", false],
+] as const)(
+  "compares HTTP repository paths %s and %s (matches=%s)",
+  async (native, path, matches) => {
+    const base = "https://github.com/example/";
+    const project = { ...platformProject, url: base + native };
+    const url = base + path;
+    const finding = { ...platformFinding(1), repository: { url } };
+    if (!matches) {
+      await expect(collectProject(project, [finding])).rejects.toThrow(
+        "does not match",
+      );
+      expect(() =>
+        normalizeSemgrepPlatformFindings({
+          ...platformReport([finding]),
+          project,
+        }),
+      ).toThrow("does not match");
+      return;
+    }
+    const report = await collectProject(project, [finding], url);
+    const replay = normalizeSemgrepPlatformFindings(report, url);
+    expect(replay.findings[0]?.evidence.source_data).toMatchObject({
+      project,
+      sourceRepositoryUrl: url,
+      finding,
+    });
+  },
+);
+
+test.each([
+  "git@scm.example.test:team/repo.git",
+  "https://scm.example.test/team/%72epo",
+])(
+  "normalizes %s against the caller's identified Enterprise GitHub repository",
+  (rowUrl) => {
+    const url = "https://scm.example.test/Team/Repo";
+    const row = {
+      ...platformFinding(1),
+      repository: { url: rowUrl },
+    };
+    const report = {
+      ...platformReport([row]),
+      project: { ...platformProject, url },
+    };
+    for (const normalize of [
+      normalizeSemgrepFindings,
+      normalizeSemgrepPlatformFindings,
+    ]) {
+      const source = { url: url.toLowerCase(), platform: "github" as const };
+      expect(
+        normalize(report, { sourceRepositories: [source] }).findings,
+      ).toHaveLength(1);
+      expect(() =>
+        normalize(report, {
+          sourceRepositories: [{ ...source, url: source.url + "-other" }],
+        }),
+      ).toThrow();
+      expect(() => normalize(report)).toThrow();
+    }
+  },
+);
 
 test("keeps known non-GitHub URLs case-sensitive during collection", async () => {
   for (const host of [

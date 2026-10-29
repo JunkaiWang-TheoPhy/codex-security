@@ -1,6 +1,6 @@
 import {
   type ExternalImportTarget,
-  cloudRepositoryUrlKey,
+  hostedRepositoryUrlKey,
   repositoryUrlKey,
   isVerifiedGitHubRepository,
   validateExternalEvidence,
@@ -93,14 +93,16 @@ function requiredId(value: unknown, label: string): number | string {
 function matchingRepositoryUrl(
   value: unknown,
   expected: string,
-  key: typeof repositoryUrlKey,
-): string {
+  github: boolean,
+): void {
   const url = hostedRepositoryUrl(value, "Semgrep repository URL");
-  if (key(url) !== key(expected))
+  if (
+    hostedRepositoryUrlKey(url, github) !==
+    hostedRepositoryUrlKey(expected, github)
+  )
     throw new Error(
       "Semgrep Platform repository does not match the selected source repository.",
     );
-  return url;
 }
 
 function projectContext(
@@ -123,11 +125,10 @@ function projectContext(
     mapping ??
     hostedRepositoryUrl(project.url, "Semgrep project repository URL");
   const github = isGitHub(reference);
-  const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
   const native =
     project.url &&
     normalizeHostedGitRepositoryUrl(project.url, reference, github);
-  if (native) matchingRepositoryUrl(native, reference, key);
+  if (native) matchingRepositoryUrl(native, reference, github);
   // Keep the provider's HTTP spelling. An SSH source needs the operator's HTTP(S) mapping.
   const url = native && native === project.url ? native : reference;
   const binding =
@@ -146,7 +147,7 @@ function projectContext(
         path,
         path.slice(path.lastIndexOf("/") + 1),
       ]);
-  return { binding, url, key, github, names: new Set(names), observed };
+  return { binding, url, github, names: new Set(names), observed };
 }
 
 function scopedFinding(
@@ -173,7 +174,7 @@ function scopedFinding(
     matchingRepositoryUrl(
       normalizeHostedGitRepositoryUrl(url, selected.url, selected.github),
       selected.url,
-      selected.key,
+      selected.github,
     );
   }
   const label =
@@ -355,7 +356,7 @@ export function normalizePlatformReport(
     input["repositoryAliases"],
   );
   if (declared !== undefined)
-    matchingRepositoryUrl(declared, selected.url, selected.key);
+    matchingRepositoryUrl(declared, selected.url, selected.github);
   const ref = requiredText(input["ref"], "Semgrep ref");
   const product = productType(input["product"]);
   const findings = array(input["findings"], "Semgrep Platform findings");
