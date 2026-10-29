@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -98,6 +99,37 @@ test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
     expect(await fixture.read()).toEqual(stored);
   },
 );
+
+test("Wiz requires the installed HTTPS helper when a Git alias can handle the remote", async () => {
+  await using fixture = await localReportFixture(
+    "wiz.csv",
+    { provider: "wiz", sourceKey: "example-project:main" },
+    { remote: repositoryUrl },
+  );
+  await writeFile(fixture.file, csvReport(row));
+  execFileSync("git", [
+    "-C",
+    fixture.repository,
+    "config",
+    "alias.remote-https",
+    "!f() { git remote-ext origin 'git-upload-pack ../other.git'; }; f",
+  ]);
+  const helper =
+    "git-remote-https" + (process.platform === "win32" ? ".exe" : "");
+  const installed = execFileSync("git", ["--exec-path"], {
+    encoding: "utf8",
+    env: { ...fixture.environment, GIT_EXEC_PATH: undefined },
+  }).trimEnd();
+  if (existsSync(join(installed, helper))) {
+    Object.assign(fixture.environment, { GIT_EXEC_PATH: installed });
+    await fixture.prepare();
+  }
+  await writeFile(join(fixture.root, helper), "#!/missing-interpreter\n", {
+    mode: 0o755,
+  });
+  Object.assign(fixture.environment, { GIT_EXEC_PATH: fixture.root });
+  await expect(fixture.prepare()).rejects.toThrow("does not match");
+});
 
 test("Wiz CSV imports into SQLite and updates the same source finding", async () => {
   const source = {

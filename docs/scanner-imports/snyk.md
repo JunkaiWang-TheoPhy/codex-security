@@ -63,7 +63,9 @@ and resolved issues for that project and product, including ignored issues.
 The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
 can replay it offline. The export preserves [exact numeric values and their types](schema-guide.md#numeric-fields-in-hosted-exports). Keep the same source key across exports. The importer
 uses Snyk's issue key within the API origin, organization, project and product
-to identify updates. Duplicate keys in one export are excluded.
+to identify updates. Duplicate keys in one export are excluded. When preparing
+a REST export yourself, keep the UTC marker or offset in `updated_at` so replay
+uses the same timestamp in every time zone.
 
 Native evidence retains issue status, ignored state and coordinates. Package
 versions or Code locations are projected only when the issue and coordinate

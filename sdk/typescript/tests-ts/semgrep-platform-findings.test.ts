@@ -543,6 +543,7 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
   expect(parsed.excluded).toHaveLength(1);
   const legacy = normalizeSemgrepPlatformFindings({
     ...platformReport(records),
+    project: { ...platformProject, id: String(platformProject.id) },
     repositoryAliases: ["project"],
   });
   expect(parsed.findings).toMatchObject(legacy.findings);

@@ -551,7 +551,7 @@ async function requireMatchingRepository(
       "config",
       "--null",
       "--get-regexp",
-      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof)$",
+      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof|alias\\.\\.?remote-.*)$",
     ]).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === 1)
         return "";
@@ -559,11 +559,22 @@ async function requireMatchingRepository(
     })
   ).split("\0");
   let execPath = environmentEntry(environment ?? process.env, "GIT_EXEC_PATH");
+  let installedExecPath: string | undefined;
+  const configKeys = new Set(
+    remoteConfig.map((entry) => entry.split("\n", 1)[0]),
+  );
   const isCurlHelper = async (name: string) => {
     const standard = name.toLowerCase();
     if (!/^(?:https?|ftps?)$/u.test(standard)) return false;
-    if (name === standard) return true;
-    execPath ||= utf8(await readGit(["--exec-path"]));
+    // Plain alias names ignore case; named alias sections use the exact command name.
+    const hasAlias =
+      configKeys.has(`alias.remote-${standard}`) ||
+      configKeys.has(`alias..remote-${standard}`) ||
+      configKeys.has(`alias.remote-${name}.command`);
+    if (name === standard && !hasAlias) return true;
+    if (!execPath || hasAlias)
+      installedExecPath ||= utf8(await readGit(["--exec-path"]));
+    execPath ||= installedExecPath;
     if (!execPath) return false;
     const path = environmentEntry(environment ?? process.env, "PATH");
     let search = path === undefined ? execPath : execPath + delimiter + path;
@@ -595,11 +606,17 @@ async function requireMatchingRepository(
       }
       return undefined;
     };
-    const [requested, stock] = await Promise.all([
-      findHelper(name),
-      findHelper(standard),
-    ]);
-    return !!requested && !!stock && sameFile(requested, stock);
+    const requested = await findHelper(name);
+    if (!requested) return false;
+    // Git can run the alias if the requested executable or its interpreter is missing.
+    const stock = hasAlias
+      ? installedExecPath &&
+        join(
+          installedExecPath,
+          `git-remote-${standard}${windows ? ".exe" : ""}`,
+        )
+      : await findHelper(standard);
+    return !!stock && sameFile(requested, stock);
   };
   const multilineRewrite = remoteConfig.some(
     (entry) =>

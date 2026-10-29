@@ -16,11 +16,11 @@ number whose decimal value would change when written back to JSON as exact text.
 For example, `1e-400` retains its value and `1.0` stays a JSON number. The optional `numericFields` object
 mirrors the affected fields and array indices and repeats their numeric text.
 Keep it with the export. The reader uses it to validate a numeric ID as a number
-and a quoted title as text, even when they contain the same digits. Earlier v1
-exports with quoted digits and no marker are read as strings because their
-original JSON type cannot be recovered. Semgrep accepts exact int64 ID strings
-from these exports. Each normalized finding keeps the markers for its own
-raw evidence in `source_data.numericFields`.
+and a quoted title as text, even when they contain the same digits. Quoted
+digits without a marker carry no record of their original type. Semgrep accepts
+exact int64 ID strings. The project summary uses the canonical ID in the export
+and in `source_data.project`. For example, `"42"` and `42` both become `42`.
+Each finding retains its own raw evidence markers in `source_data.numericFields`.
 
 ## Choose the record and source key
 

@@ -23,9 +23,11 @@ for the selected project ID, ref and product. For collections spanning multiple 
 for overlapping finding IDs and rereads the first page. Retry if either check
 detects a change. The API does not provide an atomic snapshot, so concurrent
 changes confined to later pages can still cause findings to be skipped.
-If the project has no SCM URL or supplies an SSH clone URL, provide
-its HTTP(S) URL with `--source-repository-url`. The report keeps the native URL
-and mapping. On custom hosts, match the path case and the presence or absence
+If the project has no SCM URL, supply its HTTP(S) URL with `--source-repository-url`.
+For a supported SSH clone URL, pass the matching HTTPS URL. For Azure DevOps,
+configure the HTTPS URL in the Semgrep project. Its native `ssh.dev.azure.com`
+clone URL cannot be mapped. The report keeps the native URL and mapping.
+On custom hosts, match the path case and the presence or absence
 of `.git` exactly. A verified GitHub binding also accepts SSH clones, case
 variants and an optional `.git` suffix. The project ID scopes collection.
 A row can carry an independently configured repository name. The collector
