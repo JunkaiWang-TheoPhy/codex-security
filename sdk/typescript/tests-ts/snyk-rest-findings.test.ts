@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,10 @@ import {
   snykRepositoryUrls,
 } from "../src/snyk-findings.js";
 
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
@@ -74,6 +79,28 @@ function envelope(data: unknown[] = [issue()]) {
   return snykRestFixture("open-source", { issues: data });
 }
 
+async function snykCheckout(remote: string, sourceKey = projectId) {
+  const fixture = await localFindingsFixture({ remote });
+  const selection = {
+    repository: fixture.repository,
+    provider: "snyk" as const,
+    sourceKey,
+  };
+  return {
+    ...fixture,
+    selection,
+    prepareNormalized(
+      input: ExternalFindings,
+      sourceRepositories?: ExternalSourceRepository[],
+    ) {
+      return prepareNormalizedLocalImport(input, selection, {
+        environment: fixture.environment,
+        sourceRepositories,
+      });
+    },
+  };
+}
+
 test("collects only one region, org, project and Open Source issue type across JSON:API pages", async () => {
   const primary = issue({
     description: "Original description",
@@ -111,7 +138,7 @@ test("collects only one region, org, project and Open Source issue type across J
   const secondary = issue({ key: "second-key" }, { id: otherId });
   const cursor = "opaque+/=";
   const { collect, requests } = transport(
-    document(project()),
+    document(project({ origin: "github-app" })),
     document([primary], {
       href: `/orgs/${organizationId}/issues?version=${version}&starting_after=${encodeURIComponent(cursor)}`,
     }),
@@ -479,9 +506,9 @@ test("collects and replays GitLab.com SSH targets for the selected namespace and
     ...options,
     sourceRepositoryUrl: "https://gitlab.com/Group/subgroup/project",
   };
-  const checkout = await localFindingsFixture({
-    remote: "git@gitlab.com:Group/subgroup/project.git",
-  });
+  const checkout = await snykCheckout(
+    "git@gitlab.com:Group/subgroup/project.git",
+  );
   try {
     for (const remote of [
       "git@gitlab.com:Group/subgroup/project.git",
@@ -493,15 +520,7 @@ test("collects and replays GitLab.com SSH targets for the selected namespace and
       );
       const saved = await collect(selected);
       const normalized = normalizeSnykIssues(saved, "local");
-      const prepared = await prepareNormalizedLocalImport(
-        normalized,
-        {
-          repository: checkout.repository,
-          provider: "snyk",
-          sourceKey: projectId,
-        },
-        { environment: checkout.environment },
-      );
+      const prepared = await checkout.prepareNormalized(normalized);
       expect(prepared.preview.findings).toHaveLength(1);
     }
     for (const remote of [
@@ -690,6 +709,38 @@ test("a wrong project, product or repository fails before listing issues or acce
   );
 });
 
+test("matches the HTTP target spelling emitted by Snyk CLI for a public GitHub HTTPS remote", async () => {
+  const source = project({
+    origin: "cli",
+    remote: "http://github.com/Example/repository.git",
+  });
+  const report = await transport(
+    document(source),
+    document([issue()]),
+  ).collect();
+  expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(
+    sourceRepositoryUrl,
+  );
+  for (const [origin, remote, selected] of [
+    ["github", "http://github.com/example/repository", sourceRepositoryUrl],
+    ["cli", "http://github.com/example/other", sourceRepositoryUrl],
+    ["cli", "http://github.com:80/example/repository", sourceRepositoryUrl],
+    [
+      "cli",
+      "http://git.example.test/group/project",
+      "https://git.example.test/group/project",
+    ],
+  ] as const) {
+    const { collect, requests } = transport(
+      document(project({ origin, remote })),
+    );
+    await expect(
+      collect({ ...options, sourceRepositoryUrl: selected }),
+    ).rejects.toThrow("target URL");
+    expect(requests).toHaveLength(1);
+  }
+});
+
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {
   for (const foreign of [
     issue({}, { project: otherId }),
@@ -790,10 +841,12 @@ test.each(["open-source", "code"] as const)(
   async (product) => {
     const url = "https://scm.example.test/Org/project";
     const remote = "git@scm.example.test:org/PROJECT.git";
-    const fixture = await localFindingsFixture({ remote });
-    const wrong = await localFindingsFixture({
-      remote: "https://github.com/example/other",
-    });
+    const sourceKey = `${organizationId}/${projectId}/${product}`;
+    const fixture = await snykCheckout(remote, sourceKey);
+    const wrong = await snykCheckout(
+      "https://github.com/example/other",
+      sourceKey,
+    );
     try {
       const manager = product === "code" ? "sast" : "npm";
       const report = (options?: Parameters<typeof snykRestFixture>[1]) => ({
@@ -801,19 +854,12 @@ test.each(["open-source", "code"] as const)(
         project: project({ manager, origin: "github-enterprise", remote }),
       });
       const initial = report();
-      const selection = {
-        repository: fixture.repository,
-        provider: "snyk" as const,
-        sourceKey: `${organizationId}/${projectId}/${product}`,
-      };
       const prepare = async (report: SnykIssuesExport, local = fixture) => {
         const filename = join(local.root, "snyk-hosted.json");
         await writeFile(filename, JSON.stringify(report));
-        return prepareLocalExternalImport(
-          filename,
-          { ...selection, repository: local.repository },
-          { environment: local.environment },
-        );
+        return prepareLocalExternalImport(filename, local.selection, {
+          environment: local.environment,
+        });
       };
       const empty = report({ issues: [] });
       const excluded = report({
@@ -824,34 +870,27 @@ test.each(["open-source", "code"] as const)(
           /does not match a configured remote/,
         );
       }
-      const prepareNormalized = (
-        input: ReturnType<typeof normalizeSnykIssues>,
-        local = fixture,
-      ) =>
-        prepareNormalizedLocalImport(
-          input,
-          { ...selection, repository: local.repository },
-          { environment: local.environment },
-        );
       const normalizedEmpty = normalizeSnykIssues(empty, "local");
-      await expect(prepareNormalized(normalizedEmpty, wrong)).rejects.toThrow(
+      await expect(wrong.prepareNormalized(normalizedEmpty)).rejects.toThrow(
         /does not match a configured remote/,
       );
       expect(
-        (await prepareNormalized(normalizedEmpty)).preview.findings,
+        (await fixture.prepareNormalized(normalizedEmpty)).preview.findings,
       ).toHaveLength(0);
       const {
         sourceRepositoryUrl: _url,
         sourceRepositoryPlatform: _platform,
         ...rows
       } = normalizeSnykIssues(initial, "local");
-      expect((await prepareNormalized(rows)).preview.findings).toHaveLength(1);
+      expect(
+        (await fixture.prepareNormalized(rows)).preview.findings,
+      ).toHaveLength(1);
       for (const source of [
         project({ manager, origin: "github-enterprise", remote: null }),
         project({ manager, origin: "gitlab", remote: url }),
       ]) {
         await expect(
-          prepareNormalized(
+          fixture.prepareNormalized(
             normalizeSnykIssues({ ...empty, project: source }, "local"),
           ),
         ).rejects.toThrow(/does not match a configured remote/);
@@ -867,7 +906,7 @@ test.each(["open-source", "code"] as const)(
         updatedAt: "2025-02-04T00:00:00Z",
       });
       expect((await importReport(updated)).counts.updated).toBe(1);
-      const stored = await listLocalExternalFindings(selection, {
+      const stored = await listLocalExternalFindings(fixture.selection, {
         environment: fixture.environment,
       });
       expect(stored).toHaveLength(1);
@@ -885,3 +924,65 @@ test.each(["open-source", "code"] as const)(
     }
   },
 );
+
+test("local Snyk replay accepts the verified GitLab.com SSH alias and preserves namespace case", async () => {
+  const url = "https://gitlab.com/Group/project";
+  const remote = "git@gitlab.com:Group/project.git";
+  const fixture = await snykCheckout(
+    "ssh://git@gitlab.com:bad/other/project",
+    "gitlab",
+  );
+  try {
+    execFileSync("git", [
+      "-C",
+      fixture.repository,
+      "remote",
+      "add",
+      "upstream",
+      remote,
+    ]);
+    const input = normalizeSnykIssues({
+      ...envelope(),
+      sourceRepositoryUrl: url,
+      project: project({ origin: "gitlab", remote }),
+    });
+    const prepare = (reference: string) =>
+      fixture.prepareNormalized(input, [{ url: reference }]);
+    expect((await prepare(remote)).preview.findings).toHaveLength(1);
+    await expect(prepare(remote.toLowerCase())).rejects.toThrow(
+      "does not match",
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("mixing Snyk project origins keeps case-sensitive native repository claims", async () => {
+  const url = "https://scm.example.test/Owner/project";
+  const fixture = await snykCheckout(url, "mixed");
+  try {
+    const row = (origin: string, source: string) =>
+      normalizeSnykIssues({
+        ...envelope([issue({ key: origin })]),
+        sourceRepositoryUrl: source,
+        project: project({ origin, remote: source }),
+      }).findings[0]!;
+    const github = row("github-enterprise", url);
+    const gitlab = row("gitlab", url.toLowerCase());
+    for (const findings of [
+      [github, gitlab],
+      [gitlab, github],
+    ]) {
+      await expect(
+        fixture.prepareNormalized({
+          sourceRepositoryUrl: url,
+          read: 2,
+          findings,
+          excluded: [],
+        }),
+      ).rejects.toThrow("does not match");
+    }
+  } finally {
+    await fixture.dispose();
+  }
+});

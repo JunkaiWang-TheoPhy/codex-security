@@ -1,4 +1,3 @@
-import { environmentEntry } from "./auth.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
@@ -14,6 +13,7 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import { normalizeGitRepositoryUrl } from "./git-remote.js";
 import {
   hostedScannerHttp,
+  hostedEnvironmentToken,
   hostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
@@ -46,6 +46,7 @@ const scmOrigins = new Set([
   "bitbucket-connect-app",
   "bitbucket-server",
   "github",
+  "github-app",
   "github-cloud-app",
   "github-enterprise",
   "github-server-app",
@@ -217,10 +218,14 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
   const key = enterprise ? cloudRepositoryUrlKey : repositoryUrlKey;
-  if (
-    /[?#]/u.test(url) ||
-    key(normalized) !== key(selected.sourceRepositoryUrl)
-  )
+  const target = key(normalized);
+  const source = key(selected.sourceRepositoryUrl);
+  // Snyk CLI renders the Git remote as HTTP even when it was cloned over HTTPS or SSH.
+  const cliGitHubTarget =
+    origin === "cli" &&
+    target.startsWith("http://github.com/") &&
+    source === target.replace("http:", "https:");
+  if (/[?#]/u.test(url) || (target !== source && !cliGitHubTarget))
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
@@ -378,7 +383,13 @@ export async function collectSnykIssues(
   const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
   const selected = scope(options, options.apiOrigin ?? defaultOrigin);
   const token = requiredText(
-    options.token ?? environmentEntry(environment, "SNYK_TOKEN"),
+    options.token ??
+      hostedEnvironmentToken(
+        environment,
+        "SNYK_TOKEN",
+        selected.apiOrigin,
+        "SNYK_API",
+      ),
     "Snyk API token (SNYK_TOKEN)",
   );
   if (/[\r\n]/u.test(token))

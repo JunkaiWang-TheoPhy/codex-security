@@ -20,6 +20,7 @@ import {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  localRepositoryUrlKey,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
@@ -421,11 +422,28 @@ async function hasGitMetadata(
   );
 }
 
+function hostedRepositoryMatches(
+  source: ExternalSourceRepository,
+  value: string,
+): boolean {
+  const github = source.platform === "github";
+  const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
+  // A verified GitHub Enterprise host and the public Git services support their
+  // standard SSH clone aliases. Other transports retain their own identity.
+  const url = normalizeGitRepositoryUrl(
+    value,
+    github || isGitHubCloudHost(URL.parse(source.url)?.hostname ?? "")
+      ? source.url
+      : "https://gitlab.com",
+  );
+  return key(url) === key(source.url);
+}
+
 async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
-  bound: boolean,
+  hosted: ExternalSourceRepository | undefined,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -479,8 +497,33 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
+  if (hosted) {
+    const platform = hosted.platform ?? provider;
+    const http = /^https?:\/\//iu;
+    const httpKey = http.test(hosted.url)
+      ? remoteRepository(hosted.url, platform, true)?.key
+      : undefined;
+    let hasNetworkRemote = false;
+    for (const remote of remotes) {
+      const parsed = remoteRepository(remote, platform, true);
+      if (!parsed) continue;
+      hasNetworkRemote = true;
+      // Git's HTTP credentials and default port don't change the checkout repository.
+      if (
+        httpKey && http.test(remote)
+          ? parsed.key === httpKey
+          : hostedRepositoryMatches(hosted, remote)
+      )
+        return;
+    }
+    if (hasNetworkRemote)
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(hosted.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+      );
+    return;
+  }
   const identity = (value: string, platform: Provider) =>
-    remoteRepository(value, platform, bound);
+    remoteRepository(value, platform, provider === "inspector");
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
@@ -633,16 +676,9 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  let hostedRepository = current.sourceRepositoryUrl;
-  // Populated reports establish the platform from their retained provider rows.
-  let verifiedGitHubUrl =
-    !current.findings.length &&
-    options.provider === "snyk" &&
-    current.sourceRepositoryPlatform === "github"
-      ? hostedRepository
-      : undefined;
-  if (hostedRepository)
-    sources.set(hostedRepository, { url: hostedRepository });
+  let hostedUrl = current.sourceRepositoryUrl;
+  let snykGitHub: boolean | undefined;
+  if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
@@ -654,12 +690,15 @@ export async function prepareLocalImport(
     ) {
       const source = snykRestFindingRepository(data);
       native = source.url;
-      if (source.platform === "github") verifiedGitHubUrl = source.url;
+      // Every native Snyk row must support Enterprise aliases and case folding.
+      snykGitHub = (snykGitHub ?? true) && source.platform === "github";
     }
     if (options.provider === "semgrep")
-      native = semgrepPlatformFindingRepository(data);
+      native = semgrepPlatformFindingRepository(data, (url) =>
+        localRepositoryUrlKey(url, dependencies.sourceRepositories),
+      );
     if (native) {
-      hostedRepository = native;
+      hostedUrl ??= native;
       sources.set(native, { url: native });
     }
   }
@@ -689,24 +728,22 @@ export async function prepareLocalImport(
         source.url,
         options.inspectorProjectMap ? { url: source.url } : source,
       );
-    // Every supplied repository must match the hosted project below.
-    if (sources.get(source.url)?.platform === "github")
-      verifiedGitHubUrl ??= hostedRepository;
   }
-  if (hostedRepository) {
-    // A hosted project identifies one repository even when the checkout has multiple remotes.
-    const key = verifiedGitHubUrl ? cloudRepositoryUrlKey : repositoryUrlKey;
-    const expected = key(hostedRepository);
+  let hosted: ExternalSourceRepository | undefined;
+  if (hostedUrl) {
+    const github =
+      snykGitHub ??
+      ((!current.findings.length &&
+        options.provider === "snyk" &&
+        current.sourceRepositoryPlatform === "github") ||
+        [...sources.values()].some((source) => source.platform === "github"));
+    hosted = { url: hostedUrl, platform: github ? "github" : undefined };
+    // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
-      if (key(normalizeGitRepositoryUrl(url, verifiedGitHubUrl)) !== expected)
+      if (!hostedRepositoryMatches(hosted, url))
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );
-    if (verifiedGitHubUrl)
-      sources.set(verifiedGitHubUrl, {
-        url: verifiedGitHubUrl,
-        platform: "github",
-      });
   }
   if (dependabotSource)
     sources.set(dependabotSource, {
@@ -717,7 +754,7 @@ export async function prepareLocalImport(
     repository,
     options.provider,
     [...sources.values()],
-    options.provider === "inspector" || hostedRepository !== undefined,
+    hosted,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

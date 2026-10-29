@@ -1,12 +1,13 @@
 import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
+  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   isSemgrepPlatformReport,
-  normalizeSemgrepPlatformFindings,
+  normalizePlatformReport,
 } from "./semgrep-platform-findings.js";
 import {
   messageText,
@@ -152,12 +153,23 @@ export function normalizeSemgrepFindings(
   options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
+  return normalizeSemgrepReport(input, options, target, repositoryUrlKey);
+}
+
+/** @internal The file importer supplies its destination-specific repository comparison. */
+export function normalizeSemgrepReport(
+  input: unknown,
+  options: SemgrepImportOptions,
+  target: ExternalImportTarget,
+  key: typeof repositoryUrlKey,
+): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
-    return normalizeSemgrepPlatformFindings(
+    return normalizePlatformReport(
       document,
       options.sourceRepositoryUrl,
       target,
+      key,
     );
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
     return normalizeSemgrepSarif(document, options, target);

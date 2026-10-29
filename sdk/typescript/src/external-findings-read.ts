@@ -7,11 +7,13 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
+  localRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import { normalizeSemgrepReport } from "./semgrep-findings.js";
+import { readScannerJson } from "./scanner-import.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
@@ -58,6 +60,7 @@ export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
+  references?: readonly ExternalSourceRepository[],
 ): Promise<ReadExternalFindings> {
   if (options.provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
@@ -96,11 +99,18 @@ export async function readExternalFindings(
     };
   }
   if (options.provider === "semgrep") {
-    const findings = await readSemgrepFindings(
-      path,
+    // Cloud checks retained URLs against its connected destination before publication.
+    const key =
+      target === "cloud"
+        ? cloudRepositoryUrlKey
+        : (url: string) => localRepositoryUrlKey(url, references);
+    const findings = normalizeSemgrepReport(
+      await readScannerJson(path),
       { sourceRepositoryUrl: options.sourceRepositoryUrl },
       target,
+      key,
     );
+    if (findings.sourceRepositoryUrl) return { findings };
     const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
       const context = evidence.source_data?.["runContext"];
       const references = isRecord(context)

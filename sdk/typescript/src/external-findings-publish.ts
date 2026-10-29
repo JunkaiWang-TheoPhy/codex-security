@@ -786,7 +786,10 @@ async function preparePublicationInput(
       const urls = [
         evidence.details?.repository?.url,
         options.provider === "semgrep"
-          ? semgrepPlatformFindingRepository(evidence.source_data)
+          ? semgrepPlatformFindingRepository(
+              evidence.source_data,
+              cloudRepositoryUrlKey,
+            )
           : undefined,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
         ...(options.provider === "snyk"

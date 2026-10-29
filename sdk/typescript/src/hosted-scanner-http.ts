@@ -1,4 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
+import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { requiredText } from "./scanner-import.js";
 
 export interface HostedScannerHttpOptions {
@@ -19,6 +20,28 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
       "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
     );
   return raw;
+}
+
+/** Use a vendor environment token only at the origin configured for it. */
+export function hostedEnvironmentToken(
+  environment: NodeJS.ProcessEnv,
+  tokenName: string,
+  origin: string,
+  ...originNames: string[]
+): string | undefined {
+  const token = importEnvironmentSetting(environment, tokenName)?.value;
+  if (token) {
+    for (const name of originNames) {
+      const configured = importEnvironmentSetting(environment, name)?.value;
+      if (!configured) continue;
+      if (URL.parse(configured)?.origin !== origin)
+        throw new Error(
+          `${name} does not match ${origin}. Select a matching API origin and ${tokenName} before collecting findings.`,
+        );
+      break;
+    }
+  }
+  return token;
 }
 
 export function hostedScannerHttp(

@@ -6,9 +6,10 @@ and [how saved scanner reports map to imported evidence](schema-guide.md).
 
 ## Existing Platform findings
 
-Set `SEMGREP_APP_TOKEN` to a Web API token in the environment. Select the
-deployment slug, exact project name and ref. Use `sast` (the default) for
-Code, `sca` for Supply Chain or `ai_sast` for AI-powered detections.
+Set `SEMGREP_APP_TOKEN` to a Web API token for `https://semgrep.dev`. If
+`SEMGREP_URL` or its fallback `SEMGREP_APP_URL` is set, it must identify that
+origin. Select the deployment slug, exact project name and ref. Use `sast` for
+Code (the default), `sca` for Supply Chain or `ai_sast` for AI-powered detections.
 
 ```sh
 codex-security import semgrep example/project --semgrep-deployment example \
@@ -18,9 +19,12 @@ codex-security publish findings platform.json --to local --provider semgrep \
 ```
 
 The collector resolves the SCM URL and reads all pages for the selected
-project ID, ref and product. If pages overlap as the backlog changes, rerun
-collection. If the project has no SCM URL, supply `--source-repository-url` when
-collecting. The saved `semgrep-platform-findings/v1` report keeps that mapping
+project ID, ref and product. For collections spanning multiple pages, it checks
+for overlapping finding IDs and rereads the first page. Retry if either check
+detects a change. The API does not provide an atomic snapshot, so concurrent
+changes confined to later pages can still cause findings to be skipped.
+If the project has no SCM URL, supply `--source-repository-url` when collecting.
+The saved `semgrep-platform-findings/v1` report keeps that mapping
 separate from the project metadata for local or Cloud import. This endpoint
 excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).

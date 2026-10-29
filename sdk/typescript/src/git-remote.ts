@@ -54,9 +54,9 @@ export function normalizeGitRepositoryUrl(
   if (ssh) {
     // Git retains these bytes, but URL parsing would erase them from the alias.
     if (/[\t\r\n]/u.test(repository)) return repository;
-    const url = new URL(repository);
+    const url = URL.parse(repository);
     // Git sends the literal SSH path, including dot segments, query and fragment.
-    if (url.pathname !== ssh[2]) return repository;
+    if (!url || url.pathname !== ssh[2]) return repository;
     const hostname = url.hostname.toLowerCase();
     const standardSsh =
       isGitSshUser(ssh[1]!, hostname) && (url.port === "" || url.port === "22");

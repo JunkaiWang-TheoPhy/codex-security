@@ -26,6 +26,7 @@ codex-security publish findings snyk-hosted.json --provider snyk --to local \
 For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
 separate source key. The default API origin is `https://api.snyk.io`. Use
 `--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
+When `SNYK_API` is set, its origin must match the selected region before the collector uses `SNYK_TOKEN`.
 The collector checks the selected repository URL against the project target
 when Snyk supplies one. Standard Git SSH targets can match the selected HTTPS
 URL for GitHub SCM projects and GitLab.com projects. Other custom-host mappings

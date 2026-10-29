@@ -66,7 +66,7 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
       });
     },
   });
-  expect(pages).toEqual(["0", "1"]);
+  expect(pages).toEqual(["0", "1", "0"]);
   expect(report.findings).toHaveLength(101);
   expect(JSON.stringify(report)).not.toContain("synthetic-web-token");
   const parsed = normalizeSemgrepPlatformFindings(report);
@@ -141,6 +141,32 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
       error,
     );
   }
+});
+
+test("detects removals before the next offset even when no finding ID repeats", async () => {
+  // Finding 1 disappears after the first page. Finding 101 shifts into it, so page 1 starts at 102.
+  await expect(
+    collectPages(
+      { findings: first },
+      { findings: [platformFinding(102)] },
+      { findings: [...first.slice(1), platformFinding(101)] },
+    ),
+  ).rejects.toThrow("changed across pages");
+
+  const invalid = { ...platformFinding(1), id: null };
+  const initial = [invalid, ...first.slice(1)];
+  const reread = [
+    { id: null, ...Object.fromEntries(Object.entries(invalid).reverse()) },
+    ...first
+      .slice(1)
+      .map((row) => ({ ...row, id: String(row.id), status: "fixed" })),
+  ];
+  const report = await collectPages(
+    { findings: initial },
+    { findings: [] },
+    { findings: reread },
+  );
+  expect(report.findings).toEqual(initial);
 });
 
 test("keeps an operator mapping separate from a URL-less project and its short repository name", async () => {
@@ -279,6 +305,20 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
     locations: [],
     source_data: { finding: { reachability: "reachable" } },
   });
+  const advisoryOnly = {
+    ...finding,
+    vulnerability_identifier: "CVE-2025-0001",
+  };
+  const sparse = normalizeSemgrepPlatformFindings({
+    ...platformReport([advisoryOnly, platformFinding(22)]),
+    product: "sca",
+  });
+  expect(sparse.findings[0]?.evidence).toMatchObject({
+    advisory_ids: ["CVE-2025-0001"],
+    packages: [],
+    source_data: { finding: advisoryOnly },
+  });
+  expect(sparse.excluded).toHaveLength(1);
   expect(normalizeSemgrepPlatformFindings(report).excluded).toHaveLength(1);
   const code = platformReport([finding]);
   const ai = normalizeSemgrepPlatformFindings({ ...code, product: "ai_sast" });

@@ -7,6 +7,7 @@ import {
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   platformProject,
   platformRef,
@@ -26,19 +27,29 @@ const environment = {
   SNYK_TOKEN: "synthetic",
 };
 
-test("both collectors use the SDK caller's transport and environment", async () => {
+const transportTest =
+  "both collectors use the SDK caller's transport and environment";
+test(transportTest, async () => {
+  if (runTestInSubprocess(import.meta.path, transportTest)) return;
+  process.env["SNYK_TOKEN"] = process.env["SEMGREP_APP_TOKEN"] =
+    "synthetic-inherited";
+  for (const key of ["SNYK_API", "SEMGREP_URL", "SEMGREP_APP_URL"])
+    delete process.env[key];
   using fallback = spyOn(globalThis, "fetch").mockRejectedValue(
     new Error("unexpected global fetch"),
   );
   class Transport {
-    environment = {
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-      [process.platform === "win32" ? "Snyk_Token" : "SNYK_TOKEN"]:
-        "synthetic-snyk",
-      [process.platform === "win32"
-        ? "Semgrep_App_Token"
-        : "SEMGREP_APP_TOKEN"]: "synthetic-semgrep",
-    };
+    environment: NodeJS.ProcessEnv = Object.setPrototypeOf(
+      {
+        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+        [process.platform === "win32" ? "Snyk_Token" : "SNYK_TOKEN"]:
+          "synthetic-snyk",
+        [process.platform === "win32"
+          ? "Semgrep_App_Token"
+          : "SEMGREP_APP_TOKEN"]: "synthetic-semgrep",
+      },
+      process.env,
+    );
     requests: (string | null)[] = [];
     async fetch(_url: URL, init: RequestInit): Promise<Response> {
       this.requests.push(new Headers(init.headers).get("authorization"));
@@ -52,21 +63,36 @@ test("both collectors use the SDK caller's transport and environment", async () 
     sourceRepositoryUrl,
     product: "code",
   });
-  await expect(collectSnykIssues(snykOptions, transport)).rejects.toThrow(
-    "injected transport",
-  );
-  await expect(
+  const snyk = () => collectSnykIssues(snykOptions, transport);
+  const semgrep = (token?: string) =>
     collectSemgrepPlatformFindings(
       {
         deployment: "example",
         project: platformProject.name,
         ref: platformRef,
+        token,
       },
       transport,
-    ),
-  ).rejects.toThrow("injected transport");
+    );
+  await expect(snyk()).rejects.toThrow("injected transport");
+  await expect(semgrep()).rejects.toThrow("injected transport");
+
+  transport.environment["SNYK_API"] = "https://api.eu.snyk.io/v1";
+  await expect(snyk()).rejects.toThrow("SNYK_API");
+  snykOptions.apiOrigin = "https://api.eu.snyk.io";
+  await expect(snyk()).rejects.toThrow("injected transport");
+
+  transport.environment["SEMGREP_APP_URL"] = "https://example.invalid";
+  await expect(semgrep()).rejects.toThrow("SEMGREP_APP_URL");
+  await expect(semgrep("explicit")).rejects.toThrow("injected transport");
+  transport.environment["SEMGREP_URL"] = "https://semgrep.dev/";
+  await expect(semgrep()).rejects.toThrow("injected transport");
+
   expect(transport.requests).toEqual([
     "token synthetic-snyk",
+    "Bearer synthetic-semgrep",
+    "token synthetic-snyk",
+    "Bearer explicit",
     "Bearer synthetic-semgrep",
   ]);
   expect(fallback).not.toHaveBeenCalled();

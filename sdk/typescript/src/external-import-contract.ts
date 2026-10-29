@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { isNumberObject } from "node:util/types";
+import type { ExternalSourceRepository } from "./external-findings.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -61,6 +62,20 @@ export function repositoryUrlKey(value: string): string {
 // hosts. Match its case-insensitive URL identity without merging schemes or ports.
 export function cloudRepositoryUrlKey(value: string): string {
   return repositoryUrlKey(value).toLowerCase();
+}
+
+/** Match custom GitHub casing only for the repository independently identified by the caller. */
+export function localRepositoryUrlKey(
+  value: string,
+  references?: readonly ExternalSourceRepository[],
+): string {
+  const githubKey = cloudRepositoryUrlKey(value);
+  return references?.some(
+    ({ url, platform }) =>
+      platform === "github" && cloudRepositoryUrlKey(url) === githubKey,
+  )
+    ? githubKey
+    : repositoryUrlKey(value);
 }
 
 // Cloud ImportModel applies these constraints to both requests and responses.

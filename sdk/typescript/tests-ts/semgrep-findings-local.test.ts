@@ -93,39 +93,120 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
       (await prepare({ url: url.toLowerCase(), platform: "github" })).preview
         .findings,
     ).toEqual([]);
+
+    const row = platformFinding(7);
+    const file = join(fixture.root, "semgrep.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        ...platformReport([
+          { ...row, repository: { ...row.repository, url: url.toLowerCase() } },
+        ]),
+        project: { ...report.project, url },
+      }),
+    );
+    const prepareFile = (source?: { url: string; platform?: "github" }) =>
+      prepareLocalExternalImport(
+        file,
+        {
+          repository: fixture.repository,
+          sourceKey: "platform",
+          provider: "semgrep",
+          sourceRepositoryUrl: url.toLowerCase(),
+        },
+        {
+          environment: fixture.environment,
+          sourceRepositories: source ? [source] : [],
+        },
+      );
+    await expect(prepareFile()).rejects.toThrow("does not match");
+    await expect(
+      prepareFile({ url: url + "-other", platform: "github" }),
+    ).rejects.toThrow("does not match");
+    expect(
+      (await prepareFile({ url, platform: "github" })).preview.findings,
+    ).toHaveLength(1);
   } finally {
     await fixture.dispose();
   }
 });
 
-test("an empty Platform report binds file and normalized imports to the literal Git remote", async () => {
-  // Git sends the query as part of the SSH path to upload-pack.
-  const fixture = await localFindingsFixture({
-    remote: "ssh://git@github.com/example/project.git?foreign",
-  });
-  try {
-    const file = join(fixture.root, "empty.json");
-    await writeFile(file, JSON.stringify(platformReport([])));
-    const options = {
-      provider: "semgrep" as const,
-      repository: fixture.repository,
-      sourceKey: "platform",
-    };
-    const dependencies = { environment: fixture.environment };
-    await expect(
-      prepareLocalExternalImport(file, options, dependencies),
-    ).rejects.toThrow("does not match");
-    await expect(
-      prepareNormalizedLocalImport(
-        await readSemgrepFindings(file),
-        options,
-        dependencies,
-      ),
-    ).rejects.toThrow("does not match");
-  } finally {
-    await fixture.dispose();
-  }
-});
+test.each([
+  "ssh://git@github.com/example/project.git?foreign",
+  "ftp://github.com/example/project",
+  "ssh://git@github.com/example/other/../project.git",
+  "https://github.com/example/other/%2e%2e/project.git",
+  "https://github.com/example\\project.git",
+  "https://github.com/example/project.git?other",
+  "https://github.com:8443/example/project.git",
+  "other@github.com:example/project.git",
+])(
+  "an empty Platform report rejects a checkout whose remote is %s",
+  async (remote) => {
+    const fixture = await localFindingsFixture({ remote });
+    try {
+      const file = join(fixture.root, "empty.json");
+      await writeFile(file, JSON.stringify(platformReport([])));
+      const options = {
+        provider: "semgrep" as const,
+        repository: fixture.repository,
+        sourceKey: "platform",
+      };
+      const dependencies = { environment: fixture.environment };
+      await expect(
+        prepareLocalExternalImport(file, options, dependencies),
+      ).rejects.toThrow("does not match");
+      await expect(
+        prepareNormalizedLocalImport(
+          await readSemgrepFindings(file),
+          options,
+          dependencies,
+        ),
+      ).rejects.toThrow("does not match");
+    } finally {
+      await fixture.dispose();
+    }
+  },
+);
+
+test.each([
+  [
+    repositoryUrl,
+    "https://git@github.com:443/example/project.git",
+    "https://github.com:443/example/project",
+  ],
+  ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
+])(
+  "hosted %s matches the equivalent checkout %s while keeping explicit source ports distinct",
+  async (url, remote, otherSource) => {
+    const fixture = await localFindingsFixture({ remote });
+    try {
+      const report = platformReport([]);
+      const input = normalizeSemgrepPlatformFindings({
+        ...report,
+        project: { ...report.project, url },
+      });
+      const options = {
+        repository: fixture.repository,
+        provider: "semgrep" as const,
+        sourceKey: "platform",
+      };
+      const dependencies = { environment: fixture.environment };
+      expect(
+        (await prepareNormalizedLocalImport(input, options, dependencies))
+          .preview.findings,
+      ).toEqual([]);
+      await expect(
+        prepareNormalizedLocalImport(input, options, {
+          ...dependencies,
+          sourceRepositories: [{ url: otherSource }],
+        }),
+      ).rejects.toThrow("does not match");
+    } finally {
+      await fixture.dispose();
+    }
+  },
+);
 
 function report(
   format: (typeof formats)[number],

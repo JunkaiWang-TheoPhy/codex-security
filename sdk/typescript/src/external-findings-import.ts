@@ -25,7 +25,13 @@ export async function prepareLocalExternalImport(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await abortable(
-    () => readExternalFindings(path, settings, "local"),
+    () =>
+      readExternalFindings(
+        path,
+        settings,
+        "local",
+        dependencies.sourceRepositories,
+      ),
     dependencies.signal,
   );
   const normalizedOptions = {

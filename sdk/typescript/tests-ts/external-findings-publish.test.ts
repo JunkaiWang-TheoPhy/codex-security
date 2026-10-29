@@ -1294,6 +1294,33 @@ test.each(["open-source", "code"] as const)(
   },
 );
 
+test("hosted Semgrep accepts Enterprise casing against the connected Cloud repository", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const report = platformReport();
+  const row = platformFinding(7);
+  const cloud = await fixture({
+    ...report,
+    project: { ...report.project, url },
+    findings: [
+      {
+        ...row,
+        repository: { name: "physical-monorepo", url: url.toLowerCase() },
+      },
+    ],
+  });
+  cloud.state.repositoryUrl = url.toLowerCase();
+  const selected = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceRepositoryUrl: url.toLowerCase(),
+  };
+  const prepare = () =>
+    prepareExternalPublication(cloud.file, selected, cloud.deps);
+  expect((await prepare()).preview.findings).toHaveLength(1);
+  cloud.state.repositoryUrl += "-foreign";
+  await expect(prepare()).rejects.toThrow("does not match");
+});
+
 test.each(["semgrep", "snyk"] as const)(
   "normalized %s cannot mask a foreign native repository with the selected project",
   async (provider) => {
