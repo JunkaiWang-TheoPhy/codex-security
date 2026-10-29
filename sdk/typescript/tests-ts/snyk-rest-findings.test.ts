@@ -26,6 +26,7 @@ import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
+import { snykPluginExport } from "./support/snyk-import-fixtures.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   organizationId,
@@ -1264,6 +1265,65 @@ test("local Snyk replay accepts the verified GitLab.com SSH alias and preserves 
     fixture.prepareNormalized(input, [{ url: reference }]);
   expect((await prepare(remote)).preview.findings).toHaveLength(1);
   await expect(prepare(remote.toLowerCase())).rejects.toThrow("does not match");
+});
+
+test.each([
+  ["empty", [], false],
+  ["all excluded", [issue({ status: "unknown" })], true],
+] as const)(
+  "retains GitLab target proof in an %s report",
+  async (_, issues, reverse) => {
+    const bare = "https://scm.example.test/Team/repo";
+    const sourceRepositoryUrl = reverse ? bare + ".git" : bare;
+    const remote = reverse ? bare : bare + ".git";
+    await using fixture = await snykCheckout(remote);
+    const report = {
+      ...envelope([...issues]),
+      sourceRepositoryUrl,
+      project: project({ origin: "gitlab", remote }),
+    };
+    const file = join(fixture.root, "snyk-hosted.json");
+    await writeFile(file, JSON.stringify(report));
+    const fromFile = await prepareLocalExternalImport(
+      file,
+      { ...fixture.selection, sourceRepositoryUrl: remote },
+      { environment: fixture.environment },
+    );
+    expect(fromFile.preview.findings).toHaveLength(0);
+    expect(fromFile.preview.excluded).toHaveLength(issues.length);
+    const normalized = normalizeSnykIssues(report, "local");
+    expect(
+      (await fixture.prepareNormalized(normalized)).preview.findings,
+    ).toHaveLength(0);
+    delete normalized.report;
+    await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+      "does not match",
+    );
+  },
+);
+
+test("mixed GitLab and plugin rows check each local repository claim", async () => {
+  const url = "https://scm.example.test/Team/repo";
+  await using fixture = await snykCheckout(url);
+  const hosted = normalizeSnykIssues({
+    ...envelope(),
+    sourceRepositoryUrl: url,
+    project: project({ origin: "gitlab", remote: url }),
+  });
+  const plugin = snykPluginExport();
+  const prepare = (repository: string) => {
+    plugin.collection.target.repository = repository;
+    const legacy = normalizeSnykInput(plugin, "local");
+    return fixture.prepareNormalized({
+      ...hosted,
+      findings: [...legacy.findings, ...hosted.findings],
+    });
+  };
+  expect((await prepare(url + ".git")).preview.findings).toHaveLength(2);
+  await expect(prepare(url.toLowerCase() + ".git")).rejects.toThrow(
+    "does not match",
+  );
+  await expect(prepare(url + "-other.git")).rejects.toThrow("does not match");
 });
 
 test("mixing Snyk project origins keeps case-sensitive native repository claims", async () => {

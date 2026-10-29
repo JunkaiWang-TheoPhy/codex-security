@@ -501,9 +501,14 @@ async function preparePublicationInput(
   );
   if (bound) validateHostedRepositoryBytes(options.repository);
   const nativeSources = [...hostedSnyk.values()];
+  // Legacy plugin and SARIF rows can use the verified GitLab repository's clone suffix.
+  // Each still needs its own repository claim, checked against the report below.
   const gitlab =
-    nativeSources.length === parsed.findings.length &&
-    nativeSources.every((source) => source.gitlab);
+    nativeSources.length > 0 &&
+    parsed.findings.every(({ evidence: { source_data: data } }) => {
+      const native = data && hostedSnyk.get(data);
+      return native ? native.gitlab : snykRepositoryClaims(data).length > 0;
+    });
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
     nativeSources.some(({ platform }) => platform === "other");

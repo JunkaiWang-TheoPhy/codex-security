@@ -11,6 +11,7 @@ import {
   isVerifiedGitHubRepository,
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { snykRestReportRepository } from "./snyk-rest-findings.js";
 import { readSnykFindings, snykRepositoryClaims } from "./snyk-findings.js";
 import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import {
@@ -96,9 +97,11 @@ export async function readExternalFindings(
               references,
             )));
       // A hosted file comes from a single validated project.
-      const gitlab = snykRepositoryClaims(
-        findings.findings[0]?.evidence.source_data,
-      ).some((source) => source.gitlab);
+      const gitlab = findings.findings.length
+        ? snykRepositoryClaims(findings.findings[0]!.evidence.source_data).some(
+            (source) => source.gitlab,
+          )
+        : snykRestReportRepository(findings.report)?.gitlab;
       const key = (url: string) => hostedRepositoryUrlKey(url, github, gitlab);
       if (key(findings.sourceRepositoryUrl) !== key(declared))
         throw new Error(

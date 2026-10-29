@@ -115,6 +115,7 @@ function projectContext(
   declared: unknown,
   isGitHub: (url: string) => boolean,
   repositoryAliases?: unknown,
+  replayingUnrecordedMapping = false,
 ) {
   const { id, name, url: nativeUrl } = record(value, "Semgrep project");
   const project: Project = {
@@ -136,20 +137,22 @@ function projectContext(
   if (native) matchingRepositoryUrl(native, reference, github);
   // Keep the provider's HTTP spelling. An SSH source needs the operator's HTTP(S) mapping.
   const url = native && native === project.url ? native : reference;
+  const { hostname, pathname } = new URL(url);
+  const publicGitHost = isPublicGitHost(hostname);
+  // Older exports omitted equivalent .git mappings. Keep their original evidence
+  // bytes when the caller supplies the mapping again on a publication retry.
+  const omitGitSuffix = publicGitHost || replayingUnrecordedMapping;
   const binding =
     mapping &&
     (!project.url ||
-      repositoryUrlKey(mapping) !== repositoryUrlKey(project.url))
+      repositoryUrlKey(mapping, omitGitSuffix) !==
+        repositoryUrlKey(project.url, omitGitSuffix))
       ? { project, sourceRepositoryUrl: mapping }
       : { project };
   const observed = repositoryAliases !== undefined;
-  const { hostname, pathname } = new URL(url);
   const scmPath = pathname
     .slice(1)
-    .replace(
-      github || isPublicGitHost(hostname) ? /(?:\.git)?\/?$/u : /\/$/u,
-      "",
-    );
+    .replace(github || publicGitHost ? /(?:\.git)?\/?$/u : /\/$/u, "");
   const names = observed
     ? array(repositoryAliases, "Semgrep repository aliases").map((name) =>
         requiredText(name, "Semgrep repository alias"),
@@ -365,6 +368,7 @@ export function normalizePlatformReport(
     input["sourceRepositoryUrl"] ?? declared,
     isGitHub,
     input["repositoryAliases"],
+    input["sourceRepositoryUrl"] == null && declared !== undefined,
   );
   if (declared !== undefined)
     matchingRepositoryUrl(declared, selected.url, selected.github);
@@ -494,5 +498,8 @@ export function normalizePlatformReport(
       ]),
     target,
   );
-  return { ...result, sourceRepositoryUrl: selected.url };
+  return {
+    ...result,
+    sourceRepositoryUrl: selected.binding.sourceRepositoryUrl ?? selected.url,
+  };
 }

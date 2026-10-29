@@ -4,6 +4,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
+import { snykRestReportRepository } from "./snyk-rest-findings.js";
 import { snykRepositoryClaims } from "./snyk-findings.js";
 import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
 import {
@@ -846,7 +847,12 @@ export async function prepareLocalImport(
   const sources = new Map<string, ExternalSourceRepository>();
   const reportUrl = current.sourceRepositoryUrl || undefined;
   if (reportUrl) sources.set(reportUrl, { url: reportUrl });
-  let hostedUrl = reportUrl;
+  const emptyProject =
+    options.provider === "snyk" && !current.findings.length
+      ? snykRestReportRepository(current.report)
+      : undefined;
+  if (emptyProject) sources.set(emptyProject.url, { url: emptyProject.url });
+  let hostedUrl = reportUrl ?? emptyProject?.url;
   const reportPlatform = current.sourceRepositoryPlatform;
   const singleProject = Boolean(
     hostedUrl ||
@@ -856,13 +862,16 @@ export async function prepareLocalImport(
         isSemgrepPlatformReport(evidence.source_data),
       )),
   );
-  let hostedGitLab = options.provider === "snyk" && current.findings.length > 0;
+  let hostedGitLab: boolean | undefined = emptyProject?.gitlab;
   let hostedGitHub: boolean | undefined =
-    reportPlatform === "other" ? false : undefined;
+    reportPlatform === "other"
+      ? false
+      : emptyProject && emptyProject.platform === "github";
   if (
     options.provider === "snyk" &&
     !current.findings.length &&
-    reportPlatform === "github"
+    reportPlatform === "github" &&
+    hostedGitHub === undefined
   )
     hostedGitHub = true;
   for (const { evidence } of current.findings) {
@@ -871,14 +880,15 @@ export async function prepareLocalImport(
     const data = evidence.source_data;
     if (options.provider === "snyk") {
       const claims = snykRepositoryClaims(data);
-      hostedGitLab &&= claims.some((source) => source.gitlab);
+      if (!claims.length) hostedGitLab = false;
       for (const source of claims) {
         sources.set(source.url, { url: source.url });
         if (source.nativeUrl)
           sources.set(source.nativeUrl, { url: source.nativeUrl });
-        if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+        if (data?.["format"] === SNYK_REST_ISSUES_FORMAT) {
           hostedUrl ??= source.url;
-        else if (
+          hostedGitLab = (hostedGitLab ?? true) && source.gitlab === true;
+        } else if (
           !hostedUrl &&
           reportPlatform === "other" &&
           isGitSshRemote(source.url)

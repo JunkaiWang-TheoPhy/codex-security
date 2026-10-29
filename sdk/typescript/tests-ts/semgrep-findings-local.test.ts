@@ -276,6 +276,43 @@ test("local file and normalized imports retain the repository references selecte
   ]);
 });
 
+test("a saved Semgrep .git alias on a custom host retains the selected repository", async () => {
+  const mapping = "https://scm.example.test/team/lib";
+  const project = { ...platformProject, url: mapping + ".git" };
+  const finding = { ...platformFinding(42), repository: { url: project.url } };
+  const report = await collectProject(project, [finding], mapping);
+  expect(report.sourceRepositoryUrl).toBe(mapping);
+  await using fixture = await platformCheckout(project.url);
+  await writeFile(fixture.file, JSON.stringify(report));
+  for (const sourceRepositoryUrl of [undefined, mapping, project.url])
+    await expect(
+      readSemgrepFindings(fixture.file, { sourceRepositoryUrl }),
+    ).rejects.toThrow("does not match");
+  const sourceRepositories = [{ url: mapping, platform: "github" as const }];
+  const expected = await readSemgrepFindings(fixture.file, {
+    sourceRepositories,
+  });
+  expect(expected.sourceRepositoryUrl).toBe(mapping);
+  expect(expected.findings[0]?.evidence.source_data).toMatchObject({
+    project,
+    sourceRepositoryUrl: mapping,
+    finding,
+  });
+  await expect(
+    prepareNormalizedLocalImport(
+      expected,
+      fixture.options,
+      fixture.dependencies,
+    ),
+  ).rejects.toThrow("does not match");
+  const prepared = await prepareLocalExternalImport(
+    fixture.file,
+    fixture.options,
+    { ...fixture.dependencies, sourceRepositories },
+  );
+  expect(prepared.preview.findings).toEqual(expected.findings);
+});
+
 test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {
   const url = "https://scm.example.test/Team/Project";
   await using fixture = await platformCheckout(url.toLowerCase());

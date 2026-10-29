@@ -497,8 +497,13 @@ function savedContext(document: Resource) {
   return {
     source: { ...formatVersion, ...selected, project, target },
     context,
-    platform,
-    nativeUrl,
+    repository: {
+      url: selected.sourceRepositoryUrl,
+      platform,
+      ...(nativeUrl && context.origin === "gitlab" && { gitlab: true }),
+      ...(nativeUrl &&
+        nativeUrl !== selected.sourceRepositoryUrl && { nativeUrl }),
+    },
   };
 }
 
@@ -508,15 +513,17 @@ export function snykRestFindingRepository(sourceData: Resource): {
   nativeUrl?: string;
   gitlab?: boolean;
 } {
-  const { source, context, platform, nativeUrl } = savedContext(sourceData);
+  const { source, repository } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
-  const url = source.sourceRepositoryUrl;
-  return {
-    url,
-    platform,
-    ...(nativeUrl && context.origin === "gitlab" && { gitlab: true }),
-    ...(nativeUrl && nativeUrl !== url && { nativeUrl }),
-  };
+  return repository;
+}
+
+/** Project evidence retained when no finding can carry it. */
+export function snykRestReportRepository(report: Resource | undefined) {
+  const context = report?.["snyk_rest_context"];
+  return context === undefined
+    ? undefined
+    : savedContext(record(context, "Snyk report project context")).repository;
 }
 
 function readIssues(document: Resource, selected: Scope) {
@@ -622,7 +629,7 @@ export function normalizeSnykIssues(
   target: ExternalImportTarget = "cloud",
 ): HostedExternalFindings {
   const document = record(input, "Snyk REST Issues export");
-  const { source, context, platform } = savedContext(document);
+  const { source, context, repository } = savedContext(document);
   const code = source.product === "code";
   const result = normalizeRecords(
     readIssues(document, source),
@@ -699,6 +706,12 @@ export function normalizeSnykIssues(
   return {
     ...result,
     sourceRepositoryUrl: source.sourceRepositoryUrl,
-    ...(platform && { sourceRepositoryPlatform: platform }),
+    ...(repository.platform && {
+      sourceRepositoryPlatform: repository.platform,
+    }),
+    ...(!result.findings.length &&
+      repository.gitlab && {
+        report: { snyk_rest_context: source },
+      }),
   };
 }
