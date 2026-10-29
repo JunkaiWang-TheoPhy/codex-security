@@ -1574,26 +1574,31 @@ test("a bound retry accepts equivalent HTTP path bytes after a catalog rename", 
   expect(cloud.posts[1]).toBe(cloud.posts[0]);
 });
 
-test.each(["retained", "projected", "strict"] as const)(
+test.each([
+  "retained",
+  "projected",
+  "native-only",
+  "strict",
+  "case-folded",
+] as const)(
   "binds a public checkpoint with %s repository evidence before retrying the POST",
   async (kind) => {
+    const { findings, sourceRepositoryUrl } =
+      normalizeSemgrepPlatformFindings(platformReport());
     const source =
       kind === "strict"
         ? "https://scm.example.test/Team/Repo"
-        : "https://github.com/Team/Repo";
-    const cloud = await fixture([], source);
-    const findings = [
-      {
-        source_finding_id: "issue-1",
-        evidence: {
-          title: "Example finding",
-          severity: "high" as const,
-          ...(kind !== "projected" && {
-            details: { kind: "sast" as const, repository: { url: source } },
-          }),
-        },
-      },
-    ];
+        : kind === "case-folded"
+          ? "https://github.com/example/Kit"
+          : sourceRepositoryUrl;
+    const cloud = await fixture(
+      [],
+      kind === "case-folded" ? source.replace("K", "K") : source,
+    );
+    const evidence = findings[0]!.evidence;
+    if (kind !== "native-only") delete evidence.source_data;
+    if (kind === "projected" || kind === "native-only") delete evidence.details;
+    else evidence.details!.repository!.url = source;
     const prepare = (declared: boolean) =>
       prepareNormalizedExternalPublication(
         {
@@ -1627,7 +1632,16 @@ test.each(["retained", "projected", "strict"] as const)(
         })),
       ),
     );
+    if (kind === "native-only") {
+      // The base SDK hashed even opaque native evidence without a repository binding.
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      expect(saved.inputProjection.savedEvidenceDigest).toBe(bare);
+      saved.inputProjection.inputDigest = bare;
+      await writeFile(path, JSON.stringify(saved));
+    }
     expect((await projection()).inputDigest).toBe(bare);
+    if (kind === "case-folded")
+      await expect(prepare(true)).rejects.toThrow("does not match");
     cloud.state.repositoryUrl =
       kind === "strict" ? source.toLowerCase() : source + "-renamed";
     if (kind !== "retained") {
@@ -1642,7 +1656,8 @@ test.each(["retained", "projected", "strict"] as const)(
         digestAtPost = (await projection()).inputDigest;
       return fetch(url, init);
     };
-    const unboundRetry = await prepare(false);
+    const unboundRetry =
+      kind === "native-only" ? undefined : await prepare(false);
     const retry = await prepare(true);
     expect(retry.preview.resumed).toBe(true);
     expect((await projection()).inputDigest).toBe(bare);
@@ -1650,7 +1665,8 @@ test.each(["retained", "projected", "strict"] as const)(
     await expect(retry.publish()).rejects.toThrow("resume the saved request");
     expect(digestAtPost).toMatch(/^[a-f0-9]{64}$/u);
     expect(digestAtPost).not.toBe(bare);
-    await expect(unboundRetry.publish()).rejects.toThrow("does not match");
+    if (unboundRetry)
+      await expect(unboundRetry.publish()).rejects.toThrow("does not match");
     expect(cloud.posts).toHaveLength(2);
     expect((await projection()).inputDigest).toBe(digestAtPost);
     cloud.state.repositoryUrl += "-renamed";
@@ -1757,15 +1773,19 @@ test.each(["snyk-rest-issues/v1", "semgrep-platform-findings/v1"])(
   },
 );
 
-test("historical Semgrep SARIF metadata alone cannot establish the approved repository", async () => {
+test("platform-only Semgrep declarations check retained SARIF provenance before fresh publication and retry", async () => {
   const foreign = "https://github.com/example/foreign";
   const cloud = await fixture();
-  const prepare = (sourceRepositoryUrl?: string) =>
+  const prepare = (
+    sourceRepositoryUrl?: string,
+    sourceRepositoryPlatform?: "github",
+  ) =>
     prepareNormalizedExternalPublication(
       {
         read: 1,
         excluded: [],
         sourceRepositoryUrl,
+        sourceRepositoryPlatform,
         findings: [
           {
             source_finding_id: "sarif",
@@ -1784,10 +1804,14 @@ test("historical Semgrep SARIF metadata alone cannot establish the approved repo
       { ...options, provider: "semgrep" },
       cloud.deps,
     );
+  await expect(prepare(undefined, "github")).rejects.toThrow("does not match");
   const first = await prepare();
   cloud.state.loseResponse = true;
   await expect(first.publish()).rejects.toThrow("resume the saved request");
   await expect(prepare(foreign)).rejects.toThrow("does not match");
+  await expect(prepare(undefined, "github")).rejects.toThrow("does not match");
+  cloud.state.repositoryUrl = foreign;
+  expect((await prepare(undefined, "github")).preview.resumed).toBe(true);
   expect(cloud.posts).toHaveLength(1);
 });
 

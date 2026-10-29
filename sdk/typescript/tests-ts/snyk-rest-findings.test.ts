@@ -958,7 +958,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
   }
 });
 
-test("compares native HTTP repository escapes while preserving Snyk CLI's ambiguous path bytes", () => {
+test("compares unreserved HTTP escapes on public Snyk repository targets", () => {
   const plain = "gitlab.com/Group/my-project";
   const escaped = "gitlab.com/Group/my%2Dproject";
   const check = (native: string, declared: string, origin: string) =>
@@ -980,15 +980,38 @@ test("compares native HTTP repository escapes while preserving Snyk CLI's ambigu
       "http://" + declared,
     );
   }
-  const privateRepo = "git.example.test/Group/my%2Dproject";
-  expect(
-    check("git.example.test/Group/my-project", privateRepo, "cli")
-      .sourceRepositoryUrl,
-  ).toBe("http://" + privateRepo);
-  expect(() => check(privateRepo, privateRepo, "cli")).toThrow("target URL");
-  expect(check(privateRepo, privateRepo, "gitlab").sourceRepositoryUrl).toBe(
-    "http://" + privateRepo,
-  );
+});
+
+test("requires an unambiguous target when Snyk CLI supplies a private repository URL", async () => {
+  const http = "http://git.example.test/team/repo.git";
+  const https = "https://git.example.test/team/repo.git";
+  const report = (
+    remote: string | null,
+    sourceRepositoryUrl: string,
+    origin = "cli",
+  ) => ({
+    ...envelope(),
+    sourceRepositoryUrl,
+    project: project({ origin, remote }),
+  });
+  const ambiguous = report(http, http);
+  const { collect, requests } = transport(document(ambiguous.project));
+  await expect(
+    collect({ ...options, sourceRepositoryUrl: http }),
+  ).rejects.toThrow("target URL");
+  expect(requests).toHaveLength(1);
+  expect(() => normalizeSnykIssues(ambiguous)).toThrow("target URL");
+  expect(() =>
+    snykRestFindingRepository({ ...ambiguous, issue: issue() }),
+  ).toThrow("target URL");
+  for (const source of [
+    report(https, https),
+    report(null, http),
+    report(http, http, "gitlab"),
+  ])
+    expect(normalizeSnykIssues(source).sourceRepositoryUrl).toBe(
+      source.sourceRepositoryUrl,
+    );
 });
 
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {

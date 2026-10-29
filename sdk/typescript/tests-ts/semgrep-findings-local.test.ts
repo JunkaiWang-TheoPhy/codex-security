@@ -278,6 +278,10 @@ test.each([
   "ssh://git@github.com/example/project.git?foreign",
   "ftp://github.com/example/project",
   "https::https://github.com/example/foreign.git",
+  "git@[github.com]:elsewhere/project.git",
+  "git@[github.com:2222]:example/project.git",
+  "git@[github.com:invalid]:example/project.git",
+  "git@github.com?foreign:example/project.git",
   "http::ftp://github.com/example/project",
   "ssh://git@github.com/example/other/../project.git",
   "https://github.com/example/other/%2e%2e/project.git",
@@ -316,6 +320,16 @@ test.each([
     "https://github.com:443/example/project",
   ],
   ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
+  [
+    repositoryUrl,
+    "git@[github.com]:example/project.git",
+    "https://github.com:443/example/project",
+  ],
+  [
+    repositoryUrl,
+    "ssh://git@github.com%2Fexample%2Fproject.git",
+    "https://github.com:443/example/project",
+  ],
   [
     repositoryUrl,
     "ftps::https://github.com:443/example/project.git",

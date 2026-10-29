@@ -492,9 +492,12 @@ async function preparePublicationInput(
           isSemgrepPlatformReport(evidence.source_data),
         )?.evidence.source_data
       : undefined;
-  const declaration =
-    parsed.sourceRepositoryUrl || parsed.sourceRepositoryPlatform === "other";
-  const bound = Boolean(declaration || semgrepProject || hostedSnyk.size);
+  const bound = Boolean(
+    parsed.sourceRepositoryUrl ||
+    parsed.sourceRepositoryPlatform ||
+    semgrepProject ||
+    hostedSnyk.size,
+  );
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
     [...hostedSnyk.values()].some(({ platform }) => platform === "other");
@@ -507,7 +510,10 @@ async function preparePublicationInput(
     parsed.sourceRepositoryUrl ||
     hostedSnyk.values().next().value?.url ||
     (semgrepProject &&
-      semgrepPlatformFindingRepository(semgrepProject, () => !strictPath));
+      semgrepPlatformFindingRepository(semgrepProject, () => !strictPath)) ||
+    (bound &&
+      parsed.findings.find(({ evidence }) => evidence.details?.repository?.url)
+        ?.evidence.details?.repository?.url);
   // A report's own claims must agree even if its approved repository was renamed.
   if (reportSource)
     checkRepositories(
@@ -608,10 +614,11 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
-  // Keep the lookup key stable so a changed declaration cannot stage a second request.
-  const reportUrl =
-    parsed.sourceRepositoryUrl && reportKey(parsed.sourceRepositoryUrl);
-  const binding = strictPath ? ["other", reportUrl ?? null] : reportUrl;
+  // Bind the effective hosted scope without changing the checkpoint lookup key.
+  const binding = bound && [
+    reportSource ? reportKey(reportSource) : null,
+    strictPath,
+  ];
   const digest = (identity: unknown) =>
     hash("sha256", canonicalJson(binding ? [identity, binding] : identity));
   const inputDigest = digest(currentIdentity);
@@ -637,10 +644,9 @@ async function preparePublicationInput(
     const projectionDigest = content.inputProjection?.inputDigest;
     const currentBinding =
       projectionDigest === (legacy ? legacyInputDigest : inputDigest);
-    // Published SDKs hashed only the input evidence; the report binding was outside the checkpoint.
+    // Public SDKs stored an unbound input hash for Snyk and Semgrep.
     const unbound = Boolean(
       binding &&
-      projectionDigest &&
       !currentBinding &&
       projectionDigest ===
         hash(
@@ -655,8 +661,8 @@ async function preparePublicationInput(
           content.inputProjection.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected) &&
-          // Unknown legacy filenames must still block a duplicate. They may never be replayed here.
-          ((!strictPath && !reportUrl) || projection === "unidentified");
+          // Unknown legacy filenames still block duplicate submissions.
+          (!binding || projection === "unidentified");
     if (!matches)
       throw new Error(
         "Saved import evidence does not match the selected input.",
@@ -678,16 +684,15 @@ async function preparePublicationInput(
           "source report repository",
         );
       if (unbound) {
-        // The published SDK checked typed and native hosted URLs against the catalog using GitHub casing.
+        // Older writers checked typed URLs but folded literal Unicode (including K to k).
+        // Raw hosted metadata, non-ASCII witnesses, and strict paths need a live catalog match.
         const provenSource =
           !strictPath &&
           reportSource &&
-          savedFindings.some(
-            ({ evidence }) =>
-              evidence.details?.repository?.url ||
-              isSemgrepPlatformReport(evidence.source_data) ||
-              evidence.source_data?.["format"] === SNYK_REST_ISSUES_FORMAT,
-          );
+          savedFindings.some(({ evidence }) => {
+            const url = evidence.details?.repository?.url;
+            return url && /^\p{ASCII}+$/u.test(url);
+          });
         if (!provenSource) {
           if (reportSource) requireRepository(reportSource, destination.url);
           else {

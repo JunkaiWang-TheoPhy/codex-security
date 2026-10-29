@@ -131,7 +131,6 @@ test.each([
   ["ssh://git%40other%40github.com", false],
   ["ssh://git%3A%40github.com", false],
   ["ssh://git%2540github.com", false],
-  ["ssh://git%40github.com%2Fother", false],
   ["ssh://git%40github.com%3Fquery", false],
   ["ssh://git%40github%09.com", false],
   ["ssh://git@github%2Ecom:2%32", true],
@@ -141,7 +140,6 @@ test.each([
   ["ssh://git@github.com%3A2222", false],
   ["ssh://git@github.com%253A22", false],
   ["ssh://git@github.com%40other", false],
-  ["ssh://git@github.com%2Fother", false],
   ["ssh://git@github.com%23suffix", false],
   ["ssh://g%00it@github.com", false],
   ["ssh://git@github.com ", false],
@@ -174,10 +172,35 @@ test.each([
   ).toBe(matches);
 });
 
+test.each(["git@", "git%40"])(
+  "decodes the first SSH path separator after %s",
+  (login) => {
+    const source = "https://github.com/org/repo";
+    const remote = `ssh://${login}github.com%2Fother/org/repo`;
+    expect(normalizeHostedGitRepositoryUrl(remote, source, false)).toBe(
+      "https://github.com/other/org/repo",
+    );
+    const literal = `ssh://${login}github.com%252Forg/repo`;
+    expect(normalizeHostedGitRepositoryUrl(literal, source, false)).toBe(
+      literal,
+    );
+  },
+);
+
+test.each(["[local/path]:repo", "remote-helper::repo"])(
+  "does not parse %s as SCP",
+  (remote) => {
+    expect(parseGitRemote(remote)).toBeUndefined();
+  },
+);
+
 test("recognizes bracketed IPv6 SCP authorities on a verified Enterprise host", () => {
   const source = "https://[2001:db8::1]/org/repo";
   const remote = "git@[2001:db8::1]:org/repo";
   expect(normalizeHostedGitRepositoryUrl(remote, source, true)).toBe(source);
+  const expanded = "git@[2001:0db8:0:0:0:0:0:1]:org/repo";
+  expect(parseGitRemote(expanded)?.url.hostname).toBe("[2001:db8::1]");
+  expect(normalizeHostedGitRepositoryUrl(expanded, source, true)).toBe(source);
   expect(normalizeHostedGitRepositoryUrl(remote, source, false)).toBe(remote);
   for (const other of [
     "other@[2001:db8::1]:org/repo",

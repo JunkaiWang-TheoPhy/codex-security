@@ -48,10 +48,13 @@ provenance from the Snyk project. When a separately fetched target identifies
 its integration, an SCM project requires a supported integration from the same
 provider family, such as GitHub Enterprise and its GitHub Server App.
 
-Snyk CLI can record both SCP and HTTP remotes as the same HTTP target. On a
-private Git server, `my%2Drepo` can select a literal `%` name over SCP and
-`my-repo` over HTTP. The importer rejects a CLI target when its percent
-escapes leave the repository ambiguous.
+Snyk CLI records HTTP(S) and SSH origins as HTTP targets and drops the SSH
+login. On a custom Git server, a home-relative SSH path can name a different
+repository from the same HTTP path. To replace an ambiguous custom-host export
+for an Open Source project, provide its HTTPS URL with
+[`snyk monitor --remote-repo-url=https://git.example.test/team/repo.git`](https://docs.snyk.io/developer-tools/snyk-cli/commands/monitor#--remote-repo-urlurl)
+and collect from the resulting Snyk project. When Snyk supplies no target URL,
+the collector uses the repository selected with `--source-repository-url`.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.

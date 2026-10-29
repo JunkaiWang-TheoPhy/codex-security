@@ -221,6 +221,8 @@ function matchesCliRepository(remote: string, source: string) {
   const sshEndpoint =
     publicGitSsh443Host(authority) ||
     (isPublicGitHost(hostname) && authority === `${hostname}:22`);
+  // The CLI drops the SSH login, so a private user's home-relative path can look like an HTTP URL.
+  if (!publicWebHost && !sshEndpoint) return false;
   // On an SSH endpoint Git passes the URI-decoded path to upload-pack.
   const sshAlias = sshEndpoint
     ? normalizeHostedGitRepositoryUrl(
@@ -229,8 +231,6 @@ function matchesCliRepository(remote: string, source: string) {
         false,
       )
     : undefined;
-  // A private server may host both literal SCP "my%2Drepo" and HTTP "my-repo".
-  if (!publicWebHost && !sshAlias && /%[\da-f]{2}/iu.test(path)) return false;
   return (
     hostedRepositoryUrlKey(remote) === source ||
     (publicWebHost &&

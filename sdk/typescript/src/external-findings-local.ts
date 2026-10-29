@@ -39,6 +39,7 @@ import {
   gitPathToHttpPath,
   gitTransportBytes,
   isGitHubCloudHost,
+  isGitScpRemote,
   normalizeHostedGitRepositoryUrl,
   parseGitRemote,
 } from "./git-remote.js";
@@ -503,8 +504,9 @@ async function requireMatchingRepository(
           ? helperUrl
           : configured;
       const parsed = remoteRepository(remote, platform, true, key);
+      // A Git SSH address can still name a remote when its host cannot be represented as a URL.
+      hasNetworkRemote ||= Boolean(parsed) || isGitScpRemote(remote);
       if (!parsed) continue;
-      hasNetworkRemote = true;
       // Git's HTTP credentials and default port don't change the checkout repository.
       if (
         httpKey && http.test(remote)
