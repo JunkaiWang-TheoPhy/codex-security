@@ -1,4 +1,7 @@
-import { validateHostedRepositoryUrl } from "./hosted-scanner-http.js";
+import {
+  hostedRepositoryUrl,
+  validateHostedRepositoryUrl,
+} from "./hosted-scanner-http.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
 import { requiredText } from "./scanner-import.js";
@@ -96,10 +99,12 @@ export function snapshotExternalFindings(
     throw new CodexSecurityError(
       "Normalized report repository declarations require the Snyk or Semgrep provider.",
     );
-  if (typeof sourceRepositoryUrl === "string")
-    validateHostedRepositoryUrl(
-      requiredText(sourceRepositoryUrl, "Source repository URL"),
-    );
+  if (typeof sourceRepositoryUrl === "string") {
+    const label = "Source repository URL";
+    if (/^https?:\/\//iu.test(sourceRepositoryUrl))
+      hostedRepositoryUrl(sourceRepositoryUrl, label);
+    else validateHostedRepositoryUrl(requiredText(sourceRepositoryUrl, label));
+  }
   const current: HostedExternalFindings = structuredClone({
     ...rest,
     read,

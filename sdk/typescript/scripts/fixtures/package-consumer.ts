@@ -313,6 +313,9 @@ export async function externalPublication(
     ...options,
     provider: fromFile.preview.source.provider,
   });
+  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
+  prepared.preview.sourceRepositoryPlatform satisfies
+    "github" | "other" | undefined;
   return prepared.publish();
 }
 
@@ -424,6 +427,9 @@ export async function importLocalEvidence(
   options: NormalizedLocalImportOptions,
 ): Promise<StoredExternalFinding[]> {
   const prepared = await prepareNormalizedLocalImport(input, options);
+  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
+  prepared.preview.sourceRepositoryPlatform satisfies
+    "github" | "other" | undefined;
   await prepared.import();
   return listLocalExternalFindings({ repository: options.repository });
 }

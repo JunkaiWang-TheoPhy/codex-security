@@ -30,6 +30,10 @@ import {
   array,
   normalizeRecords,
   positiveInt64,
+  hostedId,
+  hostedWireValue,
+  type HostedNumericFields,
+  restoreHostedNumbers,
   record,
   hostedRepositoryPath,
   requiredText,
@@ -69,6 +73,7 @@ export interface SemgrepPlatformReport {
   repositoryAliases?: string[];
   ref: string;
   product: Product;
+  numericFields?: HostedNumericFields;
   findingCount: number;
   findings: unknown[];
 }
@@ -79,7 +84,10 @@ function productType(value: unknown): Product {
   return value as Product;
 }
 
-function platformId(value: unknown): number | string | undefined {
+function platformId(
+  record: Record<string, unknown>,
+): number | string | undefined {
+  const value = hostedId(record);
   if (typeof value === "string") {
     const id = positiveInt64(value);
     if (id !== undefined)
@@ -89,8 +97,11 @@ function platformId(value: unknown): number | string | undefined {
     return value;
 }
 
-function requiredId(value: unknown, label: string): number | string {
-  const id = platformId(value);
+function requiredId(
+  record: Record<string, unknown>,
+  label: string,
+): number | string {
+  const id = platformId(record);
   if (id === undefined) throw new Error(`${label} must be a positive integer.`);
   return id;
 }
@@ -110,6 +121,33 @@ function matchingRepositoryUrl(
     );
 }
 
+function legacyRepositoryNames(
+  projectName: string,
+  pathname: string,
+  gitSuffix: boolean,
+) {
+  const path = pathname.slice(1);
+  const decoded = path
+    .split("/")
+    .map((segment) => {
+      try {
+        // decodeURI preserves escaped delimiters such as %2F.
+        const label = decodeURI(segment);
+        return label.includes("\\") ? segment : label;
+      } catch {
+        // Git paths may contain non-UTF-8 bytes.
+        return segment;
+      }
+    })
+    .join("/");
+  return [
+    projectName,
+    ...[path, decoded].map((path) =>
+      path.replace(gitSuffix ? /(?:\.git)?\/?$/u : /\/$/u, ""),
+    ),
+  ].flatMap((path) => [path, path.slice(path.lastIndexOf("/") + 1)]);
+}
+
 function projectContext(
   value: unknown,
   declared: unknown,
@@ -117,9 +155,10 @@ function projectContext(
   repositoryAliases?: unknown,
   replayingUnrecordedMapping = false,
 ) {
-  const { id, name, url: nativeUrl } = record(value, "Semgrep project");
+  const original = record(value, "Semgrep project");
+  const { name, url: nativeUrl } = original;
   const project: Project = {
-    id: requiredId(id, "Semgrep project ID"),
+    id: requiredId(original, "Semgrep project ID"),
     name: requiredText(name, "Semgrep project name"),
     url: text(nativeUrl),
   };
@@ -150,17 +189,11 @@ function projectContext(
       ? { project, sourceRepositoryUrl: mapping }
       : { project };
   const observed = repositoryAliases !== undefined;
-  const scmPath = pathname
-    .slice(1)
-    .replace(github || publicGitHost ? /(?:\.git)?\/?$/u : /\/$/u, "");
   const names = observed
     ? array(repositoryAliases, "Semgrep repository aliases").map((name) =>
         requiredText(name, "Semgrep repository alias"),
       )
-    : [project.name, scmPath].flatMap((path) => [
-        path,
-        path.slice(path.lastIndexOf("/") + 1),
-      ]);
+    : legacyRepositoryNames(project.name, pathname, github || publicGitHost);
   return { binding, url, github, names: new Set(names), observed };
 }
 
@@ -244,8 +277,9 @@ export async function collectSemgrepPlatformFindings(
     new URL(`${base}/projects/${encodeURIComponent(name)}`),
   );
   // Collection retains native URLs and the mapping. The importer verifies custom GitHub hosts.
+  const nativeProject = record(lookup["project"], "Semgrep project");
   const selected = projectContext(
-    lookup["project"],
+    nativeProject,
     sourceRepositoryUrl,
     (url) => {
       const host = new URL(url).hostname;
@@ -275,22 +309,31 @@ export async function collectSemgrepPlatformFindings(
   const pageId = (rows: Record<string, unknown>[]) =>
     stableId(
       "page",
-      rows.map((row) => platformId(row["id"]) ?? canonicalJson(row)).sort(),
+      rows
+        .map((row) => platformId(row) ?? canonicalJson(hostedWireValue(row)))
+        .sort(),
     );
   const findings: Record<string, unknown>[] = [];
+  const numericFields: HostedNumericFields = Object.create(null);
+  if (typeof nativeProject["id"] === "number" && typeof project.id === "string")
+    numericFields["project"] = { id: project.id };
   const previousIds = new Set<number | string>();
   for (let page = 0; ; page++) {
     const batch = await readPage(page, true);
-    const ids = batch
-      .map(({ id }) => platformId(id))
-      .filter((id) => id !== undefined);
+    const ids = batch.map(platformId).filter((id) => id !== undefined);
     // Rows with invalid IDs are excluded during import. Still detect a repeated full page of them.
     if (!ids.length && batch.length >= pageSize) ids.push(pageId(batch));
     if (ids.some((id) => previousIds.has(id)))
       throw new Error(
         "Semgrep Platform repeated findings across pages; retry the collection.",
       );
-    for (const finding of batch) findings.push(finding);
+    for (const finding of batch)
+      findings.push(
+        hostedWireValue(finding, numericFields, [
+          "findings",
+          String(findings.length),
+        ]),
+      );
     if (batch.length < pageSize) break;
     for (const id of ids) previousIds.add(id);
   }
@@ -311,6 +354,7 @@ export async function collectSemgrepPlatformFindings(
     product,
     ref,
     findingCount: findings.length,
+    ...(Object.keys(numericFields).length && { numericFields }),
     findings,
   };
 }
@@ -361,6 +405,7 @@ export function normalizePlatformReport(
   isGitHub: (url: string) => boolean = (url) =>
     isVerifiedGitHubRepository(url, options.sourceRepositories),
 ): HostedExternalFindings & { sourceRepositoryUrl: string } {
+  input = restoreHostedNumbers(input);
   const declared = options.sourceRepositoryUrl;
   const deployment = requiredText(input["deployment"], "Semgrep deployment");
   const selected = projectContext(
@@ -478,20 +523,20 @@ export function normalizePlatformReport(
             ...(selected.observed
               ? { repositoryAliases: label ? [label] : [] }
               : {}),
-            finding,
+            finding: hostedWireValue(finding),
           }),
           ...productEvidence,
         },
         target,
       );
     },
-    ({ finding: { id } }) =>
+    ({ finding }) =>
       stableId("semgrep-platform", [
         deployment,
         selected.binding.project.id,
         product,
         ref,
-        requiredId(id, "Semgrep finding ID"),
+        requiredId(finding, "Semgrep finding ID"),
       ]),
     target,
   );

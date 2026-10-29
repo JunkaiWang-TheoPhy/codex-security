@@ -9,6 +9,17 @@ updates it, and what evidence a consumer can use. For setup and confirmation,
 see
 [import vendor findings locally](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
 
+## Numeric fields in hosted exports
+
+The Snyk REST and Semgrep Platform collectors store numeric tokens that would
+lose precision in JavaScript as exact text. The optional `numericFields` object
+mirrors the affected fields and array indices and repeats their numeric text.
+Keep it with the export. The reader uses it to validate a numeric ID as a number
+and a quoted title as text, even when they contain the same digits. Earlier v1
+exports with quoted digits and no marker are read as strings because their
+original JSON type cannot be recovered. Semgrep accepts exact int64 ID strings
+from these exports.
+
 ## Choose the record and source key
 
 A stored source record is scoped to **destination repository + provider + source

@@ -40,8 +40,8 @@ The SDK exposes `collectSemgrepPlatformFindings` and
 `normalizeSemgrepPlatformFindings`. For a custom GitHub Enterprise host, pass
 `{ sourceRepositories: [{ url, platform: "github" }] }` as the second argument
 to `normalizeSemgrepPlatformFindings` or `normalizeSemgrepFindings` after
-independently identifying the repository. Finding IDs retain their exact integer
-value, scoped to deployment, project ID, ref and product. Reimport with the
+independently identifying the repository. Finding IDs retain their [exact integer
+value](schema-guide.md#numeric-fields-in-hosted-exports), scoped to deployment, project ID, ref and product. Reimport with the
 same source key to refresh imported triage, locations or dependency evidence.
 Keep a separate key for CLI scans. Individual API pages and Guardian/MCP
 summaries are unsupported.

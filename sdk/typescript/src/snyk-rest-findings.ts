@@ -22,6 +22,9 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
+  hostedWireValue,
+  type HostedNumericFields,
+  restoreHostedNumbers,
   record,
   hostedRepositoryPath,
   requiredText,
@@ -108,6 +111,7 @@ export interface SnykIssuesExport extends SnykScope {
   apiVersion: typeof apiVersion;
   apiOrigin: string;
   complete: true;
+  numericFields?: HostedNumericFields;
   project: Resource;
   target: Resource | null;
   pages: { startingAfter: string | null; response: Resource }[];
@@ -457,6 +461,7 @@ export async function collectSnykIssues(
         );
   checkTarget(target, selected, context);
   const pages: SnykIssuesExport["pages"] = [];
+  const numericFields: HostedNumericFields = Object.create(null);
   const base = issuesEndpoint(selected);
   const seen = new Set<string>();
   let startingAfter: string | null = null;
@@ -465,7 +470,14 @@ export async function collectSnykIssues(
     if (startingAfter !== null)
       url.searchParams.set("starting_after", startingAfter);
     const response = await get(url, "Snyk issue page");
-    pages.push({ startingAfter, response });
+    pages.push({
+      startingAfter,
+      response: hostedWireValue(response, numericFields, [
+        "pages",
+        String(pages.length),
+        "response",
+      ]),
+    });
     startingAfter = issuePage(response, selected, base, seen).next;
   } while (startingAfter !== null);
   signal?.throwIfAborted();
@@ -473,9 +485,10 @@ export async function collectSnykIssues(
     ...formatVersion,
     ...selected,
     complete: true,
-    project,
-    target,
+    project: hostedWireValue(project, numericFields, ["project"]),
+    target: hostedWireValue(target, numericFields, ["target"]),
     pages,
+    ...(Object.keys(numericFields).length && { numericFields }),
   };
 }
 
@@ -499,7 +512,12 @@ function savedContext(document: Resource) {
         ? "other"
         : undefined;
   return {
-    source: { ...formatVersion, ...selected, project, target },
+    source: {
+      ...formatVersion,
+      ...selected,
+      project: hostedWireValue(project),
+      target: hostedWireValue(target),
+    },
     context,
     repository: {
       url: selected.sourceRepositoryUrl,
@@ -632,7 +650,9 @@ export function normalizeSnykIssues(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): HostedExternalFindings {
-  const document = record(input, "Snyk REST Issues export");
+  const document = restoreHostedNumbers(
+    record(input, "Snyk REST Issues export"),
+  );
   const { source, context, repository } = savedContext(document);
   const code = source.product === "code";
   const result = normalizeRecords(
@@ -674,7 +694,10 @@ export function normalizeSnykIssues(
                 packages: packageEvidence(activeCoordinates, context),
               }),
           source_updated_at: Math.floor(updated / 1000),
-          source_data: structuredClone({ ...source, issue }),
+          source_data: structuredClone({
+            ...source,
+            issue: hostedWireValue(issue),
+          }),
           ...(code && {
             details: {
               kind: "sast",

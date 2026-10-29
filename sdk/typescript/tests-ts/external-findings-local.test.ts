@@ -92,6 +92,10 @@ describe("local normalized scanner findings", () => {
             sourceRepositories: [{ url: declared }],
           },
         );
+      const withUser = url.replace("://", "://user:example@");
+      await expect(prepare(withUser, withUser)).rejects.toThrow(
+        "without credentials",
+      );
       await expect(prepare("", url)).rejects.toThrow("Source repository URL");
       await expect(prepare(foreign, url)).rejects.toThrow("does not match");
       await expect(prepare(url, foreign)).rejects.toThrow("does not match");
@@ -1966,6 +1970,31 @@ describe("local normalized scanner findings", () => {
       await expect(prepare("")).rejects.toThrow("does not match");
     },
   );
+
+  const httpSelector = "https::https://git.example.test/org/lib";
+  const scpPath = "git@git.example.test:org/lib";
+  const sshPath = "ssh://git@git.example.test/org/lib";
+  test.each([
+    [scpPath + "?tenant=B", httpSelector + "?tenant=B"],
+    [scpPath + "#", httpSelector + "#other"],
+    [sshPath + "?tenant=B", httpSelector],
+    [sshPath + "#part", httpSelector],
+    [scpPath + "%3Ftenant=B", httpSelector + "%3Ftenant=B"],
+    [scpPath + "%23part", httpSelector + "%23part"],
+    [
+      "ssh://git.example.test?tenant=B/org/lib",
+      "git@git.example.test:?tenant=B/org/lib",
+    ],
+  ])("keeps the Git target %s distinct from %s", async (url, remote) => {
+    const { repository, environment } = await fixture({ remote });
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        { environment, sourceRepositories: [{ url }] },
+      ),
+    ).rejects.toThrow("does not match");
+  });
 
   test.each([
     ["ftp", "ftp", false],

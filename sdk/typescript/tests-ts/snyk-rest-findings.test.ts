@@ -102,47 +102,58 @@ async function snykCheckout(remote: string, sourceKey = projectId) {
   };
 }
 
-test("retains large JSON integers in Snyk target metadata through collection and replay", async () => {
+test("preserves exact Snyk metadata and distinguishes numeric titles from text through collection and replay", async () => {
+  const digits = "9007199254740993";
   const source = project();
   Object.assign(source.relationships.target.data, {
-    meta: {
-      integration_data: {
-        build: "integer-placeholder",
-        capacity: "exponent-placeholder",
-      },
-    },
+    meta: { integration_data: { build: digits, capacity: "1e400" } },
   });
-  const body = JSON.stringify(document(source))
-    .replace('"integer-placeholder"', "9007199254740993")
-    .replace('"exponent-placeholder"', "1e400");
+  const quoted = issue({ key: "quoted", title: digits });
+  const rows = [
+    quoted,
+    issue({ key: "numeric", title: "numeric-title" }, { id: otherId }),
+  ];
+  const wire = (value: unknown) =>
+    JSON.stringify(value)
+      .replace(/"(build|capacity)":"([^"]+)"/gu, '"$1":$2')
+      .replace('"numeric-title"', digits);
   const report = await transport(
-    new Response(body),
-    document([issue()]),
+    new Response(wire(document(source))),
+    new Response(wire(document(rows))),
   ).collect();
-  const replay = normalizeSnykIssues(report);
+  const result = normalizeSnykIssues(report);
+  const historical = normalizeSnykIssues({
+    ...envelope([quoted]),
+    project: source,
+  });
+  expect(historical.findings[0]?.evidence).toMatchObject({
+    title: digits,
+    source_data: { project: source },
+  });
+  expect(result.findings).toEqual(historical.findings);
+  expect(result.excluded).toEqual([
+    {
+      position: 2,
+      source_finding_id: expect.any(String),
+      reason: expect.stringContaining("Snyk issue title"),
+    },
+  ]);
+
+  const saved = JSON.stringify(report);
+  expect(normalizeSnykIssues(JSON.parse(saved))).toEqual(result);
   const directory = await mkdtemp(join(tmpdir(), "snyk-int64-"));
   try {
     const path = join(directory, "report.json.gz");
-    const wire = JSON.stringify(report).replace(
-      /"(9007199254740993|1e400)"/gu,
-      "$1",
-    );
-    await writeFile(path, gzipSync(wire));
-    expect(await readSnykFindings(path)).toEqual(replay);
+    for (const contents of [
+      saved,
+      wire({ ...envelope(rows), project: source }),
+    ]) {
+      await writeFile(path, gzipSync(contents));
+      expect(await readSnykFindings(path)).toEqual(result);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-  expect(replay.findings[0]?.evidence.source_data?.["project"]).toMatchObject({
-    relationships: {
-      target: {
-        data: {
-          meta: {
-            integration_data: { build: "9007199254740993", capacity: "1e400" },
-          },
-        },
-      },
-    },
-  });
 });
 
 test("collects only one region, org, project and Open Source issue type across JSON:API pages", async () => {
@@ -1545,17 +1556,23 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
     expect(
       (await fixture.prepareNormalized(sca, refs)).preview.findings,
     ).toHaveLength(1);
-  const unsupported = "ssh://deploy@scm.example.test/Owner/project.git";
+  const privateSsh = "ssh://deploy@scm.example.test/Owner/project.git";
   execFileSync("git", [
     "-C",
     fixture.repository,
     "remote",
     "set-url",
     "other",
-    unsupported,
+    privateSsh,
   ]);
   sca.sourceRepositoryPlatform = "other";
+  expect(
+    (await fixture.prepareNormalized(sca, [{ url: privateSsh }])).preview
+      .findings,
+  ).toHaveLength(1);
   await expect(
-    fixture.prepareNormalized(sca, [{ url: unsupported }]),
-  ).rejects.toThrow("HTTP(S)");
+    fixture.prepareNormalized(sca, [
+      { url: privateSsh.replace("deploy@", "reader@") },
+    ]),
+  ).rejects.toThrow("does not match");
 });

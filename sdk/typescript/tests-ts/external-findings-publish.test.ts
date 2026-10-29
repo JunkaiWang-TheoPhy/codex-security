@@ -1570,40 +1570,49 @@ test("hosted Semgrep accepts Enterprise casing against the connected Cloud repos
   await expect(prepare()).rejects.toThrow("does not match");
 });
 
-test("a narrowed Snyk clone spelling cannot resume a broader approval", async () => {
-  const url = "https://scm.example.test/Team/repo";
-  const clone = url + ".git";
-  const cloud = await fixture([], clone);
-  const findings = [url, clone].map(
-    (sourceRepositoryUrl, i) =>
-      normalizeSnykIssues({
-        ...snykRestFixture("open-source", {
-          sourceRepositoryUrl,
-          issues: [snykRestIssue({ key: "issue-" + i })],
-        }),
-        project: snykRestProject({ origin: "gitlab", remote: url }),
-      }).findings[0]!,
-  );
-  findings.push({
-    source_finding_id: "opaque",
-    evidence: { title: "Opaque", severity: "high" },
-  });
-  const prepare = (sourceRepositoryUrl?: string) =>
-    prepareNormalizedExternalPublication(
-      { read: findings.length, excluded: [], findings, sourceRepositoryUrl },
-      { ...options, provider: "snyk" },
-      cloud.deps,
+test.each(["implicit", "explicit"] as const)(
+  "a pending Snyk publication preserves its %s clone spelling approval",
+  async (mapping) => {
+    const url = "https://scm.example.test/Team/repo";
+    const clone = url + ".git";
+    const cloud = await fixture([], clone);
+    const findings = [url, clone].map(
+      (sourceRepositoryUrl, i) =>
+        normalizeSnykIssues({
+          ...snykRestFixture("open-source", {
+            sourceRepositoryUrl,
+            issues: [snykRestIssue({ key: "issue-" + i })],
+          }),
+          project: snykRestProject({ origin: "gitlab", remote: url }),
+        }).findings[0]!,
     );
-  await expect(prepare(url)).rejects.toThrow("does not match");
-  const original = await prepare();
-  cloud.state.loseResponse = true;
-  await expect(original.publish()).rejects.toThrow("resume the saved request");
-  cloud.state.repositoryUrl = "https://scm.example.test/Renamed/repo";
-  await expect(prepare(url)).rejects.toThrow("does not match");
-  expect(cloud.posts).toHaveLength(1);
-  await (await prepare()).publish();
-  expect(cloud.posts[1]).toBe(cloud.posts[0]);
-});
+    findings.push({
+      source_finding_id: "opaque",
+      evidence: { title: "Opaque", severity: "high" },
+    });
+    const prepare = (sourceRepositoryUrl?: string) =>
+      prepareNormalizedExternalPublication(
+        { read: findings.length, excluded: [], findings, sourceRepositoryUrl },
+        { ...options, provider: "snyk" },
+        cloud.deps,
+      );
+    await expect(prepare(url)).rejects.toThrow("does not match");
+    const approved = mapping === "explicit" ? url : undefined;
+    if (approved) cloud.state.repositoryUrl = url;
+    const original = await prepare(approved);
+    cloud.state.loseResponse = true;
+    await expect(original.publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    cloud.state.repositoryUrl = "https://scm.example.test/Renamed/repo";
+    await expect(prepare(approved ? undefined : url)).rejects.toThrow(
+      "does not match",
+    );
+    expect(cloud.posts).toHaveLength(1);
+    await (await prepare(approved)).publish();
+    expect(cloud.posts[1]).toBe(cloud.posts[0]);
+  },
+);
 
 test("a stricter Snyk declaration checks the original GitHub Enterprise target on Cloud", async () => {
   const sourceRepositoryUrl = "https://scm.example.test/Team/project";
@@ -1992,6 +2001,9 @@ test("platform-only Semgrep declarations check retained SARIF provenance before 
       { ...options, provider: "semgrep" },
       cloud.deps,
     );
+  await expect(
+    prepare(foreign.replace("://", "://user:example@")),
+  ).rejects.toThrow("without credentials");
   await expect(prepare("")).rejects.toThrow("Source repository URL");
   await expect(prepare(undefined, "github")).rejects.toThrow("does not match");
   const first = await prepare();
@@ -2150,7 +2162,10 @@ test.each(["semgrep", "snyk"] as const)(
       foreign,
     ]);
     const plain = await mkdtemp(join(local.root, "plain-"));
-    for (const sourceRepositoryUrl of [foreign, ""])
+    for (const [sourceRepositoryUrl, error] of [
+      [foreign, "does not match"],
+      ["", "Source repository URL must be nonempty text"],
+    ] as const)
       for (const repository of [local.repository, plain])
         await expect(
           prepareNormalizedLocalImport(
@@ -2158,7 +2173,7 @@ test.each(["semgrep", "snyk"] as const)(
             { ...localOptions, repository },
             localDeps,
           ),
-        ).rejects.toThrow("does not match");
+        ).rejects.toThrow(error);
   },
 );
 

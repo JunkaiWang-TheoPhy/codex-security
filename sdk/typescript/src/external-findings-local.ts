@@ -104,7 +104,7 @@ export interface LocalExternalImportDependencies {
   sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
-export interface LocalExternalImportPreview extends ExternalFindings {
+export interface LocalExternalImportPreview extends HostedExternalFindings {
   repository: string;
   source: { provider: Provider; source_key: string };
 }
@@ -161,11 +161,10 @@ function remoteRepository(
   const key =
     hostedKey ??
     (provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey);
-  const transport = bound
-    ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
-    : null;
+  const transport = /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(
+    value,
+  );
   const authority = transport?.[1];
-  const http = bound && /^https?:\/\//iu.test(value.trimStart());
   // Git decodes the authority before locating its path. An encoded delimiter
   // cannot prove a match to another spelling through WHATWG URL's hostname.
   if (
@@ -178,7 +177,9 @@ function remoteRepository(
   try {
     remote = parseGitRemote(value);
   } catch {
-    return transport || http ? { key: "\0" + value } : undefined;
+    return bound && (transport || /^https?:\/\//iu.test(value.trimStart()))
+      ? { key: "\0" + value }
+      : undefined;
   }
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
@@ -202,7 +203,20 @@ function remoteRepository(
   const requestSuffix = httpTransport
     ? rawSuffix.replace(/#.*$/su, "#").replace(/\/$/u, "")
     : "";
-  if (!bound) return { key: key(origin + path) + requestSuffix };
+  const requestKey = (path: string) => {
+    const repository = key(origin + path);
+    return requestSuffix
+      ? JSON.stringify([repository, requestSuffix])
+      : repository;
+  };
+  if (!bound) {
+    // SCP passes percent escapes literally. SSH URLs decode reserved path bytes,
+    // including those WHATWG exposes as a query or fragment.
+    if (scpStyle) path = path.replaceAll("%", "%25");
+    else if (ssh || url.protocol === "git:")
+      path = (path + rawSuffix).replace(/%3f/giu, "?").replace(/%23/giu, "#");
+    return { key: requestKey(path) };
+  }
 
   if (!ssh && url.protocol !== "git:") {
     if (httpTransport) {
@@ -217,7 +231,7 @@ function remoteRepository(
         return { key: "\0" + value };
     }
     if (rawSuffix && !httpTransport) return { key: key(origin + path) + "\0" };
-    return { key: key(origin + path) + requestSuffix };
+    return { key: requestKey(path) };
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.

@@ -150,7 +150,7 @@ interface SavedSubmission {
   inspectorProjectMapRequired?: true;
 }
 
-export interface ExternalPublicationPreview extends ExternalFindings {
+export interface ExternalPublicationPreview extends HostedExternalFindings {
   cloudApiUrl: string;
   cloudUrl?: string;
   accountId: string;
@@ -627,17 +627,13 @@ async function preparePublicationInput(
     source,
   ];
   // Bind the effective hosted scope without changing the checkpoint lookup key.
-  const previousBinding = bound && [
+  const binding = bound && [
     reportSource ? reportKey(reportSource) : null,
     strictPath,
+    snyk?.destinationSuffix ?? false,
   ];
-  // Older writers did not distinguish literal and optional clone suffixes in this scope.
-  const binding =
-    previousBinding && snyk?.checkpointSuffix !== undefined
-      ? [...previousBinding, snyk.checkpointSuffix]
-      : previousBinding;
-  const digest = (identity: unknown, selected = binding) =>
-    hash("sha256", canonicalJson(selected ? [identity, selected] : identity));
+  const digest = (identity: unknown) =>
+    hash("sha256", canonicalJson(binding ? [identity, binding] : identity));
   const inputDigest = digest(currentIdentity);
   const legacyInputDigest = digest(legacyIdentity);
   function wasReset(content: SavedSubmission): boolean {
@@ -666,11 +662,6 @@ async function preparePublicationInput(
     const projectionDigest = content.inputProjection?.inputDigest;
     const currentBinding =
       projectionDigest === (legacy ? legacyInputDigest : inputDigest);
-    const legacySuffix =
-      snyk?.checkpointSuffix !== undefined &&
-      !currentBinding &&
-      projectionDigest ===
-        digest(legacy ? legacyIdentity : currentIdentity, previousBinding);
     // Public SDKs stored an unbound input hash for Snyk and Semgrep.
     const unbound = Boolean(
       binding &&
@@ -684,7 +675,7 @@ async function preparePublicationInput(
     const matches =
       content.inputProjection !== undefined
         ? sameFindingSelection(savedFindings, expected) &&
-          (currentBinding || legacySuffix || unbound) &&
+          (currentBinding || unbound) &&
           content.inputProjection.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected) &&
@@ -710,13 +701,6 @@ async function preparePublicationInput(
           reportSource,
           "source report repository",
         );
-      if (legacySuffix && !wasReset(content)) {
-        // The old digest cannot prove a literal approval after the catalog URL changed.
-        requireRepository(parsed.sourceRepositoryUrl, destination.url);
-        content.inputProjection!.inputDigest = legacy
-          ? legacyInputDigest
-          : inputDigest;
-      }
       if (unbound && !wasReset(content)) {
         const provenSource =
           !strictPath &&

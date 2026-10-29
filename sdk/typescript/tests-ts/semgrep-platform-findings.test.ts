@@ -438,6 +438,23 @@ test("preserves .git on custom repository URLs and legacy name-only rows", () =>
   expect(read({ name: "lib.git" }).findings).toHaveLength(1);
 });
 
+test("legacy name-only rows match SCM path segments in plain or URL spelling", () => {
+  const read = (path: string, name: string) =>
+    normalizeSemgrepPlatformFindings({
+      ...platformReport([{ ...platformFinding(1), repository: { name } }]),
+      project: {
+        ...platformProject,
+        name: "scan-module",
+        url: `https://gitlab.com/${path}`,
+      },
+    });
+  const path = "Group/My%2DCaf%C3%A9.git";
+  for (const name of ["Group/My-Café", "My-Café", "My%2DCaf%C3%A9"])
+    expect(read(path, name).findings).toHaveLength(1);
+  expect(() => read("Group/My%2FCaf%C3%A9", "Café")).toThrow("matching source");
+  expect(() => read("Group/My%252DRepo", "My-Repo")).toThrow("matching source");
+});
+
 test("keeps known non-GitHub URLs case-sensitive during collection", async () => {
   for (const host of [
     "gitlab.com",
@@ -462,15 +479,17 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
     "9.223372036854775807e18",
     "9007199254740990.5",
   ];
+  const digits = "9007199254740993";
   const records = ids.map((id) => ({
     ...platformFinding(17),
     id,
-    first_seen_scan_id: "9007199254740993",
+    rule: { name: digits, message: digits },
+    first_seen_scan_id: digits,
   }));
   // Emit int64 fields as JSON numbers without rounding them in the fixture.
   const json = JSON.stringify({ findings: records }).replace(
-    /"([\d.e]{16,})"/gu,
-    "$1",
+    /"(id|first_seen_scan_id)":"([\d.e]+)"/gu,
+    '"$1":$2',
   );
   const report = await collectPages(new Response(json));
   expect(report.findings).toEqual(records);
@@ -478,6 +497,33 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
     JSON.parse(JSON.stringify(report)),
   );
   expect(parsed.excluded).toHaveLength(1);
+  const legacy = normalizeSemgrepPlatformFindings({
+    ...platformReport(records),
+    repositoryAliases: ["project"],
+  });
+  expect(JSON.stringify(parsed.findings)).toBe(JSON.stringify(legacy.findings));
+  expect(parsed.findings[0]!.evidence).toMatchObject({
+    title: digits,
+    description: digits,
+  });
+
+  const numericRule = await collectPages(
+    new Response(
+      json.replace(
+        `"name":"${digits}","message":"${digits}"`,
+        `"name":${digits},"message":${digits}`,
+      ),
+    ),
+  );
+  for (const saved of [numericRule, JSON.parse(JSON.stringify(numericRule))]) {
+    const replay = normalizeSemgrepPlatformFindings(saved);
+    expect(replay.findings).toEqual([parsed.findings[1]!]);
+    expect(replay.excluded[0]).toMatchObject({
+      position: 1,
+      source_finding_id: parsed.findings[0]!.source_finding_id,
+      reason: expect.stringContaining("title"),
+    });
+  }
   const canonical = normalizeSemgrepPlatformFindings(
     platformReport([{ ...records[1], id: "9223372036854775807" }]),
   );
@@ -494,6 +540,36 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
       findings: [report.findings[0]],
     }),
   ).toThrow("Incomplete");
+});
+
+test("validates numeric field markers against the saved finding's own values", () => {
+  const digits = "9007199254740993";
+  const metadata = { ["__proto__"]: digits, label: "ordinary text" };
+  const row = { ...platformFinding(17), metadata };
+  const saved = (fields: unknown) =>
+    JSON.parse(
+      JSON.stringify({
+        ...platformReport([row]),
+        numericFields: { findings: { 0: fields } },
+      }),
+    );
+  for (const fields of [
+    { missing: digits },
+    { ["__proto__"]: {} },
+    { metadata: { label: metadata.label } },
+    { metadata: { ["__proto__"]: "9007199254740995" } },
+  ])
+    expect(() => normalizeSemgrepPlatformFindings(saved(fields))).toThrow(
+      /scanner (?:number|numeric)/iu,
+    );
+
+  const input = saved({ metadata: { ["__proto__"]: digits } });
+  const original = JSON.stringify(input);
+  const { findings } = normalizeSemgrepPlatformFindings(input);
+  expect(JSON.stringify(findings[0]!.evidence.source_data?.["finding"])).toBe(
+    JSON.stringify(row),
+  );
+  expect(JSON.stringify(input)).toBe(original);
 });
 
 test("rejects wrong repository or ref even on rows otherwise excluded; excludes ambiguous and unsafe integer IDs", async () => {

@@ -61,8 +61,7 @@ uses the repository selected with `--source-repository-url`.
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.
 The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
-can replay it offline. The export stores integers outside JavaScript’s safe
-range as their original numeric text. Keep the same source key across exports. The importer
+can replay it offline. The export preserves [exact numeric values and their types](schema-guide.md#numeric-fields-in-hosted-exports). Keep the same source key across exports. The importer
 uses Snyk's issue key within the API origin, organization, project and product
 to identify updates. Duplicate keys in one export are excluded.
 

@@ -115,30 +115,114 @@ export function positiveInt64(source: string): string | undefined {
   if (length < 19 || id <= "9223372036854775807") return id;
 }
 
+/** Sparse witness for original JSON numbers encoded as exact text in hosted exports. */
+export interface HostedNumericFields {
+  [key: string]: string | HostedNumericFields;
+}
+const numberFields = new WeakMap<object, HostedNumericFields>();
+
+function exactNumber(key: string, value: number, token?: string): boolean {
+  return (
+    !Number.isFinite(value) ||
+    (Number.isInteger(value) &&
+      (!Number.isSafeInteger(value) ||
+        (key === "id" &&
+          value > 0 &&
+          token !== undefined &&
+          token !== String(value) &&
+          !positiveInt64(token))))
+  );
+}
+
 export function parseHostedScannerJson(source: string): unknown {
+  if (!possiblyUnsafeJsonNumber.test(source)) return JSON.parse(source);
   return JSON.parse(
     source,
-    (key, value: unknown, context?: { source?: string }) => {
-      if (
-        typeof value === "number" &&
-        (!Number.isFinite(value) ||
-          (Number.isInteger(value) && !Number.isSafeInteger(value)))
-      )
-        return requiredText(context?.source, "Exact scanner numeric value");
-      // A fractional ID can round to a positive safe integer in the initial parse.
-      if (
-        key === "id" &&
-        typeof value === "number" &&
-        Number.isInteger(value) &&
-        value > 0
-      ) {
-        const token = context?.source;
-        if (token && token !== String(value) && !positiveInt64(token))
-          return token;
+    function (
+      this: object,
+      key,
+      value: unknown,
+      context?: { source?: string },
+    ) {
+      const token = context?.source;
+      const field =
+        typeof value === "number" && exactNumber(key, value, token)
+          ? requiredText(token, "Exact scanner numeric value")
+          : value && typeof value === "object"
+            ? numberFields.get(value)
+            : undefined;
+      if (field !== undefined) {
+        const fields: HostedNumericFields =
+          numberFields.get(this) ?? Object.create(null);
+        fields[key] = field;
+        numberFields.set(this, fields);
       }
       return value;
     },
   );
+}
+
+/** Semgrep's int64 IDs can also be supplied as text in saved exports. */
+export function hostedId(record: Record<string, unknown>): unknown {
+  return numberFields.get(record)?.["id"] ?? record["id"];
+}
+
+function mapNumbers(data: unknown, fields: unknown, encode: boolean): object {
+  if (!data || typeof data !== "object" || !isRecord(fields))
+    throw new Error("Invalid scanner numeric fields.");
+  const copy = Array.isArray(data) ? [...data] : { ...data };
+  const values = copy as Record<string, unknown>;
+  const restored = {
+    ...numberFields.get(data),
+    ...fields,
+  } as HostedNumericFields;
+  for (const [key, field] of Object.entries(fields)) {
+    if (!Object.hasOwn(copy, key))
+      throw new Error(
+        "Incomplete scanner export: invalid scanner numeric field.",
+      );
+    if (typeof field === "string") {
+      if (
+        !encode &&
+        (values[key] !== field ||
+          !/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/iu.test(field) ||
+          !exactNumber(key, Number(field), field))
+      )
+        throw new Error("Invalid exact scanner number.");
+      values[key] = encode ? field : Number(field);
+    } else {
+      const child = mapNumbers(values[key], field, encode);
+      values[key] = child;
+      if (!encode) restored[key] = numberFields.get(child)!;
+    }
+  }
+  if (!encode) numberFields.set(copy, restored);
+  return copy;
+}
+
+export function hostedWireValue<T>(
+  data: T,
+  metadata?: HostedNumericFields,
+  path: string[] = [],
+): T {
+  const fields = data && typeof data === "object" && numberFields.get(data);
+  if (!fields) return data;
+  if (metadata) {
+    for (const key of path.slice(0, -1))
+      metadata = (metadata[key] ??= Object.create(null)) as HostedNumericFields;
+    metadata[path.at(-1)!] = fields;
+  }
+  return mapNumbers(data, fields, true) as T;
+}
+
+export function restoreHostedNumbers(
+  report: Record<string, unknown>,
+): Record<string, unknown> {
+  const fields = report["numericFields"];
+  if (fields === undefined) return report;
+  if (!isRecord(fields) || Object.hasOwn(fields, "numericFields"))
+    throw new Error("Invalid scanner numeric fields.");
+  return mapNumbers(report, fields, false) as Record<string, unknown>;
 }
 
 // Sixteen mantissa digits may lose precision even if the parsed integer is safe.

@@ -225,19 +225,13 @@ export function snykRepositoryScope(input: HostedExternalFindings) {
     ?.url;
   // With no header, an unbound sibling can use either spelling if both were
   // explicitly selected by GitLab projects that match the same repository.
-  const gitlabDestination = gitlab && !literalUrls.size;
-  // An older checkpoint with a different explicit URL already has a distinct digest.
-  const selectableSuffix =
-    gitlabDestination &&
-    unbound &&
-    sourceUrl !== undefined &&
-    (!input.sourceRepositoryUrl ||
-      hostedRepositoryUrlKey(input.sourceRepositoryUrl) ===
-        hostedRepositoryUrlKey(sourceUrl)) &&
-    new Set(projects.map(({ url }) => hostedRepositoryUrlKey(url))).size > 1;
   const destinationSuffix =
-    gitlabDestination &&
-    (!unbound || (selectableSuffix && !input.sourceRepositoryUrl));
+    gitlab &&
+    !literalUrls.size &&
+    (!unbound ||
+      (!input.sourceRepositoryUrl &&
+        new Set(projects.map(({ url }) => hostedRepositoryUrlKey(url))).size >
+          1));
   // Unbound siblings keep the destination literal. They do not invalidate a verified
   // project's own clone alias or another finding's independently checkable URL.
   return {
@@ -246,7 +240,6 @@ export function snykRepositoryScope(input: HostedExternalFindings) {
     claims,
     sourceUrl,
     destinationSuffix,
-    checkpointSuffix: selectableSuffix ? destinationSuffix : undefined,
     allowsSuffix: (url?: string | null) =>
       gitlab &&
       (url == null
