@@ -1,15 +1,15 @@
-<!-- release-version: 0.7.0 -->
+<!-- release-version: 0.8.1 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.7.0 adds optional post-scan validation and improves Deep Scan recovery, usage reporting, and saved results. Review the upgrade notes for changes to external imports, hosted verification, and direct helper integrations.
+Codex Security 0.8.1 improves scan output reliability and adds two ways to move findings between tools.
 
-- **Post-scan validation.** Add `--validate` to run a supplemental validation pass after a scan and save a separate `validation.md` report. This pass makes additional model calls, leaves the saved findings and `--fail-on-severity` decision unchanged, and cannot be combined with `--max-cost`, a configured cost cap, `--dry-run`, or `--mock`. See [validation options](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#follow-up-finding-validation).
-- **Deep Scan recovery.** Deadline recovery retains unfinished checkpoints and worker coverage, retries keep selected results stable, and the CLI waits for the coordinator to finish before returning. Scan finalization preserves findings and honors project budgets.
-- **Clearer usage and progress.** Scan output distinguishes file inventory from review progress and reports usage timestamps and account allowance. Large usage receipts, policy files, checkpoints, failure diagnostics, and reviewed feedback are retained.
-- **Owner reports and saved results.** Scan owner reports are finalized without an extra model call. Saved findings remain consistent through recovery, SARIF exports retain run warnings, and report rendering preserves literal source paths and text.
+- **Scan output.** Scan directories preserve trailing hyphens in repository names. Hosted Linux path scans keep temporary file lists out of captured output when private state storage is available. If a sealed file changes after validation, the hosted SDK returns a failed receipt with no artifacts.
+- **Dependabot imports.** With external imports enabled, import saved GitHub Dependabot alerts with `publish findings FILE --provider github`. Alerts keep their individual identities across imports, even when they share an advisory. See the [Dependabot import guide](https://github.com/openai/codex-security/blob/npm-v0.8.1/docs/scanner-imports/github-dependabot.md).
+- **ServiceNow exports.** Export saved findings as a CSV for Manual AVIT Ingestion using `--export-format servicenow-avit` and `--avit-template`. See the [application template](https://github.com/openai/codex-security/blob/npm-v0.8.1/examples/servicenow-avit-template.csv).
+- **Wolfi containers.** A manual release workflow can publish a versioned Linux amd64 scanner image with an SPDX software bill of materials. See the [Wolfi image guide](https://github.com/openai/codex-security/blob/npm-v0.8.1/docker/wolfi/README.md).
 
 <!-- release-section: highlights:end -->
 
@@ -17,24 +17,6 @@ Codex Security 0.7.0 adds optional post-scan validation and improves Deep Scan r
 
 ## Upgrade notes
 
-- **External imports require opt-in.** Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` before using `publish findings`, `findings imported`, `import github-advisories`, or the corresponding SDK operations. Only the literal value `1` enables these features. SDK callers that supply `dependencies.environment` must include the flag there. Previously imported records are retained. See [external import setup](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#import-vendor-findings-locally).
-- **Hosted verification uses the CLI verdict contract.** Remove imports of `FindingVerificationCheck` and replace reads of `verification.checks` with `verification.status` and `verification.evidence`. The original executor report, when supplied, remains available in `execution.finalResponse`. Update custom executors to return the matching finding `id`, a status of `fixed`, `still_vulnerable`, or `inconclusive`, and nonempty evidence. See [the hosted remediation contract](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/hosted-remediation.md).
-- **Direct inventory helper calls move to Node.** Integrations that invoke the removed Python inventory and ranking scripts must use the bundled launcher and its `--helper` commands below. SDK and MCP callers use the new implementation automatically; the inventory and ranking artifact formats are unchanged.
-- **Committed-diff scans require a clean, full checkout.** Check out the requested head revision and commit or stash local changes before running a committed-diff scan, including with `--validate`. A mismatched checkout or local changes now fail before scanning. See [scan options](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#scan-options-and-output).
-
-<details>
-<summary>Direct helper migration</summary>
-
-Use `launch_codex_security_mcp` from the bundled plugin's `scripts` directory, or `launch_codex_security_mcp.cmd` on Windows, with the existing arguments after the helper name:
-
-| Removed Python invocation | Launcher arguments |
-| --- | --- |
-| `generate_in_scope_files.py` | `--helper generate-in-scope-files` |
-| `generate_rank_input.py make-repo-scope-input` | `--helper make-repo-scope-input` |
-| `generate_rank_input.py make-diff-rank-input` | `--helper make-diff-rank-input` |
-
-The removed `rank_preview.py` implementation is incorporated into these helpers. See [diff helper examples and Windows quoting](https://github.com/openai/codex-security/blob/npm-v0.7.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md).
-
-</details>
+No additional migration steps are documented for this release.
 
 <!-- release-section: upgrades:end -->
