@@ -173,8 +173,8 @@ try {
 
 Omitting `outputDir` saves results in the private Codex Security state directory.
 To choose another location, use a new or empty directory outside the scanned
-repository and its enclosing Git worktree. On macOS and Linux, an existing output
-directory must be private to you (`chmod 700`).
+repository and its enclosing Git worktree. Existing output directories keep their
+permissions; newly created directories are private to you by default.
 
 ### Read results
 
@@ -645,10 +645,10 @@ for issue creation.
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
 to enable `publish findings`, `findings imported`, `import github-advisories`,
-`import snyk` and `import semgrep`, and the SDK's external publication, local
-import/readback and hosted acquisition APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
-SDK callers can supply the flag through the existing per-call
-`dependencies.environment`. Pure normalizers and file readers remain available.
+`import snyk` and `import semgrep`. The flag enables the SDK's external
+publication, local import/readback and hosted acquisition APIs. SDK callers
+can set it in the per-call `dependencies.environment`. Pure normalizers and
+file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
@@ -666,6 +666,12 @@ the same acquisition format for repeat imports: SARIF and CSV are compatibility
 options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+For Amazon Inspector Code Security, use `--provider inspector` with a complete
+ListFindings JSON export and `--source-repository-url`. When the export identifies
+the repository by an ARN and name, pass `--inspector-project-arn ARN` with the ARN
+you verified for that Git URL in the SCM integration. See the
+[Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
 
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
@@ -692,10 +698,13 @@ Use `publish findings FILE --to local --repository PATH --provider wiz
 database. Preview with `--dry-run --format json`, then confirm interactively or
 use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
 repository defaults to the current directory. No Cloud login or model call is
-needed. Use `--provider snyk` for a hosted REST collection, native CLI JSON,
-a Snyk plugin SCA bundle or Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
-target; switching formats creates separate source identities. See
-[local imports](docs/cli.md#import-vendor-findings-locally).
+needed. See [local imports](docs/cli.md#import-vendor-findings-locally).
+
+Use `collectSnykIssues` or `collectSemgrepPlatformFindings` to save a monitored
+project's findings, then import the report with `--provider snyk` or
+`--provider semgrep`. The [Snyk](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md)
+and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md)
+guides also cover fresh scans and supported file formats.
 
 Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
 accepted as a lossy compatibility format. See
@@ -722,10 +731,6 @@ argument's `sourceRepositories` when they are absent from
 reports carry this platform in their repository inventory. If you export only the
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
-
-Use `collectSnykIssues` or `collectSemgrepPlatformFindings` to collect existing
-findings into a replayable report. See the [Snyk](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md)
-and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) guides for supported formats.
 
 ## Findings storage and deduplication
 

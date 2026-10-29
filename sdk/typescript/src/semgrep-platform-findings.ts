@@ -19,6 +19,7 @@ import {
   record,
   relativePath,
   requiredText,
+  scannerSeverity,
   stableId,
   strings,
   text,
@@ -155,13 +156,11 @@ export async function collectSemgrepPlatformFindings(
       await getHostedJson(url, `Bearer ${token}`, http, parsePlatformJson),
       "Semgrep API response",
     );
+  const { sourceRepositoryUrl } = options;
   const lookup = await get(
     new URL(`${base}/projects/${encodeURIComponent(name)}`),
   );
-  const project = projectContext(
-    lookup["project"],
-    options.sourceRepositoryUrl,
-  );
+  const project = projectContext(lookup["project"], sourceRepositoryUrl);
   if (project.name !== name)
     throw new Error("Semgrep returned a different project than requested.");
   const url = new URL(`${base}/findings`);
@@ -210,12 +209,6 @@ export function isSemgrepPlatformReport(
   return isRecord(input) && input["format"] === format;
 }
 
-export function semgrepPlatformRepository(
-  input: Record<string, unknown>,
-): string {
-  return projectContext(input["project"]).url;
-}
-
 export function semgrepPlatformFindingRepository(
   input: unknown,
 ): string | undefined {
@@ -233,7 +226,7 @@ export function normalizeSemgrepPlatformFindings(
   input: unknown,
   declared?: string,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+): ExternalFindings & { sourceRepositoryUrl: string } {
   if (!isSemgrepPlatformReport(input))
     throw new Error("Expected a complete Semgrep Platform export.");
   const deployment = requiredText(input["deployment"], "Semgrep deployment");
@@ -246,7 +239,7 @@ export function normalizeSemgrepPlatformFindings(
       "Incomplete Semgrep Platform export: finding count does not match.",
     );
   const context = { format, deployment, project, ref, product };
-  return normalizeRecords(
+  const result = normalizeRecords(
     findings.map((finding) => scopedFinding(finding, project, ref)),
     (finding, id) => {
       const location = record(
@@ -260,7 +253,6 @@ export function normalizeSemgrepPlatformFindings(
           : null;
       const rule = record(finding["rule"] ?? {}, "Semgrep rule");
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
-      const severity = text(finding["severity"]);
       let productEvidence;
       if (product === "sca") {
         const {
@@ -324,11 +316,7 @@ export function normalizeSemgrepPlatformFindings(
         evidence: validateExternalEvidence(
           {
             description: text(rule["message"]) ?? text(finding["rule_message"]),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
+            severity: scannerSeverity(text(finding["severity"])),
             locations: path ? [{ path, line }] : [],
             branch: ref,
             source_data: structuredClone({ ...context, finding }),
@@ -348,4 +336,5 @@ export function normalizeSemgrepPlatformFindings(
       ]),
     target,
   );
+  return { ...result, sourceRepositoryUrl: project.url };
 }

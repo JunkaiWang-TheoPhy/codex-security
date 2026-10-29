@@ -25,7 +25,7 @@ import { temporaryDirectory } from "./support/temporary-directories.js";
 const repositoryUrl = "https://github.com/example/project";
 const formats = ["JSON", "SARIF"] as const;
 
-test("a saved Platform collection replays in SQLite and a foreign empty collection fails provenance", async () => {
+test("a saved Platform collection replays and updates unassessed findings in SQLite", async () => {
   const fixture = await localFindingsFixture({ remote: repositoryUrl });
   try {
     const file = join(fixture.root, "platform.json.gz");
@@ -58,16 +58,34 @@ test("a saved Platform collection replays in SQLite and a foreign empty collecti
       assessment: { state: "not_assessed" },
       evidence: { details: { source_status: "fixed" } },
     });
-    const empty = platformReport([]);
-    await writeFile(
-      file,
-      JSON.stringify({
-        ...empty,
-        project: { ...empty.project, url: "https://github.com/other/project" },
-      }),
-    );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("an empty Platform report binds file and normalized imports to the literal Git remote", async () => {
+  // Git sends the query as part of the SSH path to upload-pack.
+  const fixture = await localFindingsFixture({
+    remote: "ssh://git@github.com/example/project.git?foreign",
+  });
+  try {
+    const file = join(fixture.root, "empty.json");
+    await writeFile(file, JSON.stringify(platformReport([])));
+    const options = {
+      provider: "semgrep" as const,
+      repository: fixture.repository,
+      sourceKey: "platform",
+    };
+    const dependencies = { environment: fixture.environment };
     await expect(
       prepareLocalExternalImport(file, options, dependencies),
+    ).rejects.toThrow("does not match");
+    await expect(
+      prepareNormalizedLocalImport(
+        await readSemgrepFindings(file),
+        options,
+        dependencies,
+      ),
     ).rejects.toThrow("does not match");
   } finally {
     await fixture.dispose();

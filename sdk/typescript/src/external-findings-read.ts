@@ -7,16 +7,12 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { repositoryUrlKey } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings, snykReportRepositoryUrls } from "./snyk-findings.js";
-import { normalizeSemgrepFindings } from "./semgrep-findings.js";
-import {
-  isSemgrepPlatformReport,
-  semgrepPlatformRepository,
-} from "./semgrep-platform-findings.js";
-import { readScannerJson } from "./scanner-import.js";
+import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readInspectorFindings } from "./inspector-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -30,6 +26,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   opengrep: "semgrep",
   endor: "endor",
   github: "github",
+  inspector: "inspector",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -42,6 +39,7 @@ export const EXTERNAL_FINDINGS_READERS = Object.keys(
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -50,7 +48,6 @@ export interface ReadExternalFindings {
   /** Preserve previous Wiz projections when resuming immutable Cloud requests. */
   publication?: ExternalPublicationInput;
   sourceRepositories?: ExternalSourceRepository[];
-  reportRepositoryUrl?: string;
 }
 
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
@@ -67,35 +64,35 @@ export async function readExternalFindings(
         { sourceRepositoryUrl },
         target,
       ),
-      reportRepositoryUrl: sourceRepositoryUrl,
+      sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
-    if (
-      findings.sourceRepositoryUrl &&
-      options.sourceRepositoryUrl &&
-      repositoryUrlKey(findings.sourceRepositoryUrl) !==
-        repositoryUrlKey(options.sourceRepositoryUrl)
-    )
-      throw new Error(
-        "Snyk REST source repository does not match the declared source repository URL.",
-      );
+    if (findings.sourceRepositoryUrl) {
+      if (
+        options.sourceRepositoryUrl &&
+        repositoryUrlKey(findings.sourceRepositoryUrl) !==
+          repositoryUrlKey(options.sourceRepositoryUrl)
+      )
+        throw new Error(
+          "Snyk REST source repository does not match the declared source repository URL.",
+        );
+      return { findings };
+    }
     return {
       findings,
-      reportRepositoryUrl: findings.sourceRepositoryUrl,
-      sourceRepositories: snykReportRepositoryUrls(findings).map((url) => ({
-        url,
-      })),
+      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
+        snykRepositoryUrls(evidence.source_data, {
+          normalizeGitRemote: false,
+        }).map((url) => ({ url })),
+      ),
     };
   }
   if (options.provider === "semgrep") {
-    const report = await readScannerJson(path);
-    const findings = normalizeSemgrepFindings(
-      report,
-      {
-        sourceRepositoryUrl: options.sourceRepositoryUrl,
-      },
+    const findings = await readSemgrepFindings(
+      path,
+      { sourceRepositoryUrl: options.sourceRepositoryUrl },
       target,
     );
     const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
@@ -113,10 +110,7 @@ export async function readExternalFindings(
           )
         : [];
     });
-    const reportRepositoryUrl = isSemgrepPlatformReport(report)
-      ? semgrepPlatformRepository(report)
-      : options.sourceRepositoryUrl;
-    return { findings, sourceRepositories, reportRepositoryUrl };
+    return { findings, sourceRepositories };
   }
   if (options.provider === "endor") {
     const parsed = await readEndorFindings(path, target);
@@ -131,6 +125,18 @@ export async function readExternalFindings(
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
+  if (options.provider === "inspector") {
+    const url = options.sourceRepositoryUrl ?? "";
+    return {
+      findings: await readInspectorFindings(
+        path,
+        url,
+        target,
+        options.inspectorProjectMap,
+      ),
+      sourceRepositories: [{ url }],
+    };
+  }
   const publication = await readVendorFindingsForPublication(path, target);
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(

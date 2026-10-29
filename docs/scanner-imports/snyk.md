@@ -12,21 +12,20 @@ environment. Snyk requires Enterprise API access and the token permissions
 [API authentication](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
 and [Issues API](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
 
-Set `ORG_UUID` and `PROJECT_UUID` to the selected IDs. For Open Source, choose
-the manifest project. For Code, choose the `sast` project and set
-`product=code` below. Use the project's canonical HTTP(S) Git URL.
+To collect Open Source issues, set `ORG_UUID` and `PROJECT_UUID` to the
+organization and manifest project IDs. Supply the project's HTTP(S) Git URL.
 
 ```sh
-product=open-source
 codex-security import snyk "$PROJECT_UUID" --snyk-org "$ORG_UUID" \
-  --snyk-product "$product" --source-repository-url https://github.com/example/project \
+  --source-repository-url https://github.com/example/project \
   --format json > snyk-hosted.json &&
 codex-security publish findings snyk-hosted.json --provider snyk --to local \
-  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/$product" --dry-run
+  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/open-source" --dry-run
 ```
 
-The defaults are `open-source` and `https://api.snyk.io`. Use `--snyk-api-origin`
-for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
+For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
+separate source key. The default API origin is `https://api.snyk.io`. Use
+`--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
 The collector checks the selected repository URL against the project target
 when Snyk supplies one. For GitHub SCM projects, a standard SSH target can match
 the selected GitHub Enterprise HTTPS URL. Other custom-host mappings require
@@ -34,8 +33,7 @@ matching repository URLs.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.
-Only publish a successful collection. The SDK's `collectSnykIssues` returns the
-same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
+The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
 can replay it offline. Keep the same source key across exports. The importer
 uses Snyk's issue key within the API origin, organization, project and product
 to identify updates. Duplicate keys in one export are excluded.

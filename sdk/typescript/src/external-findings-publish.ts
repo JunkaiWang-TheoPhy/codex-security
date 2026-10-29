@@ -37,9 +37,11 @@ import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import type {
-  ExternalFindings,
-  ExternalPublicationInput,
+import { inspectorReportRepository } from "./inspector-findings.js";
+import {
+  snapshotImportOptions,
+  type ExternalFindings,
+  type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -65,6 +67,8 @@ export interface NormalizedExternalPublicationOptions {
   repository: string;
   provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 /** File readers accept the vendor formats installed in this SDK. */
@@ -131,6 +135,7 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
+  inspectorProjectMapRequired?: true;
 }
 
 export interface ExternalPublicationPreview extends ExternalFindings {
@@ -173,6 +178,7 @@ function sameSubmission(
 ): boolean {
   return (
     left.accountId === right.accountId &&
+    left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -350,19 +356,15 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
   const parsed = await abortable(
-    () => readExternalFindings(path, options),
+    () => readExternalFindings(path, settings),
     dependencies.signal,
   );
-  const normalizedOptions = {
-    ...options,
-    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
-  };
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
-    normalizedOptions,
+    { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
-    parsed.reportRepositoryUrl,
   );
 }
 
@@ -374,9 +376,10 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   dependencies.signal?.throwIfAborted();
+  const settings = snapshotImportOptions(options);
   return preparePublicationInput(
     normalizedPublicationInput(input),
-    options,
+    settings,
     dependencies,
   );
 }
@@ -428,8 +431,8 @@ async function preparePublicationInput(
   input: ExternalPublicationInput,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
-  reportRepositoryUrl?: string,
 ): Promise<PreparedExternalPublication> {
+  const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void => {
     try {
       dependencies.onProgress?.(event);
@@ -735,47 +738,63 @@ async function preparePublicationInput(
       }
     }
   }
-  let requests = saved?.requests;
-  if (!requests) {
-    if (
-      reportRepositoryUrl &&
-      cloudRepositoryUrlKey(reportRepositoryUrl) !==
-        cloudRepositoryUrlKey(destination.url)
-    )
-      throw new CodexSecurityError(
-        `Source report belongs to ${JSON.stringify(reportRepositoryUrl)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}.`,
-      );
-    for (const finding of parsed.findings) {
-      const sourceRepositories = [
-        finding.evidence.details?.repository?.url,
+  if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
+    throw new CodexSecurityError(
+      "Supply the verified Inspector project binding again to resume.",
+    );
+
+  function checkRepositories(findings: ExternalFindings["findings"]) {
+    // Validated non-Inspector checkpoints retain their original provider and repository ID.
+    if (saved && options.provider !== "inspector") return;
+    const binding = inspectorReportRepository(
+      options.provider,
+      findings,
+      "cloud",
+      inspectorProjectMap,
+    );
+    function requireDestination(url: string | null | undefined, id?: string) {
+      if (
+        url &&
+        cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url)
+      ) {
+        const label =
+          id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
+        throw new CodexSecurityError(
+          `${label} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+        );
+      }
+    }
+    if (!saved) requireDestination(parsed.sourceRepositoryUrl);
+    if (binding) requireDestination(binding.url, binding.findingId);
+    for (const finding of findings) {
+      const { source_finding_id: id, evidence } = finding;
+      const urls = [
+        evidence.details?.repository?.url,
         options.provider === "semgrep"
-          ? semgrepPlatformFindingRepository(finding.evidence.source_data)
+          ? semgrepPlatformFindingRepository(evidence.source_data)
           : undefined,
-        ...(options.provider === "wiz"
-          ? [wizCsvRepositoryUrl(finding.evidence)]
-          : []),
+        ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
         ...(options.provider === "snyk"
-          ? snykRepositoryUrls(finding.evidence.source_data, {
+          ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
             })
           : []),
         ...(options.provider === "endor"
-          ? endorRepositoryUrls(finding.evidence.source_data)
+          ? endorRepositoryUrls(evidence.source_data)
           : []),
         options.provider === "github"
           ? dependabotRepository(finding)
           : undefined,
       ];
-      for (const sourceRepository of sourceRepositories)
-        if (
-          sourceRepository &&
-          cloudRepositoryUrlKey(sourceRepository) !==
-            cloudRepositoryUrlKey(destination.url)
-        )
-          throw new CodexSecurityError(
-            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-          );
+      for (const url of urls) requireDestination(url, id);
     }
+  }
+  checkRepositories(parsed.findings);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) checkRepositories(submissionFindings(saved.requests));
+
+  let requests = saved?.requests;
+  if (!requests) {
     let preparedCount = 0;
     progress({
       phase: "preparing",
@@ -878,6 +897,7 @@ async function preparePublicationInput(
       ),
     },
   };
+  if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;
   const preview: ExternalPublicationPreview = {
     ...parsed,
     findings: submissionFindings(requests),
@@ -946,6 +966,10 @@ async function preparePublicationInput(
           pending === undefined
             ? submission
             : (JSON.parse(pending) as SavedSubmission);
+        const adoptProjectMap =
+          submission.inspectorProjectMapRequired &&
+          current.inspectorProjectMapRequired === undefined;
+        if (adoptProjectMap) current.inspectorProjectMapRequired = true;
         if (!sameSubmission(current, submission))
           throw new CodexSecurityError(
             "Another publication prepared this input. Run the command again to review and resume that saved request.",
@@ -959,8 +983,8 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
-          if (pending === undefined) {
-            await writeAtomicJson(pendingPath, submission);
+          if (pending === undefined || adoptProjectMap) {
+            await writeAtomicJson(pendingPath, current);
             persisted = true;
           }
           progress({

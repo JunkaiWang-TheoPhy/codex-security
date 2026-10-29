@@ -1,5 +1,5 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
+  type ExternalImportTarget,
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";

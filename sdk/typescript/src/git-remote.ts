@@ -33,12 +33,12 @@ export function isGitHubCloudHost(host: string): boolean {
 
 export function normalizeGitRepositoryUrl(
   repository: string,
-  cloudRepositoryUrl?: string,
+  selectedGitHubUrl?: string,
 ): string {
-  // Cloud's selected catalog repository supplies connected GitHub host context;
-  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
-  const destination = cloudRepositoryUrl
-    ? new URL(cloudRepositoryUrl)
+  // A connected Cloud repository or a selected GitHub SCM project identifies
+  // which Enterprise host supports GitHub's SSH aliases.
+  const destination = selectedGitHubUrl
+    ? new URL(selectedGitHubUrl)
     : undefined;
   const connectedHost =
     destination?.protocol === "https:"

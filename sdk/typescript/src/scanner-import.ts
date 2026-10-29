@@ -27,6 +27,12 @@ export function requiredText(value: unknown, label: string): string {
   return result;
 }
 
+export function scannerSeverity(value: string | null | undefined): string {
+  return value && ["critical", "high", "medium", "low"].includes(value)
+    ? value
+    : "unknown";
+}
+
 export function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((v): v is string => text(v) !== null)

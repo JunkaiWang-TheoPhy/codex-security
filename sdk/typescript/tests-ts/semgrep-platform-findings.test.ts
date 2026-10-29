@@ -36,7 +36,8 @@ function collectPages(...pages: unknown[]) {
 
 test("collects consecutive authenticated pages for exactly one project, ref and product", async () => {
   const pages: string[] = [];
-  const report = await collectSemgrepPlatformFindings(options, {
+  const selection = { ...options, sourceRepositoryUrl: platformProject.url };
+  const report = await collectSemgrepPlatformFindings(selection, {
     environment,
     fetch: async (url, init) => {
       expect(url.origin).toBe("https://semgrep.dev");
@@ -48,6 +49,7 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         expect(decodeURIComponent(url.pathname)).toBe(
           "/api/v1/deployments/example/projects/example/project",
         );
+        selection.sourceRepositoryUrl = "https://github.com/other/project";
         return Response.json({ project: platformProject });
       }
       const query = Object.fromEntries(url.searchParams);
@@ -196,7 +198,12 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
   expect(duplicate.excluded).toHaveLength(3);
   expect(duplicate.findings).toHaveLength(0);
   const empty = normalizeSemgrepPlatformFindings(platformReport([]));
-  expect(empty).toEqual({ read: 0, excluded: [], findings: [] });
+  expect(empty).toEqual({
+    read: 0,
+    excluded: [],
+    findings: [],
+    sourceRepositoryUrl: platformProject.url,
+  });
 });
 
 test("maps Supply Chain packages, preserves source-only reachability, and keeps AI SAST in its own namespace", () => {

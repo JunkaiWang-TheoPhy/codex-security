@@ -16,14 +16,11 @@ import {
   record,
   requiredText,
   sarifRunContextForResult,
+  scannerSeverity,
   stableId,
   strings,
   text,
 } from "./scanner-import.js";
-
-export interface SnykFindingsReport extends ExternalFindings {
-  sourceRepositoryUrl?: string;
-}
 
 function snykIdentity(value: unknown, project: string | null): string {
   const result = record(value, "SARIF result");
@@ -117,11 +114,7 @@ export function normalizeSnykFindingsExport(
             description: text(
               record(finding["description"] ?? {}, "Snyk description")["text"],
             ),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
+            severity: scannerSeverity(severity),
             advisory_ids: [
               ...new Set([
                 requiredText(rule["id"], "Snyk advisory ID"),
@@ -157,7 +150,7 @@ export function normalizeSnykFindingsExport(
 
 /** @internal Repository claims retained in original Snyk evidence. */
 export function snykRepositoryUrls(
-  sourceData: unknown,
+  source: unknown,
   {
     normalizeGitRemote = true,
     cloudRepositoryUrl,
@@ -167,13 +160,7 @@ export function snykRepositoryUrls(
     cloudRepositoryUrl?: string;
   } = {},
 ): string[] {
-  if (
-    !sourceData ||
-    typeof sourceData !== "object" ||
-    Array.isArray(sourceData)
-  )
-    return [];
-  const source = sourceData as Record<string, unknown>;
+  if (!isRecord(source)) return [];
   if (source["format"] === SNYK_REST_ISSUES_FORMAT)
     return [snykRestFindingRepository(source)];
   if (source["format"] === "snyk-findings-export/v1") {
@@ -442,11 +429,7 @@ export function normalizeSnykJson(
               "Snyk vulnerability title",
             ),
             description: text(vulnerability["description"]),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
+            severity: scannerSeverity(severity),
             advisory_ids: [
               ...new Set([
                 requiredText(vulnerability["id"], "Snyk advisory ID"),
@@ -496,7 +479,7 @@ export function normalizeSnykJson(
 export function normalizeSnykInput(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-): SnykFindingsReport {
+): ExternalFindings {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
   if (
@@ -514,11 +497,11 @@ export function normalizeSnykInput(
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<SnykFindingsReport> {
+): Promise<ExternalFindings> {
   return normalizeSnykInput(await readScannerJson(path), target);
 }
 
-export function snykReportRepositoryUrls(report: SnykFindingsReport): string[] {
+export function snykReportRepositoryUrls(report: ExternalFindings): string[] {
   if (report.sourceRepositoryUrl !== undefined)
     return [report.sourceRepositoryUrl];
   return [

@@ -18,7 +18,10 @@ import {
 } from "../src/snyk-findings.js";
 
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { listLocalExternalFindings } from "../src/external-findings-local.js";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   organizationId,
@@ -453,8 +456,8 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
         : { id: targetId, type: "target", attributes: { url: remote } },
     });
   for (const remote of [
-    "git@scm.example.test:Org/project.git",
-    "ssh://git@scm.example.test/Org/project",
+    "git@scm.example.test:org/PROJECT.git",
+    "ssh://git@scm.example.test/ORG/project",
   ]) {
     expect(check(remote).read).toBe(0);
     expect(check(remote, "github-enterprise", false).read).toBe(0);
@@ -768,6 +771,13 @@ test.each(["open-source", "code"] as const)(
           /does not match a configured remote/,
         );
       }
+      await expect(
+        prepareNormalizedLocalImport(
+          normalizeSnykIssues(empty, "local"),
+          { ...selection, repository: wrong.repository },
+          { environment: wrong.environment },
+        ),
+      ).rejects.toThrow(/does not match a configured remote/);
       const importReport = async (report: SnykIssuesExport) =>
         (await prepare(report)).import();
       expect((await importReport(initial)).counts.created).toBe(1);

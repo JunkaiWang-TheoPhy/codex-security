@@ -81,6 +81,7 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
       importGitHubAdvisories: unexpected,
       onWorkbench: unexpected,
     }),
+    hostedScannerFetch: unexpected,
     prepareLocalExternalImport: unexpected,
     listLocalExternalFindings: unexpected,
     cloudFetch: unexpected,
@@ -103,6 +104,24 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
     ],
     ["findings", "imported", "."],
     ["import", "github-advisories", "example/project"],
+    [
+      "import",
+      "snyk",
+      "project",
+      "--snyk-org",
+      "org",
+      "--source-repository-url",
+      "https://example.invalid/project",
+    ],
+    [
+      "import",
+      "semgrep",
+      "example/project",
+      "--semgrep-deployment",
+      "example",
+      "--semgrep-ref",
+      "refs/heads/main",
+    ],
   ]) {
     const cli = createCliTest(main);
     expect(await cli.runCli(command, deps)).not.toBe(0);
@@ -163,8 +182,13 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         ),
       ).toBe(2);
       expect(unsupported.stdout.text()).toContain("INVALID_ARGUMENTS");
-    } else if (command[1] === "github-advisories") {
-      for (const format of [undefined, "json", "jsonl", "yaml", "md", "toon"]) {
+    } else if (command[0] === "import") {
+      const advisory = command[1] === "github-advisories";
+      const code = advisory ? "GITHUB_IMPORT_FAILED" : "HOSTED_IMPORT_FAILED";
+      const formats = advisory
+        ? [undefined, "json", "jsonl", "yaml", "md", "toon"]
+        : ["json"];
+      for (const format of formats) {
         const formatted = createCliTest(main);
         expect(
           await formatted.runCli(
@@ -179,10 +203,10 @@ test("disabled commands cannot invoke import, storage, or publication handlers",
         if (format === "json" || format === "jsonl") {
           expect(JSON.parse(formatted.stdout.text())).toMatchObject({
             ok: false,
-            error: { code: "GITHUB_IMPORT_FAILED" },
+            error: { code },
           });
         } else {
-          expect(formatted.stdout.text()).toContain("GITHUB_IMPORT_FAILED");
+          expect(formatted.stdout.text()).toContain(code);
         }
         expect(formatted.stdout.text()).toContain(
           "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
