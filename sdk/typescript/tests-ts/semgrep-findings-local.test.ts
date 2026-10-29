@@ -118,6 +118,23 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
     assessment: { state: "not_assessed" },
     evidence: { details: { source_status: "fixed" } },
   });
+
+  const recreated = platformReport([finding]);
+  recreated.project = { ...recreated.project, id: recreated.project.id + 1 };
+  const mapped = normalizeSemgrepPlatformFindings(recreated);
+  const row = mapped.findings[0]!;
+  expect(row.source_finding_id).not.toBe(records[0]!.sourceFindingId);
+  row.source_finding_id = records[0]!.sourceFindingId;
+  const migration = await prepareNormalizedLocalImport(
+    mapped,
+    options,
+    dependencies,
+  );
+  const saved = await migration.import();
+  expect(saved.counts.updated).toBe(1);
+  expect(saved.findings[0]?.evidence.source_data?.["project"]).toEqual(
+    recreated.project,
+  );
 });
 
 test("replays numeric int64 Platform finding IDs from a file while preserving native JSON numbers", async () => {

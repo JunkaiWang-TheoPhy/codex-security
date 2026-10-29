@@ -2,6 +2,8 @@ import { isIP } from "node:net";
 import { isNumberObject } from "node:util/types";
 import {
   decodeUnreserved,
+  gitServiceHostname,
+  isGitHubCloudHost,
   isPublicGitHost,
   normalizeGitRepositoryUrl,
 } from "./git-remote.js";
@@ -123,11 +125,12 @@ export function hostedRepositoryUrlKey(
       scheme + hostedHttpAuthority(authority) + "/" + hostedHttpPath(path),
   );
   if (github) return cloudRepositoryUrlKey(url);
+  const host = URL.parse(url)?.hostname ?? "";
+  const service = /^https?:\/\//iu.test(url) ? gitServiceHostname(host) : host;
+  if (service !== host && isGitHubCloudHost(service))
+    return cloudRepositoryUrlKey(url);
   // An arbitrary Git server can serve different repositories at /repo and /repo.git.
-  return repositoryUrlKey(
-    url,
-    knownGitSuffix || isPublicGitHost(URL.parse(url)?.hostname ?? ""),
-  );
+  return repositoryUrlKey(url, knownGitSuffix || isPublicGitHost(service));
 }
 
 /** An independently identified GitHub repository can establish its SSH alias and casing. */

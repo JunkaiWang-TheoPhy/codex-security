@@ -461,6 +461,34 @@ test("legacy name-only rows match SCM path segments in plain or URL spelling", (
   expect(() => read("Group/My%252DRepo", "My-Repo")).toThrow("matching source");
 });
 
+test.each(["github.com.", "example.ghe.com.", "gitlab.com."])(
+  "collects and replays public clone aliases on the same %s authority",
+  async (host) => {
+    const url = `https://${host}/Team/Lib.git`;
+    const mapping =
+      host === "gitlab.com."
+        ? url.slice(0, -4)
+        : url.slice(0, -4).toLowerCase();
+    const project = { ...platformProject, url };
+    const finding = { ...platformFinding(7), repository: { url: mapping } };
+    const report = await collectProject(project, [finding], mapping);
+    expect(
+      normalizeSemgrepPlatformFindings(report).findings[0]?.evidence
+        .source_data,
+    ).toMatchObject({ project, sourceRepositoryUrl: mapping });
+    await expect(
+      collectProject(project, [finding], mapping.replace("./", "/")),
+    ).rejects.toThrow("does not match");
+    for (const name of ["Lib", "Lib.git"])
+      expect(
+        normalizeSemgrepPlatformFindings({
+          ...platformReport([{ ...finding, repository: { name } }]),
+          project,
+        }).findings,
+      ).toHaveLength(1);
+  },
+);
+
 test("keeps known non-GitHub URLs case-sensitive during collection", async () => {
   for (const host of [
     "gitlab.com",

@@ -121,7 +121,7 @@ describe("local normalized scanner findings", () => {
     async (provider) => {
       const url = "git@scm.example.test:Team/Repo.git";
       const f = await fixture({ remote: "https://other.example.test/a/%2e/b" });
-      execFileSync("git", ["config", "--add", "remote.origin.url", url], {
+      execFileSync("git", ["remote", "set-url", "--add", "origin", url], {
         cwd: f.repository,
       });
       const report = { ...input(), sourceRepositoryPlatform: "other" as const };
@@ -1731,15 +1731,24 @@ describe("local normalized scanner findings", () => {
         GIT_CONFIG_GLOBAL: join(root, "global-git-config"),
         GIT_CONFIG_NOSYSTEM: "1",
       };
+      const rewriteConfig =
+        scope === "local" ? ".git/config" : gitEnvironment.GIT_CONFIG_GLOBAL;
       for (const args of [
-        ["config", `--${scope}`, "url.https://github.com/.insteadOf", "gh:"],
         [
           "config",
+          "--file",
+          rewriteConfig,
+          "url.https://github.com/.insteadOf",
+          "gh:",
+        ],
+        [
+          "remote",
+          "set-url",
           "--add",
-          "remote.origin.url",
+          "origin",
           "opaque::part\nhttps://github.com/example/other\npart",
         ],
-        ["config", "--add", "remote.origin.url", "gh:example/secondary.git"],
+        ["remote", "set-url", "--add", "origin", "gh:example/secondary.git"],
         ["remote", "add", "upstream", "gh:example/library.git"],
       ]) {
         execFileSync("git", ["-C", repository, ...args], {
@@ -1877,9 +1886,10 @@ describe("local normalized scanner findings", () => {
         execFileSync("git", [
           "-C",
           repository,
-          "config",
+          "remote",
+          "set-url",
           "--add",
-          "remote.origin.url",
+          "origin",
           url,
         ]);
       const dependencies = {
@@ -2016,6 +2026,7 @@ describe("local normalized scanner findings", () => {
           "-C",
           repository,
           "config",
+          "--file=.git/config",
           "remote.origin.vcs",
           helper,
         ]);

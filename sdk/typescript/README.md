@@ -730,6 +730,13 @@ Use `sourceRepositoryPlatform: "other"` for case-sensitive
 paths on a custom host. If the checkout uses an opaque Git remote helper,
 configure a separate matching remote that the importer can verify without running the helper.
 
+The Snyk REST and Semgrep Platform readers generate a `source_finding_id` for
+each occurrence within its scanner project. The normalized SDK uses the ID
+you supply to create or update the record for that repository, provider and
+source key. Keep each ID with its evidence unless you intend to update an
+existing record, for example when a scanner project for the same repository
+has been recreated.
+
 File imports forward repository references from the reader automatically. Direct
 normalized callers should provide additional known references in the third
 argument's `sourceRepositories` when they are absent from

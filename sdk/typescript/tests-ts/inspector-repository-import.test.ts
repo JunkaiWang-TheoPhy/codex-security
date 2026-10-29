@@ -196,6 +196,7 @@ test("an Inspector literal repository does not identify an opaque helper", async
     "-C",
     f.options.repository,
     "config",
+    "--file=.git/config",
     "remote.origin.vcs",
     "example",
   ]);

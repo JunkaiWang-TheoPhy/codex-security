@@ -126,6 +126,7 @@ function legacyRepositoryNames(
   projectName: string,
   pathname: string,
   gitSuffix: boolean,
+  keepLiteral: boolean,
 ) {
   const path = pathname.slice(1);
   const decoded = path
@@ -141,11 +142,11 @@ function legacyRepositoryNames(
       }
     })
     .join("/");
+  const spellings = [path, decoded].map((path) => path.replace(/\/$/u, ""));
   return [
     projectName,
-    ...[path, decoded].map((path) =>
-      path.replace(gitSuffix ? /(?:\.git)?\/?$/u : /\/$/u, ""),
-    ),
+    ...(keepLiteral ? spellings : []),
+    ...(gitSuffix ? spellings.map((path) => path.replace(/\.git$/u, "")) : []),
   ].flatMap((path) => [path, path.slice(path.lastIndexOf("/") + 1)]);
 }
 
@@ -180,10 +181,10 @@ function projectContext(
   // Keep the provider's HTTP spelling. An SSH source needs the operator's HTTP(S) mapping.
   const url = native && native === project.url ? native : reference;
   const { hostname, pathname } = new URL(url);
-  const publicGitHost = isPublicGitHost(hostname);
+  const legacyPublicHost = isPublicGitHost(hostname);
   // Older exports omitted equivalent .git mappings. Keep their original evidence
   // bytes when the caller supplies the mapping again on a publication retry.
-  const omitGitSuffix = publicGitHost || replayingUnrecordedMapping;
+  const omitGitSuffix = legacyPublicHost || replayingUnrecordedMapping;
   const binding =
     mapping &&
     (!project.url ||
@@ -196,7 +197,12 @@ function projectContext(
     ? array(repositoryAliases, "Semgrep repository aliases").map((name) =>
         requiredText(name, "Semgrep repository alias"),
       )
-    : legacyRepositoryNames(project.name, pathname, github || publicGitHost);
+    : legacyRepositoryNames(
+        project.name,
+        pathname,
+        github || isPublicGitHost(gitServiceHostname(hostname)),
+        !github && !legacyPublicHost,
+      );
   return { binding, url, github, names: new Set(names), observed };
 }
 
@@ -285,7 +291,7 @@ export async function collectSemgrepPlatformFindings(
     nativeProject,
     sourceRepositoryUrl,
     (url) => {
-      const host = gitServiceHostname(url);
+      const host = gitServiceHostname(new URL(url).hostname);
       return isGitHubCloudHost(host) || !isKnownGitHost(host);
     },
     [],

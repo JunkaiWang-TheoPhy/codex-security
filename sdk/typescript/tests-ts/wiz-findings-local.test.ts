@@ -112,7 +112,7 @@ test("Wiz CSV imports into SQLite and updates the same source finding", async ()
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", fixture.repository, ...args]);
   git("remote", "set-url", "origin", repositoryUrl);
-  git("config", "remote.origin.vcs", "example");
+  git("config", "--file=.git/config", "remote.origin.vcs", "example");
   const redirected = join(fixture.root, "empty.gitconfig");
   await writeFile(redirected, "");
   await expect(
@@ -130,7 +130,7 @@ test("Wiz CSV imports into SQLite and updates the same source finding", async ()
   ).rejects.toThrow("does not match");
   git("remote", "set-url", "origin", `http::${repositoryUrl}`);
   await fixture.prepare();
-  git("config", "remote.origin.vcs", "https");
+  git("config", "--file=.git/config", "remote.origin.vcs", "https");
   git("remote", "set-url", "origin", `example::${repositoryUrl}`);
   await expect(fixture.prepare()).rejects.toThrow("does not match");
   git("remote", "add", "upstream", repositoryUrl);
