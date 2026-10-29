@@ -23,7 +23,7 @@ import {
   array,
   normalizeRecords,
   record,
-  relativePath,
+  hostedRepositoryPath,
   requiredText,
   scannerSeverity,
   stableId,
@@ -266,7 +266,7 @@ function projectContext(project: Resource, selected: Scope) {
     manager,
     scm,
     origin,
-    manifest: scm ? repoPath(attributes["target_file"]) : null,
+    manifest: scm ? hostedRepositoryPath(attributes["target_file"]) : null,
   };
   if (project["relationships"] === undefined)
     return { ...context, targetId: undefined, expandedUrl: undefined };
@@ -324,11 +324,10 @@ function checkTarget(
       );
       if (
         scmOrigins.has(origin) &&
-        scmOrigins.has(type) &&
-        origin.split("-")[0] !== type.split("-")[0]
+        (!scmOrigins.has(type) || origin.split("-")[0] !== type.split("-")[0])
       )
         throw new Error(
-          "Snyk target integration does not match the project's SCM origin.",
+          `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
         );
     }
   }
@@ -555,13 +554,6 @@ function problemIds(entries: Resource[], type?: string) {
   return [...ids];
 }
 
-function repoPath(value: unknown) {
-  const path = text(value);
-  return path && !path.includes("\\") && !path.includes("://")
-    ? relativePath(path)
-    : null;
-}
-
 function packageEvidence(
   coordinates: Resource[],
   { manager, manifest }: ReturnType<typeof projectContext>,
@@ -609,7 +601,7 @@ function codeEvidence(coordinates: Resource[], scm: boolean) {
       if (value === undefined) continue;
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
-      const path = repoPath(location["file"]);
+      const path = hostedRepositoryPath(location["file"]);
       if (scm && path) locations.push({ path });
     }
   }

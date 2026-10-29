@@ -11,15 +11,12 @@ import {
   normalizeSemgrepSarif,
   readSemgrepFindings,
 } from "../src/semgrep-findings.js";
-import {
-  collectSemgrepPlatformFindings,
-  normalizeSemgrepPlatformFindings,
-} from "../src/semgrep-platform-findings.js";
+import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   platformFinding,
   platformProject,
-  platformRef,
+  collectProject,
   platformReport,
 } from "./support/semgrep-platform-fixtures.js";
 import {
@@ -43,27 +40,6 @@ async function platformCheckout(remote: string, sourceKey = "platform") {
     dependencies: { environment: fixture.environment },
     [Symbol.asyncDispose]: fixture.dispose,
   };
-}
-
-function collectProject(
-  project: typeof platformProject,
-  findings: unknown[],
-  sourceRepositoryUrl: string,
-) {
-  const responses = [{ project }, { findings }];
-  return collectSemgrepPlatformFindings(
-    {
-      deployment: "example",
-      project: project.name,
-      ref: platformRef,
-      sourceRepositoryUrl,
-      token: "synthetic-token",
-    },
-    {
-      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
-      fetch: async () => Response.json(responses.shift()),
-    },
-  );
 }
 
 test("a retained Platform row binds mixed SARIF provenance in either order", async () => {
@@ -178,12 +154,31 @@ test("replays native SSH evidence and URL-less labels from the selected Semgrep 
         project,
         finding: rows[0],
       }),
-      expect.objectContaining({ project, finding: rows[1] }),
+      expect.objectContaining({
+        project,
+        repositoryAliases: [],
+        finding: rows[1],
+      }),
     ]),
   );
   expect(() =>
     normalizeSemgrepPlatformFindings({ ...collected, repositoryAliases: [] }),
   ).toThrow("matching source repository");
+  const normalized = normalizeSemgrepPlatformFindings(collected);
+  const evidence = normalized.findings[1]!.evidence.source_data!;
+  evidence["finding"] = {
+    ...rows[1],
+    repository: { url: repositoryUrl, name: "other-module" },
+  };
+  await expect(
+    prepareNormalizedLocalImport(normalized, options, dependencies),
+  ).rejects.toThrow("matching source repository");
+  // Historical normalized evidence without captured labels accepted a matching repository URL.
+  delete evidence["repositoryAliases"];
+  expect(
+    (await prepareNormalizedLocalImport(normalized, options, dependencies))
+      .preview.findings,
+  ).toHaveLength(2);
   for (const url of [
     "git@github.com:other/project.git",
     "ssh://deploy@github.com/example/project.git",

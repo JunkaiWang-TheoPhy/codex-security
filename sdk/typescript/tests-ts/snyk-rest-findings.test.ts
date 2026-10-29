@@ -449,6 +449,13 @@ test.each(["open-source", "code"] as const)(
 );
 
 test("looks up an unexpanded target by org and ID, never follows a relationship link", async () => {
+  const integration = (type: string) => ({
+    data: {
+      type: "integration",
+      id: otherId,
+      attributes: { integration_type: type },
+    },
+  });
   const target = {
     id: targetId,
     type: "target",
@@ -458,13 +465,7 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     },
     relationships: {
       organization: { data: { type: "organization", id: organizationId } },
-      integration: {
-        data: {
-          type: "integration",
-          id: otherId,
-          attributes: { integration_type: "github-cloud-app" },
-        },
-      },
+      integration: integration("github-cloud-app"),
     },
   };
   const lookup = document(project({ expanded: false }));
@@ -484,18 +485,15 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
   for (const bad of [
     { ...target, id: otherId },
     { ...target, attributes: { url: "https://github.com/example/other" } },
-    {
-      ...target,
-      relationships: {
-        ...target.relationships,
-        integration: {
-          data: {
-            ...target.relationships.integration.data,
-            attributes: { integration_type: "gitlab" },
-          },
+    ...["gitlab", "docker-hub", "github-cr", "unknown-integration"].map(
+      (type) => ({
+        ...target,
+        relationships: {
+          ...target.relationships,
+          integration: integration(type),
         },
-      },
-    },
+      }),
+    ),
     {
       ...target,
       relationships: {
@@ -506,9 +504,22 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     const attempt = transport(lookup, document(bad));
     await expect(attempt.collect()).rejects.toThrow(/target|organization/i);
     expect(attempt.requests).toHaveLength(2);
-    expect(() => normalizeSnykIssues({ ...report, target: bad })).toThrow();
+    const saved = { ...report, target: bad };
+    expect(() => normalizeSnykIssues(saved)).toThrow();
+    expect(() =>
+      snykRestFindingRepository({ ...saved, issue: issue() }),
+    ).toThrow();
   }
   expect(() => normalizeSnykIssues({ ...report, target: null })).toThrow();
+  for (const origin of ["cli", "api"]) {
+    const generic = {
+      ...report,
+      project: project({ expanded: false, origin }),
+    };
+    expect(
+      normalizeSnykIssues(generic).sourceRepositoryPlatform,
+    ).toBeUndefined();
+  }
 });
 
 test("uses the declared repository when Snyk omits the project's relationships", async () => {

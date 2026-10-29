@@ -1,3 +1,8 @@
+import {
+  collectSemgrepPlatformFindings,
+  type SemgrepPlatformReport,
+} from "../../src/semgrep-platform-findings.js";
+
 export const platformProject = {
   id: 77,
   name: "example/project",
@@ -31,4 +36,25 @@ export function platformReport(findings: unknown[] = [platformFinding(12)]) {
     findingCount: findings.length,
     findings,
   };
+}
+
+export function collectProject(
+  project: SemgrepPlatformReport["project"],
+  findings: unknown[],
+  sourceRepositoryUrl?: string,
+) {
+  const responses = [{ project }, { findings }];
+  return collectSemgrepPlatformFindings(
+    {
+      deployment: "example",
+      project: project.name,
+      ref: platformRef,
+      sourceRepositoryUrl,
+      token: "synthetic-token",
+    },
+    {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      fetch: async () => Response.json(responses.shift()),
+    },
+  );
 }

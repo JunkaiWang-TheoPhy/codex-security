@@ -43,7 +43,9 @@ The collector checks the selected repository URL against the project target
 when Snyk supplies one. Standard Git SSH targets can match HTTPS repository
 URLs on GitHub.com, GitHub Enterprise Cloud (`*.ghe.com`), GitLab.com, and
 Bitbucket.org. A custom GitHub Enterprise host also requires GitHub SCM
-provenance from the Snyk project.
+provenance from the Snyk project. When a separately fetched target identifies
+its integration, an SCM project requires a supported integration from the same
+provider family, such as GitHub Enterprise and its GitHub Server App.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.

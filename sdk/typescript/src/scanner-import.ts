@@ -51,6 +51,14 @@ export function relativePath(value: unknown): string | null {
     : null;
 }
 
+// Hosted findings do not identify the scanner operating system or its path separator.
+export function hostedRepositoryPath(value: unknown) {
+  const path = text(value);
+  return path && !path.includes("\\") && !path.includes("://")
+    ? relativePath(path)
+    : null;
+}
+
 export function stableId(prefix: string, fields: unknown[]): string {
   return `${prefix}:${hash("sha256", JSON.stringify(fields))}`;
 }

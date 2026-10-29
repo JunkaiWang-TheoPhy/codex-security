@@ -25,7 +25,7 @@ import {
   array,
   normalizeRecords,
   record,
-  relativePath,
+  hostedRepositoryPath,
   requiredText,
   scannerSeverity,
   stableId,
@@ -59,7 +59,7 @@ export interface SemgrepPlatformReport {
   project: Project;
   /** Operator-supplied HTTP(S) mapping when the native project URL is missing or differs. */
   sourceRepositoryUrl?: string;
-  /** Additional URL-less repository labels returned by the project-ID-filtered query. */
+  /** Repository labels observed in the project-ID-filtered query. Older exports omit this field. */
   repositoryAliases?: string[];
   ref: string;
   product: Product;
@@ -136,17 +136,17 @@ function projectContext(
       repositoryUrlKey(mapping) !== repositoryUrlKey(project.url))
       ? { project, sourceRepositoryUrl: mapping }
       : { project };
-  const aliases = new Set(
-    array(repositoryAliases ?? [], "Semgrep repository aliases").map((label) =>
-      requiredText(label, "Semgrep repository alias"),
-    ),
-  );
+  const observed = repositoryAliases !== undefined;
   const scmPath = new URL(url).pathname.slice(1).replace(/(?:\.git)?\/?$/u, "");
-  const names = [project.name, scmPath].flatMap((path) => [
-    path,
-    path.split("/").at(-1),
-  ]);
-  return { binding, url, key, github, names, aliases };
+  const names = observed
+    ? array(repositoryAliases, "Semgrep repository aliases").map((name) =>
+        requiredText(name, "Semgrep repository alias"),
+      )
+    : [project.name, scmPath].flatMap((path) => [
+        path,
+        path.slice(path.lastIndexOf("/") + 1),
+      ]);
+  return { binding, url, key, github, names: new Set(names), observed };
 }
 
 function scopedFinding(
@@ -169,29 +169,29 @@ function scopedFinding(
     !(url === null && text(name))
   )
     throw new Error("Semgrep finding repository URL must be text.");
-  let alias: string | undefined;
   if (typeof url === "string" && url) {
     matchingRepositoryUrl(
       normalizeHostedGitRepositoryUrl(url, selected.url, selected.github),
       selected.url,
       selected.key,
     );
-  } else if (name !== undefined) {
-    const label = requiredText(name, "Semgrep finding repository name");
-    if (!selected.names.includes(label)) {
-      alias = label;
-      if (collecting) selected.aliases.add(alias);
-      else if (!selected.aliases.has(alias))
-        throw new Error(
-          "Semgrep Platform finding lacks a matching source repository.",
-        );
-    }
+  }
+  const label =
+    !url && name !== undefined
+      ? requiredText(name, "Semgrep finding repository name")
+      : text(name);
+  if (label) {
+    if (collecting) selected.names.add(label);
+    else if ((selected.observed || !url) && !selected.names.has(label))
+      throw new Error(
+        "Semgrep Platform finding lacks a matching source repository.",
+      );
   }
   if (finding["ref"] !== undefined && finding["ref"] !== ref)
     throw new Error(
       "Semgrep Platform finding does not match the selected ref.",
     );
-  return { finding, alias };
+  return { finding, label };
 }
 
 export async function collectSemgrepPlatformFindings(
@@ -236,6 +236,7 @@ export async function collectSemgrepPlatformFindings(
       const host = new URL(url).hostname;
       return isGitHubCloudHost(host) || !isKnownGitHost(host);
     },
+    [],
   );
   const { project } = selected.binding;
   if (project.name !== name)
@@ -291,9 +292,7 @@ export async function collectSemgrepPlatformFindings(
     format,
     deployment,
     ...selected.binding,
-    ...(selected.aliases.size
-      ? { repositoryAliases: [...selected.aliases] }
-      : {}),
+    repositoryAliases: [...selected.names],
     product,
     ref,
     findingCount: findings.length,
@@ -367,18 +366,20 @@ export function normalizePlatformReport(
   const context = { format, deployment, ...selected.binding, ref, product };
   const result = normalizeRecords(
     findings.map((finding) => scopedFinding(finding, selected, ref)),
-    ({ finding, alias }, id) => {
+    ({ finding, label }, id) => {
       const location = record(
         finding["location"] ?? {},
         "Semgrep finding location",
       );
-      const path = relativePath(location["file_path"]);
+      const path = hostedRepositoryPath(location["file_path"]);
       const line =
         path && location["line"] != null
           ? position(location["line"], "Semgrep starting line")
           : null;
       const rule = record(finding["rule"] ?? {}, "Semgrep rule");
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
+      const description =
+        text(rule["message"]) ?? text(finding["rule_message"]);
       let productEvidence;
       if (product === "sca") {
         const {
@@ -410,12 +411,11 @@ export function normalizePlatformReport(
             ),
           });
         }
-        const subject = requiredText(
-          advisory ?? packages[0]?.name,
-          "Semgrep advisory or package name",
-        );
         productEvidence = {
-          title: name ?? subject,
+          title: requiredText(
+            name ?? advisory ?? packages[0]?.name ?? description,
+            "Semgrep finding title",
+          ),
           advisory_ids: advisory ? [advisory] : [],
           packages,
         };
@@ -427,14 +427,13 @@ export function normalizePlatformReport(
           throw new Error(
             "Supply Chain evidence is not a Semgrep Code finding.",
           );
-        const ruleName = requiredText(name, "Semgrep rule name");
         productEvidence = {
-          title: ruleName,
+          title: requiredText(name ?? description, "Semgrep finding title"),
           details: {
             kind: "sast",
             repository: { url: selected.url },
             scanner_origin: "Semgrep",
-            rule: { id: ruleName },
+            rule: name ? { id: name } : null,
             source_status: text(finding["status"]),
             weakness_ids: weaknessIds(rule["cwe_names"]),
             code: {
@@ -450,13 +449,15 @@ export function normalizePlatformReport(
         source_finding_id: id,
         evidence: validateExternalEvidence(
           {
-            description: text(rule["message"]) ?? text(finding["rule_message"]),
+            description,
             severity: scannerSeverity(text(finding["severity"])),
             locations: path ? [{ path, line }] : [],
             branch: ref,
             source_data: structuredClone({
               ...context,
-              ...(alias ? { repositoryAliases: [alias] } : {}),
+              ...(selected.observed
+                ? { repositoryAliases: label ? [label] : [] }
+                : {}),
               finding,
             }),
             ...productEvidence,

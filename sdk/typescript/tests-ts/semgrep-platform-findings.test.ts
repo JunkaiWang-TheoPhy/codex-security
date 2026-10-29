@@ -5,6 +5,7 @@ import {
   normalizeSemgrepPlatformFindings,
 } from "../src/semgrep-platform-findings.js";
 import {
+  collectProject,
   platformFinding,
   platformProject,
   platformRef,
@@ -251,44 +252,65 @@ test("keeps an operator mapping separate from a URL-less project and its short r
   ).toThrow("matching source repository");
 });
 
-test("binds URL-less split-project findings to the selected project or physical repository", async () => {
+test("replays only the repository names observed for each collected split project", async () => {
   const project = {
     ...platformProject,
     name: "example/mono/moduleA",
     url: "https://github.com/example/mono.git/",
   };
-  const rows = ["example/mono", "mono", project.name, "moduleA"].map(
-    (name, i) => ({
-      ...platformFinding(i + 1),
-      repository: { name },
-    }),
-  );
-  // SEMGREP_REPO_NAME and the selected project's display name can differ even on GitHub.
-  const customName = {
-    ...platformFinding(5),
-    repository: { name: "example/mono/moduleB", url: project.url },
-  };
-  const responses = [{ project }, { findings: [...rows, customName] }];
-  const report = await collectSemgrepPlatformFindings(
-    { ...options, project: project.name },
+  // An independently configured name and the physical SCM path can both differ from the selected project.
+  const names = ["example/mono", "mono", project.name, "moduleA"];
+  const rows = names.map((name, i) => ({
+    ...platformFinding(i + 1),
+    repository: { name },
+  }));
+  const customName = "legacy/scanner-repo";
+  const report = await collectProject(project, [
+    ...rows,
     {
-      environment,
-      fetch: async () => Response.json(responses.shift()),
+      ...platformFinding(5),
+      repository: { name: customName, url: project.url },
     },
-  );
+  ]);
+  expect(report.repositoryAliases).toEqual([...names, customName]);
   expect(normalizeSemgrepPlatformFindings(report).findings).toHaveLength(5);
+
+  const other = { ...project, id: 78, name: "example/mono/moduleB" };
+  const foreign = {
+    ...platformFinding(6),
+    repository: { name: other.name, url: project.url },
+  };
+  const otherReport = await collectProject(other, [foreign]);
+  expect(normalizeSemgrepPlatformFindings(otherReport).findings).toHaveLength(
+    1,
+  );
+  const swapped = {
+    ...report,
+    findings: otherReport.findings,
+    findingCount: 1,
+  };
   for (const repository of [
-    { name: "example/mono/moduleB" },
+    foreign.repository,
+    { name: other.name },
     { name: "mono", url: "https://github.com/other/mono" },
   ]) {
     expect(() =>
       normalizeSemgrepPlatformFindings({
-        ...report,
-        findingCount: 1,
-        findings: [{ ...rows[0], repository }],
+        ...swapped,
+        findings: [{ ...foreign, repository }],
       }),
     ).toThrow("repository");
   }
+  // Public v1 exports predate the observation list. They used the URL as the binding when present.
+  const legacy = { ...swapped };
+  delete legacy.repositoryAliases;
+  const normalized = normalizeSemgrepPlatformFindings(legacy);
+  expect(normalized.findings[0]?.evidence.source_data).toMatchObject({
+    finding: foreign,
+  });
+  expect(normalized.findings[0]?.evidence.source_data).not.toHaveProperty(
+    "repositoryAliases",
+  );
 });
 
 test("normalizes in-memory Enterprise reports against the caller's identified GitHub repository", () => {
@@ -468,9 +490,24 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
       source_data: { finding: advisoryOnly },
     });
   }
+  const ruleOnly = normalizeSemgrepPlatformFindings({
+    ...platformReport([finding]),
+    product: "sca",
+  });
+  expect(ruleOnly.findings[0]?.evidence).toMatchObject({
+    title: finding.rule.name,
+    packages: [],
+    advisory_ids: [],
+    source_data: { finding },
+  });
   const invalid = normalizeSemgrepPlatformFindings({
     ...platformReport([
-      { ...finding, found_dependency: {}, vulnerability_identifier: " " },
+      {
+        ...finding,
+        rule: {},
+        found_dependency: {},
+        vulnerability_identifier: " ",
+      },
       { ...sca, id: 22, found_dependency: { package: 42 } },
       { ...sca, id: 23, found_dependency: [] },
     ]),
@@ -484,4 +521,31 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
   expect(ai.findings[0]?.source_finding_id).not.toBe(
     normalizeSemgrepPlatformFindings(code).findings[0]?.source_finding_id,
   );
+});
+
+test("keeps message-only findings and preserves ambiguous hosted paths as native evidence", () => {
+  for (const product of ["sast", "ai_sast", "sca"]) {
+    const description = "Check the unsafe input.";
+    const finding = {
+      ...platformFinding(42),
+      ...(product === "ai_sast"
+        ? { rule: {}, rule_message: description }
+        : { rule: { message: description } }),
+      location: { file_path: "src/rules\\test.py", line: 2, end_line: 4 },
+    };
+    const report = normalizeSemgrepPlatformFindings({
+      ...platformReport([finding]),
+      product,
+    });
+    expect(report.excluded).toEqual([]);
+    expect(report.findings[0]?.evidence).toMatchObject({
+      title: description,
+      description,
+      locations: [],
+      source_data: { finding },
+      ...(product === "sca"
+        ? { packages: [], advisory_ids: [] }
+        : { details: { rule: null, code: { end_line: null } } }),
+    });
+  }
 });
