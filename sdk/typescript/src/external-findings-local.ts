@@ -634,6 +634,13 @@ export async function prepareLocalImport(
   );
   const sources = new Map<string, ExternalSourceRepository>();
   let hostedRepository = current.sourceRepositoryUrl;
+  // Populated reports establish the platform from their retained provider rows.
+  let verifiedGitHubUrl =
+    !current.findings.length &&
+    options.provider === "snyk" &&
+    current.sourceRepositoryPlatform === "github"
+      ? hostedRepository
+      : undefined;
   if (hostedRepository)
     sources.set(hostedRepository, { url: hostedRepository });
   for (const { evidence } of current.findings) {
@@ -644,8 +651,11 @@ export async function prepareLocalImport(
     if (
       options.provider === "snyk" &&
       data?.["format"] === SNYK_REST_ISSUES_FORMAT
-    )
-      native = snykRestFindingRepository(data);
+    ) {
+      const source = snykRestFindingRepository(data);
+      native = source.url;
+      if (source.platform === "github") verifiedGitHubUrl = source.url;
+    }
     if (options.provider === "semgrep")
       native = semgrepPlatformFindingRepository(data);
     if (native) {
@@ -682,12 +692,18 @@ export async function prepareLocalImport(
   }
   if (hostedRepository) {
     // A hosted project identifies one repository even when the checkout has multiple remotes.
-    const expected = repositoryUrlKey(hostedRepository);
+    const key = verifiedGitHubUrl ? cloudRepositoryUrlKey : repositoryUrlKey;
+    const expected = key(hostedRepository);
     for (const url of sources.keys())
-      if (repositoryUrlKey(normalizeGitRepositoryUrl(url)) !== expected)
+      if (key(normalizeGitRepositoryUrl(url, verifiedGitHubUrl)) !== expected)
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );
+    if (verifiedGitHubUrl)
+      sources.set(verifiedGitHubUrl, {
+        url: verifiedGitHubUrl,
+        platform: "github",
+      });
   }
   if (dependabotSource)
     sources.set(dependabotSource, {

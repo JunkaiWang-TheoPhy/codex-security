@@ -162,7 +162,7 @@ export function snykRepositoryUrls(
 ): string[] {
   if (!isRecord(source)) return [];
   if (source["format"] === SNYK_REST_ISSUES_FORMAT)
-    return [snykRestFindingRepository(source)];
+    return [snykRestFindingRepository(source).url];
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");

@@ -5,7 +5,10 @@ import type {
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import { repositoryUrlKey } from "./external-import-contract.js";
+import {
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
+} from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
@@ -70,10 +73,13 @@ export async function readExternalFindings(
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
     if (findings.sourceRepositoryUrl) {
+      const key =
+        findings.sourceRepositoryPlatform === "github"
+          ? cloudRepositoryUrlKey
+          : repositoryUrlKey;
       if (
         options.sourceRepositoryUrl &&
-        repositoryUrlKey(findings.sourceRepositoryUrl) !==
-          repositoryUrlKey(options.sourceRepositoryUrl)
+        key(findings.sourceRepositoryUrl) !== key(options.sourceRepositoryUrl)
       )
         throw new Error(
           "Snyk REST source repository does not match the declared source repository URL.",

@@ -18,6 +18,8 @@ export interface ExternalFindings {
   read: number;
   /** Source repository retained by hosted collectors, including empty reports. */
   sourceRepositoryUrl?: string;
+  /** Platform established by a hosted project's verified native target. */
+  sourceRepositoryPlatform?: ExternalSourceRepository["platform"];
   /** Reader-retained run metadata, including diagnostics for empty reports. */
   report?: Record<string, unknown>;
   findings: ExternalFinding[];

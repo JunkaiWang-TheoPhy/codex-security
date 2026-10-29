@@ -4,7 +4,10 @@ import {
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { normalizeGitRepositoryUrl } from "./git-remote.js";
@@ -207,10 +210,9 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     url,
     origin.startsWith("github") ? selected.sourceRepositoryUrl : undefined,
   );
-  const key =
-    origin === "github-enterprise" || origin === "github-server-app"
-      ? cloudRepositoryUrlKey
-      : repositoryUrlKey;
+  const enterprise =
+    origin === "github-enterprise" || origin === "github-server-app";
+  const key = enterprise ? cloudRepositoryUrlKey : repositoryUrlKey;
   if (
     /[?#]/u.test(url) ||
     key(normalized) !== key(selected.sourceRepositoryUrl)
@@ -218,6 +220,7 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
+  return enterprise ? ("github" as const) : undefined;
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -281,7 +284,7 @@ function checkTarget(
       selected,
       true,
     );
-  checkRemote(
+  return checkRemote(
     record(target["attributes"], "Snyk target attributes")["url"],
     selected,
     origin,
@@ -434,17 +437,20 @@ function savedContext(document: Resource) {
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];
-  checkTarget(target, selected, context);
+  const platform = checkTarget(target, selected, context);
   return {
     source: { ...formatVersion, ...selected, project, target },
     context,
+    platform,
   };
 }
 
-export function snykRestFindingRepository(sourceData: Resource): string {
-  const { source } = savedContext(sourceData);
+export function snykRestFindingRepository(
+  sourceData: Resource,
+): ExternalSourceRepository {
+  const { source, platform } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
-  return source.sourceRepositoryUrl;
+  return { url: source.sourceRepositoryUrl, platform };
 }
 
 function readIssues(document: Resource, selected: Scope) {
@@ -557,7 +563,7 @@ export function normalizeSnykIssues(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Snyk REST Issues export");
-  const { source, context } = savedContext(document);
+  const { source, context, platform } = savedContext(document);
   const code = source.product === "code";
   const result = normalizeRecords(
     readIssues(document, source),
@@ -631,5 +637,9 @@ export function normalizeSnykIssues(
     },
     target,
   );
-  return { ...result, sourceRepositoryUrl: source.sourceRepositoryUrl };
+  return {
+    ...result,
+    sourceRepositoryUrl: source.sourceRepositoryUrl,
+    ...(platform && { sourceRepositoryPlatform: platform }),
+  };
 }

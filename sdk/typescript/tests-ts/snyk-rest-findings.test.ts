@@ -335,7 +335,7 @@ test.each(["open-source", "code"] as const)(
     const attributes = { type, title: null, key: null };
     const native = issue(attributes);
     const scoped = { ...source, issue: native };
-    expect(snykRestFindingRepository(scoped)).toBe(sourceRepositoryUrl);
+    expect(snykRestFindingRepository(scoped).url).toBe(sourceRepositoryUrl);
     const lookup = {
       ...scoped,
       project: project({
@@ -348,7 +348,7 @@ test.each(["open-source", "code"] as const)(
         attributes: { url: "git@github.com:EXAMPLE/repository.git" },
       },
     };
-    expect(snykRestFindingRepository(lookup)).toBe(sourceRepositoryUrl);
+    expect(snykRestFindingRepository(lookup).url).toBe(sourceRepositoryUrl);
     const swapped = {
       ...scoped,
       sourceRepositoryUrl: "https://github.com/example/other",
@@ -741,12 +741,19 @@ test.each(["options", "dependencies"] as const)(
 test.each(["open-source", "code"] as const)(
   "hosted Snyk %s rejects the wrong checkout and creates, replays and updates unassessed SQLite evidence",
   async (product) => {
-    const fixture = await localFindingsFixture({ remote: sourceRepositoryUrl });
+    const url = "https://scm.example.test/Org/project";
+    const remote = "git@scm.example.test:org/PROJECT.git";
+    const fixture = await localFindingsFixture({ remote });
     const wrong = await localFindingsFixture({
       remote: "https://github.com/example/other",
     });
     try {
-      const initial = snykRestFixture(product);
+      const manager = product === "code" ? "sast" : "npm";
+      const report = (options?: Parameters<typeof snykRestFixture>[1]) => ({
+        ...snykRestFixture(product, { ...options, sourceRepositoryUrl: url }),
+        project: project({ manager, origin: "github-enterprise", remote }),
+      });
+      const initial = report();
       const selection = {
         repository: fixture.repository,
         provider: "snyk" as const,
@@ -761,8 +768,8 @@ test.each(["open-source", "code"] as const)(
           { environment: local.environment },
         );
       };
-      const empty = snykRestFixture(product, { issues: [] });
-      const excluded = snykRestFixture(product, {
+      const empty = report({ issues: [] });
+      const excluded = report({
         issues: [issue({ type: "license" })],
       });
       for (const report of [initial, empty, excluded]) {
@@ -770,20 +777,45 @@ test.each(["open-source", "code"] as const)(
           /does not match a configured remote/,
         );
       }
-      await expect(
+      const prepareNormalized = (
+        input: ReturnType<typeof normalizeSnykIssues>,
+        local = fixture,
+      ) =>
         prepareNormalizedLocalImport(
-          normalizeSnykIssues(empty, "local"),
-          { ...selection, repository: wrong.repository },
-          { environment: wrong.environment },
-        ),
-      ).rejects.toThrow(/does not match a configured remote/);
+          input,
+          { ...selection, repository: local.repository },
+          { environment: local.environment },
+        );
+      const normalizedEmpty = normalizeSnykIssues(empty, "local");
+      await expect(prepareNormalized(normalizedEmpty, wrong)).rejects.toThrow(
+        /does not match a configured remote/,
+      );
+      expect(
+        (await prepareNormalized(normalizedEmpty)).preview.findings,
+      ).toHaveLength(0);
+      const {
+        sourceRepositoryUrl: _url,
+        sourceRepositoryPlatform: _platform,
+        ...rows
+      } = normalizeSnykIssues(initial, "local");
+      expect((await prepareNormalized(rows)).preview.findings).toHaveLength(1);
+      for (const source of [
+        project({ manager, origin: "github-enterprise", remote: null }),
+        project({ manager, origin: "gitlab", remote: url }),
+      ]) {
+        await expect(
+          prepareNormalized(
+            normalizeSnykIssues({ ...empty, project: source }, "local"),
+          ),
+        ).rejects.toThrow(/does not match a configured remote/);
+      }
       const importReport = async (report: SnykIssuesExport) =>
         (await prepare(report)).import();
       expect((await importReport(initial)).counts.created).toBe(1);
       expect((await importReport(initial)).counts.unchanged).toBe(1);
       expect((await importReport(empty)).ready).toBe(0);
 
-      const updated = snykRestFixture(product, {
+      const updated = report({
         title: "Updated source title",
         updatedAt: "2025-02-04T00:00:00Z",
       });
