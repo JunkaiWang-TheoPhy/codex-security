@@ -9,6 +9,7 @@ import {
   normalizeSnykIssues,
   SNYK_REST_ISSUES_FORMAT,
   snykRestFindingRepository,
+  snykRestReportRepository,
 } from "./snyk-rest-findings.js";
 import {
   array,
@@ -186,6 +187,50 @@ export function snykRepositoryClaims(
     );
     return { url: repository };
   });
+}
+
+/** Retain each Snyk repository claim's authority when combining normalized findings. */
+export function snykRepositoryScope(input: HostedExternalFindings) {
+  const project = snykRestReportRepository(input.report);
+  const projects: ReturnType<typeof snykRestFindingRepository>[] = project
+    ? [project]
+    : [];
+  const claims = new Map<
+    Record<string, unknown>,
+    ReturnType<typeof snykRepositoryClaims>
+  >();
+  const literalUrls = new Set<string>();
+  let unbound = false;
+  for (const { evidence } of input.findings) {
+    const data = evidence.source_data;
+    const native = snykRepositoryClaims(data);
+    if (data) claims.set(data, native);
+    const url = evidence.details?.repository?.url;
+    if (data?.["format"] === SNYK_REST_ISSUES_FORMAT) {
+      const source = native[0]!;
+      projects.push(source);
+      if (!source.gitlab && url) literalUrls.add(url);
+    } else if (!url && !native.length) unbound = true;
+  }
+  for (const source of projects) {
+    if (!source.gitlab) {
+      literalUrls.add(source.url);
+      if (source.nativeUrl) literalUrls.add(source.nativeUrl);
+    }
+  }
+  const gitlab = projects.some((source) => source.gitlab);
+  // Unbound siblings keep the destination literal. They do not invalidate a verified
+  // project's own clone alias or another finding's independently checkable URL.
+  return {
+    project,
+    projects,
+    claims,
+    allowsSuffix: (url?: string | null) =>
+      gitlab &&
+      (url == null
+        ? !unbound && literalUrls.size === 0
+        : !literalUrls.has(url)),
+  };
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */

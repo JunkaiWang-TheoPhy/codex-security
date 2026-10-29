@@ -4,8 +4,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
-import { snykRestReportRepository } from "./snyk-rest-findings.js";
-import { snykRepositoryClaims } from "./snyk-findings.js";
+import { snykRepositoryScope } from "./snyk-findings.js";
 import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
 import {
   isSemgrepPlatformReport,
@@ -440,14 +439,15 @@ function hostedRepositoryMatches(
   source: HostedRepository,
   value: string,
   expectedKey?: string,
+  gitlab = source.gitlab,
 ): boolean {
   validateHostedRepositoryBytes(value);
   if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
   const github = source.platform === "github";
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
   return (
-    hostedRepositoryUrlKey(url, github, source.gitlab) ===
-    (expectedKey ?? hostedRepositoryUrlKey(source.url, github, source.gitlab))
+    hostedRepositoryUrlKey(url, github, gitlab) ===
+    (expectedKey ?? hostedRepositoryUrlKey(source.url, github, gitlab))
   );
 }
 
@@ -643,9 +643,14 @@ async function requireMatchingRepository(
         } catch (error) {
           if (!(
             error instanceof Error &&
+            "code" in error &&
+            error.code === 128 &&
             "stderr" in error &&
             typeof error.stderr === "string" &&
-            error.stderr.trimEnd() === "fatal: transport 'ssh' not allowed"
+            error.stderr
+              .split(/\r?\n/u)
+              .filter((line) => line.startsWith("fatal: "))
+              .join("\n") === "fatal: transport 'ssh' not allowed"
           ))
             throw error;
         }
@@ -847,12 +852,12 @@ export async function prepareLocalImport(
   const sources = new Map<string, ExternalSourceRepository>();
   const reportUrl = current.sourceRepositoryUrl || undefined;
   if (reportUrl) sources.set(reportUrl, { url: reportUrl });
-  const emptyProject =
-    options.provider === "snyk" && !current.findings.length
-      ? snykRestReportRepository(current.report)
-      : undefined;
-  if (emptyProject) sources.set(emptyProject.url, { url: emptyProject.url });
-  let hostedUrl = reportUrl ?? emptyProject?.url;
+  const snyk =
+    options.provider === "snyk" ? snykRepositoryScope(current) : undefined;
+  const snykProject = snyk?.project;
+  for (const url of [snykProject?.url, snykProject?.nativeUrl])
+    if (url) sources.set(url, { url });
+  let hostedUrl = reportUrl ?? snykProject?.url;
   const reportPlatform = current.sourceRepositoryPlatform;
   const singleProject = Boolean(
     hostedUrl ||
@@ -862,11 +867,10 @@ export async function prepareLocalImport(
         isSemgrepPlatformReport(evidence.source_data),
       )),
   );
-  let hostedGitLab: boolean | undefined = emptyProject?.gitlab;
   let hostedGitHub: boolean | undefined =
     reportPlatform === "other"
       ? false
-      : emptyProject && emptyProject.platform === "github";
+      : snykProject && snykProject.platform === "github";
   if (
     options.provider === "snyk" &&
     !current.findings.length &&
@@ -878,16 +882,13 @@ export async function prepareLocalImport(
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
     const data = evidence.source_data;
-    if (options.provider === "snyk") {
-      const claims = snykRepositoryClaims(data);
-      if (!claims.length) hostedGitLab = false;
-      for (const source of claims) {
+    if (snyk && data) {
+      for (const source of snyk.claims.get(data) ?? []) {
         sources.set(source.url, { url: source.url });
         if (source.nativeUrl)
           sources.set(source.nativeUrl, { url: source.nativeUrl });
         if (data?.["format"] === SNYK_REST_ISSUES_FORMAT) {
           hostedUrl ??= source.url;
-          hostedGitLab = (hostedGitLab ?? true) && source.gitlab === true;
         } else if (
           !hostedUrl &&
           reportPlatform === "other" &&
@@ -973,11 +974,18 @@ export async function prepareLocalImport(
     hosted = {
       url,
       platform: github ? "github" : undefined,
-      gitlab: hostedGitLab,
+      gitlab: snyk?.allowsSuffix(),
     };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
-      if (!hostedRepositoryMatches(hosted, url))
+      if (
+        !hostedRepositoryMatches(
+          hosted,
+          url,
+          undefined,
+          snyk?.allowsSuffix(url),
+        )
+      )
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );

@@ -1,4 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
+import { hostedRepositoryUrlKey } from "./external-import-contract.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
@@ -38,6 +39,21 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
       "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
     );
   return raw;
+}
+
+/** Native scanner URLs must identify the same repository both as Git remotes and as web links. */
+export function sameHostedScannerRepository(
+  url: string,
+  expected: string,
+  github = false,
+  knownGitSuffix = false,
+): boolean {
+  const key = (value: string) =>
+    hostedRepositoryUrlKey(value, github, knownGitSuffix);
+  return (
+    key(url) === key(expected) &&
+    key(new URL(url).href) === key(new URL(expected).href)
+  );
 }
 
 function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {

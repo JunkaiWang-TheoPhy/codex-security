@@ -62,7 +62,9 @@ Use a stable Wiz tenant/finding namespace as `--source-key`; a project filter do
 
 ## Snyk
 
-For an existing backlog, run `codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json` with a read-authorized `SNYK_TOKEN`. Select the Open Source manifest project (default product) or the Code project with `--snyk-product code`. Save the complete report and keep a stable source key for that organization, project and product.
+Before collecting a hosted backlog, confirm the organization's Snyk API origin from its configured endpoint or the user. An opaque token does not identify its region. Use the origin saved in the Snyk CLI configuration file when that is where the region is set.
+
+Run `codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --snyk-api-origin API_ORIGIN --format json` with a read-authorized `SNYK_TOKEN`. For an EU organization, use `https://api.eu.snyk.io`. Select the Open Source manifest project (default product) or the Code project with `--snyk-product code`. Save the complete report and keep a stable source key for that organization, project and product.
 
 For a new Open Source scan, ask the [official Snyk plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex) to run `snyk-findings-export` for SCA only from the Git root. Save its `snyk-findings-export/v1` bundle and check the reported coverage and limitations. For CLI automation, use ungrouped native JSON from `snyk test --file=package.json --json-file-output=snyk-open-source.json`. Exit 1 means findings. Stop on other nonzero exits. Existing Open Source SARIF is also supported.
 

@@ -311,6 +311,24 @@ test("a saved Semgrep .git alias on a custom host retains the selected repositor
     { ...fixture.dependencies, sourceRepositories },
   );
   expect(prepared.preview.findings).toEqual(expected.findings);
+
+  // Older exports omitted equivalent mappings from per-finding evidence.
+  const legacy = { ...report, sourceRepositoryUrl: undefined };
+  const remapped = normalizeSemgrepPlatformFindings(legacy, {
+    sourceRepositoryUrl: mapping,
+    sourceRepositories,
+  });
+  expect(remapped.sourceRepositoryUrl).toBe(mapping);
+  expect(remapped.findings).toEqual(
+    normalizeSemgrepPlatformFindings(legacy).findings,
+  );
+  await expect(
+    prepareNormalizedLocalImport(
+      remapped,
+      fixture.options,
+      fixture.dependencies,
+    ),
+  ).rejects.toThrow("does not match");
 });
 
 test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {

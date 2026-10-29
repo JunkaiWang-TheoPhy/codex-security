@@ -1855,7 +1855,11 @@ describe("local normalized scanner findings", () => {
           url,
         ]);
       const dependencies = {
-        environment,
+        environment: {
+          ...environment,
+          GIT_TRACE: "1",
+          GIT_TRACE_PERFORMANCE: "1",
+        },
         sourceRepositories: [{ url: sourceUrl }],
       };
       const preparation = prepareNormalizedLocalImport(

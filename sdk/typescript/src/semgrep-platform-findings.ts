@@ -1,7 +1,6 @@
 import {
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
-  hostedRepositoryUrlKey,
   repositoryUrlKey,
   isVerifiedGitHubRepository,
   validateExternalEvidence,
@@ -15,6 +14,7 @@ import {
   hostedScannerHttp,
   hostedEnvironmentToken,
   hostedRepositoryUrl,
+  sameHostedScannerRepository,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import type { SemgrepImportOptions } from "./semgrep-findings.js";
@@ -101,10 +101,7 @@ function matchingRepositoryUrl(
   github: boolean,
 ): void {
   const url = hostedRepositoryUrl(value, "Semgrep repository URL");
-  if (
-    hostedRepositoryUrlKey(url, github) !==
-    hostedRepositoryUrlKey(expected, github)
-  )
+  if (!sameHostedScannerRepository(url, expected, github))
     throw new Error(
       "Semgrep Platform repository does not match the selected source repository.",
     );
@@ -500,6 +497,7 @@ export function normalizePlatformReport(
   );
   return {
     ...result,
-    sourceRepositoryUrl: selected.binding.sourceRepositoryUrl ?? selected.url,
+    sourceRepositoryUrl:
+      declared ?? selected.binding.sourceRepositoryUrl ?? selected.url,
   };
 }

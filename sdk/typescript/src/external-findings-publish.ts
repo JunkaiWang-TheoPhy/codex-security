@@ -41,11 +41,7 @@ import {
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
-import { snykRepositoryClaims } from "./snyk-findings.js";
-import {
-  SNYK_REST_ISSUES_FORMAT,
-  snykRestFindingRepository,
-} from "./snyk-rest-findings.js";
+import { snykRepositoryClaims, snykRepositoryScope } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
@@ -476,17 +472,10 @@ async function preparePublicationInput(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
-  // Hosted rows establish platform from their original project and target, independently of the current destination.
-  const hostedSnyk = new Map<
-    Record<string, unknown>,
-    ReturnType<typeof snykRestFindingRepository>
-  >();
-  for (const { evidence } of parsed.findings) {
-    const data = evidence.source_data;
-    checkHostedFindingProvider(options.provider, data);
-    if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
-      hostedSnyk.set(data, snykRestFindingRepository(data));
-  }
+  for (const { evidence } of parsed.findings)
+    checkHostedFindingProvider(options.provider, evidence.source_data);
+  const snyk =
+    options.provider === "snyk" ? snykRepositoryScope(parsed) : undefined;
   const semgrepProject =
     options.provider === "semgrep"
       ? parsed.findings.find(({ evidence }) =>
@@ -497,31 +486,22 @@ async function preparePublicationInput(
     parsed.sourceRepositoryUrl ||
     parsed.sourceRepositoryPlatform ||
     semgrepProject ||
-    hostedSnyk.size,
+    snyk?.projects.length,
   );
   if (bound) validateHostedRepositoryBytes(options.repository);
-  const nativeSources = [...hostedSnyk.values()];
-  // Legacy plugin and SARIF rows can use the verified GitLab repository's clone suffix.
-  // Each still needs its own repository claim, checked against the report below.
-  const gitlab =
-    nativeSources.length > 0 &&
-    parsed.findings.every(({ evidence: { source_data: data } }) => {
-      const native = data && hostedSnyk.get(data);
-      return native ? native.gitlab : snykRepositoryClaims(data).length > 0;
-    });
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
-    nativeSources.some(({ platform }) => platform === "other");
+    snyk?.projects.some(({ platform }) => platform === "other");
   // The authenticated catalog uses GitHub URL identity even when scanner evidence needs strict path casing.
   const catalogKey = bound
     ? (url: string) => hostedRepositoryUrlKey(url, true)
     : cloudRepositoryUrlKey;
   const reportKey = strictPath
-    ? (url: string) => hostedRepositoryUrlKey(url, false, gitlab)
+    ? (url: string) => hostedRepositoryUrlKey(url, false, snyk?.allowsSuffix())
     : catalogKey;
   const reportSource =
     parsed.sourceRepositoryUrl ||
-    hostedSnyk.values().next().value?.url ||
+    snyk?.projects[0]?.url ||
     (semgrepProject &&
       semgrepPlatformFindingRepository(semgrepProject, () => !strictPath)) ||
     (bound &&
@@ -876,12 +856,16 @@ async function preparePublicationInput(
     id?: string,
     gitAlias = false,
     description = "selected Cloud repository",
+    claim = false,
   ) {
     if (bound && url) validateHostedRepositoryBytes(url);
     const key =
       gitAlias && !bound
         ? (value: string) => hostedRepositoryUrlKey(value, true)
-        : reportKey;
+        : claim && strictPath
+          ? (value: string) =>
+              hostedRepositoryUrlKey(value, false, snyk?.allowsSuffix(url))
+          : reportKey;
     if (url && key(url) !== key(targetUrl)) {
       const label =
         id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
@@ -902,17 +886,22 @@ async function preparePublicationInput(
       "cloud",
       inspectorProjectMap,
     );
-    const check = (url: string | null | undefined, id: string, alias = false) =>
-      requireRepository(url, targetUrl, id, alias, description);
+    const check = (
+      url: string | null | undefined,
+      id?: string,
+      alias = false,
+    ) => requireRepository(url, targetUrl, id, alias, description, true);
     if (binding) check(binding.url, binding.findingId);
+    if (snyk?.project) {
+      check(snyk.project.url);
+      check(snyk.project.nativeUrl);
+    }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const data = evidence.source_data;
       if (options.provider === "snyk") {
-        const native = data && hostedSnyk.get(data);
-        for (const { url, nativeUrl } of native
-          ? [native]
-          : snykRepositoryClaims(data)) {
+        const native = data && snyk?.claims.get(data);
+        for (const { url, nativeUrl } of native ?? snykRepositoryClaims(data)) {
           const alias = normalizeGitRepositoryUrl(url, targetUrl);
           check(alias, id, alias !== url);
           if (nativeUrl) check(nativeUrl, id);

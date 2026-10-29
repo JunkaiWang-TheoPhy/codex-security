@@ -1441,6 +1441,40 @@ test("verified Snyk repositories retain case-sensitive identity when optional ra
   expect((await file()).preview.findings).toHaveLength(1);
 });
 
+test.each(["cloud", "local"] as const)(
+  "%s preparation checks retained Snyk project context after adding a finding",
+  async (target) => {
+    const url = "https://scm.example.test/Team/project";
+    const cloud = await fixture([], url);
+    const local = await localFindingsFixture({ remote: url });
+    cleanups.push(local.dispose);
+    const settings = { ...options, provider: "snyk" as const };
+    const typed = normalizeSnykIssues(
+      snykRestFixture("code", { sourceRepositoryUrl: url }),
+    );
+    delete typed.findings[0]!.evidence.source_data;
+    const prepare = (sourceRepositoryUrl: string) => {
+      const empty = normalizeSnykIssues({
+        ...snykRestFixture("open-source", { sourceRepositoryUrl, issues: [] }),
+        project: snykRestProject({
+          origin: "gitlab",
+          remote: sourceRepositoryUrl,
+        }),
+      });
+      const input = { ...empty, ...typed };
+      return target === "cloud"
+        ? prepareNormalizedExternalPublication(input, settings, cloud.deps)
+        : prepareNormalizedLocalImport(
+            input,
+            { ...settings, repository: local.repository },
+            { environment: local.environment },
+          );
+    };
+    await expect(prepare(url + "-other")).rejects.toThrow("does not match");
+    expect((await prepare(url)).preview.findings).toHaveLength(1);
+  },
+);
+
 test("a pending Snyk publication binds the projected report's repository and comparison policy", async () => {
   const url = "https://scm.example.test/team/project";
   const normalized = normalizeSnykIssues({

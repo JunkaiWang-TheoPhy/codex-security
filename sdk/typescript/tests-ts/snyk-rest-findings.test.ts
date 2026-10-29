@@ -1015,6 +1015,41 @@ test("compares Snyk native HTTP repository URLs without changing their scheme", 
   ).toThrow("target URL");
 });
 
+test("checks native Snyk HTTP paths before removing dot segments", async () => {
+  const source = "https://scm.example.test/Team/repo";
+  for (const path of [String.raw`foreign\sub/../repo`, "%2e%2e/../repo"]) {
+    const native = project({
+      origin: "gitlab",
+      remote: "https://scm.example.test/Team/" + path,
+    });
+    const { requests, collect } = transport(
+      document(native),
+      document([issue()]),
+    );
+    await expect(
+      collect({ ...options, sourceRepositoryUrl: source }),
+    ).rejects.toThrow("repository URL");
+    expect(requests).toHaveLength(1);
+    expect(() =>
+      normalizeSnykIssues({
+        ...envelope(),
+        project: native,
+        sourceRepositoryUrl: source,
+      }),
+    ).toThrow("repository URL");
+  }
+  const native = project({
+    origin: "gitlab",
+    remote: "https://scm.example.test/Team/foreign%5Csub/../repo",
+  });
+  const report = normalizeSnykIssues({
+    ...envelope(),
+    project: native,
+    sourceRepositoryUrl: source,
+  });
+  expect(report.findings[0]!.evidence.source_data?.["project"]).toEqual(native);
+});
+
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {
   for (const foreign of [
     issue({}, { project: otherId }),
@@ -1324,6 +1359,42 @@ test("mixed GitLab and plugin rows check each local repository claim", async () 
     "does not match",
   );
   await expect(prepare(url + "-other.git")).rejects.toThrow("does not match");
+});
+
+test("typed and opaque siblings preserve a verified GitLab project's own clone alias", async () => {
+  const url = "https://scm.example.test/Team/repo";
+  const clone = url + ".git";
+  const hosted = normalizeSnykIssues({
+    ...envelope(),
+    sourceRepositoryUrl: url,
+    project: project({ origin: "gitlab", remote: clone }),
+  });
+  const sibling = {
+    source_finding_id: "sibling",
+    evidence: { title: "Example finding", severity: "high" as const },
+  };
+  const typed = {
+    ...sibling,
+    evidence: {
+      ...sibling.evidence,
+      details: { kind: "sast" as const, repository: { url } },
+    },
+  };
+  const mixed = (...rows: (typeof sibling)[]) => ({
+    ...hosted,
+    findings: [...hosted.findings, ...rows],
+  });
+  await using selected = await snykCheckout(url);
+  await using alternate = await snykCheckout(clone);
+  expect(
+    (await selected.prepareNormalized(mixed(sibling))).preview.findings,
+  ).toHaveLength(2);
+  expect(
+    (await alternate.prepareNormalized(mixed(typed))).preview.findings,
+  ).toHaveLength(2);
+  await expect(alternate.prepareNormalized(mixed(sibling))).rejects.toThrow(
+    "does not match",
+  );
 });
 
 test("mixing Snyk project origins keeps case-sensitive native repository claims", async () => {

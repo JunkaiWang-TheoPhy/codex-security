@@ -233,6 +233,30 @@ test("detects removals before the next offset even when no finding ID repeats", 
   expect(report.findings).toEqual(initial);
 });
 
+test("checks the web and Git destinations of native Semgrep repository URLs", async () => {
+  const source = "https://scm.example.test/Team/repo";
+  const foreign = "https://scm.example.test/Team/%2e%2e/../repo";
+  const project = { ...platformProject, url: source };
+  const finding = { ...platformFinding(12), repository: { url: foreign } };
+  await expect(
+    collectProject({ ...project, url: foreign }, [], source),
+  ).rejects.toThrow("does not match");
+  await expect(collectProject(project, [finding])).rejects.toThrow(
+    "does not match",
+  );
+  expect(() =>
+    normalizeSemgrepPlatformFindings({ ...platformReport([finding]), project }),
+  ).toThrow("does not match");
+
+  finding.repository.url =
+    "https://scm.example.test/Team/foreign%5Csub/../repo";
+  const report = await collectProject(project, [finding]);
+  expect(
+    normalizeSemgrepPlatformFindings(report).findings[0]!.evidence
+      .source_data?.["finding"],
+  ).toEqual(finding);
+});
+
 test("keeps an operator mapping separate from a URL-less project and its short repository name", async () => {
   const project = { ...platformProject, url: null };
   const finding = { ...platformFinding(1), repository: { name: "project" } };

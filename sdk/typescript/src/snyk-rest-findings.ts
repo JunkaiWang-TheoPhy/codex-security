@@ -1,5 +1,4 @@
 import {
-  hostedRepositoryUrlKey,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -15,6 +14,7 @@ import {
   hostedScannerHttp,
   hostedEnvironmentToken,
   hostedRepositoryUrl,
+  sameHostedScannerRepository,
   validateHostedRepositoryBytes,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
@@ -218,18 +218,25 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk CLI HTTP target URL cannot verify a repository. Set an explicit HTTPS URL with snyk monitor --remote-repo-url and collect the resulting project.",
     );
-  const normalized = normalizeHostedGitRepositoryUrl(
-    url,
-    selected.sourceRepositoryUrl,
-    origin.startsWith("github"),
-  );
+  const normalized = /^https?:\/\//iu.test(url)
+    ? hostedRepositoryUrl(url, "Snyk target URL")
+    : normalizeHostedGitRepositoryUrl(
+        url,
+        selected.sourceRepositoryUrl,
+        origin.startsWith("github"),
+      );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
   const gitlab = origin === "gitlab";
-  const key = (value: string) =>
-    hostedRepositoryUrlKey(value, enterprise, gitlab);
-  const source = key(selected.sourceRepositoryUrl);
-  if (/[?#]/u.test(url) || key(normalized) !== source)
+  if (
+    /[?#]/u.test(url) ||
+    !sameHostedScannerRepository(
+      normalized,
+      selected.sourceRepositoryUrl,
+      enterprise,
+      gitlab,
+    )
+  )
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
