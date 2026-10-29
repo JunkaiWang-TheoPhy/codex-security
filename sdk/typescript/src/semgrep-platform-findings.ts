@@ -246,7 +246,7 @@ export async function collectSemgrepPlatformFindings(
   if (project.name !== name)
     throw new Error("Semgrep returned a different project than requested.");
   const url = new URL(`${base}/findings`);
-  const pageSize = 100;
+  const pageSize = 3000;
   url.search = new URLSearchParams({
     repository_ids: String(project.id),
     ref,

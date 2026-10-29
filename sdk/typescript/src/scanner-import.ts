@@ -97,10 +97,44 @@ export function decodeScannerJson(bytes: ArrayBuffer | Uint8Array): string {
   }
 }
 
-export async function readScannerJson(path: string): Promise<unknown> {
+export function parseHostedScannerJson(
+  source: string,
+  hostedFormat?: string,
+): unknown {
+  // A saved file can identify its format after its findings. Keep only replacements
+  // for numbers that would lose precision until the top-level format is known.
+  const pending: [Record<string, unknown>, string, string | undefined][] = [];
+  const report: unknown = JSON.parse(
+    source,
+    function (key, value: unknown, context?: { source?: string }) {
+      if (
+        typeof value === "number" &&
+        (!Number.isFinite(value) ||
+          (Number.isInteger(value) && !Number.isSafeInteger(value)))
+      ) {
+        if (!hostedFormat)
+          return requiredText(context?.source, "Exact scanner numeric value");
+        pending.push([this, key, context?.source]);
+      }
+      return value;
+    },
+  );
+  if (hostedFormat && isRecord(report) && report["format"] === hostedFormat)
+    for (const [parent, key, exact] of pending)
+      parent[key] = requiredText(exact, "Exact scanner numeric value");
+  return report;
+}
+
+export async function readScannerJson(
+  path: string,
+  hostedFormat?: string,
+): Promise<unknown> {
   const decoded = decodeScannerJson(await readScannerBytes(path));
   try {
-    return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
+    const json = decoded.replace(/^\uFEFF/u, "");
+    return hostedFormat
+      ? parseHostedScannerJson(json, hostedFormat)
+      : JSON.parse(json);
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,

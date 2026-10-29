@@ -1884,6 +1884,46 @@ describe("local normalized scanner findings", () => {
     },
   );
 
+  test.each([
+    ["ftp", "ftp", false],
+    ["ftps", "https", true],
+    ["https", "ftp", false],
+  ] as const)(
+    "checks the %s address of a %s curl helper",
+    async (scheme, helper, useVcs) => {
+      const path = "git.example.test/Team/Repo";
+      const url = `${scheme}://${path}`;
+      const { repository, environment } = await fixture({
+        remote: useVcs ? url : `${helper}::${url}`,
+      });
+      if (useVcs)
+        execFileSync("git", [
+          "-C",
+          repository,
+          "config",
+          "remote.origin.vcs",
+          helper,
+        ]);
+      const prepare = (sourceUrl: string) =>
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          { environment, sourceRepositories: [{ url: sourceUrl }] },
+        );
+      await prepare(url);
+      for (const other of ["ftp", "ftps", "https"].filter(
+        (candidate) => candidate !== scheme,
+      ))
+        await expect(prepare(`${other}://${path}`)).rejects.toThrow(
+          "does not match",
+        );
+      if (scheme !== "https")
+        await expect(prepare(`${scheme}://other@${path}`)).rejects.toThrow(
+          "does not match",
+        );
+    },
+  );
+
   test("preserves Git configuration errors during repository matching", async () => {
     const { repository, stateDirectory, environment } = await fixture({
       remote: "https://github.com/example/project",

@@ -21,9 +21,7 @@ const options = {
   project: platformProject.name,
   ref: platformRef,
 };
-const first = Array.from({ length: 100 }, (_, index) =>
-  platformFinding(index + 1),
-);
+const first = Array.from({ length: 3000 }, (_, index) => ({ id: index + 1 }));
 
 function collectPages(...pages: unknown[]) {
   const responses = [{ project: platformProject }, ...pages];
@@ -65,17 +63,25 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
         repository_ids: "77",
         dedup: "false",
         issue_type: "sast",
-        page_size: "100",
+        page_size: "3000",
       });
       pages.push(query["page"]!);
       return Response.json({
-        findings: query["page"] === "0" ? first : [platformFinding(101)],
+        findings: query["page"] === "0" ? first : [{ id: first.length + 1 }],
       });
     },
   });
   expect(pages).toEqual(["0", "1", "0"]);
-  expect(report.findings).toHaveLength(101);
+  expect(report.findings).toHaveLength(first.length + 1);
   expect(JSON.stringify(report)).not.toContain("synthetic-web-token");
+});
+
+test("collects and replays 101 findings in a single API page", async () => {
+  const rows = Array.from({ length: 101 }, (_, index) =>
+    platformFinding(index + 1),
+  );
+  const report = await collectPages({ findings: rows });
+  expect(report.findings).toEqual(rows);
   const parsed = normalizeSemgrepPlatformFindings(report);
   expect(parsed.findings[0]?.evidence).toMatchObject({
     branch: platformRef,
@@ -176,7 +182,7 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
     [Response.json({ findings: first }), "repeated"],
     [
       Response.json({
-        findings: [{ ...first[99], id: "100" }, platformFinding(101)],
+        findings: [{ id: String(first.length) }, { id: first.length + 1 }],
       }),
       "repeated",
     ],
@@ -196,12 +202,12 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
 });
 
 test("detects removals before the next offset even when no finding ID repeats", async () => {
-  // Finding 1 disappears after the first page. Finding 101 shifts into it, so page 1 starts at 102.
+  // Finding 1 disappears and the first finding from page 1 shifts into page 0.
   await expect(
     collectPages(
       { findings: first },
-      { findings: [platformFinding(102)] },
-      { findings: [...first.slice(1), platformFinding(101)] },
+      { findings: [{ id: first.length + 2 }] },
+      { findings: [...first.slice(1), { id: first.length + 1 }] },
     ),
   ).rejects.toThrow("changed across pages");
 

@@ -118,7 +118,19 @@ test("retains large JSON integers in Snyk target metadata through collection and
     new Response(body),
     document([issue()]),
   ).collect();
-  const replay = normalizeSnykIssues(JSON.parse(JSON.stringify(report)));
+  const replay = normalizeSnykIssues(report);
+  const directory = await mkdtemp(join(tmpdir(), "snyk-int64-"));
+  try {
+    const path = join(directory, "report.json.gz");
+    const wire = JSON.stringify(report).replace(
+      /"(9007199254740993|1e400)"/gu,
+      "$1",
+    );
+    await writeFile(path, gzipSync(wire));
+    expect(await readSnykFindings(path)).toEqual(replay);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
   expect(replay.findings[0]?.evidence.source_data?.["project"]).toMatchObject({
     relationships: {
       target: {
@@ -706,38 +718,34 @@ test.each([
       ...options,
       sourceRepositoryUrl: `https://${host}/${name}`,
     };
-    const checkout = await snykCheckout(scp);
-    try {
-      for (const remote of [
-        scp,
-        `ssh://git@${host}:22/${name}.git`,
-        `ssh://git@altssh.${host}:443/${name}.git`,
-      ]) {
-        const { collect } = transport(
-          document(project({ origin, remote })),
-          document([issue()]),
-        );
-        const saved = await collect(selected);
-        const normalized = normalizeSnykIssues(saved, "local");
-        const prepared = await checkout.prepareNormalized(normalized);
-        expect(prepared.preview.findings).toHaveLength(1);
-      }
-      for (const remote of [
-        scp.toLowerCase(),
-        `other@${host}:${name}`,
-        `ssh://git@${host}:2222/${name}`,
-        `ssh://other@altssh.${host}:443/${name}`,
-        `ssh://git@altssh.${host}:22/${name}`,
-        `git@scm.example.test:${name}`,
-      ]) {
-        const { collect, requests } = transport(
-          document(project({ origin, remote })),
-        );
-        await expect(collect(selected)).rejects.toThrow("target URL");
-        expect(requests).toHaveLength(1);
-      }
-    } finally {
-      await checkout.dispose();
+    await using checkout = await snykCheckout(scp);
+    for (const remote of [
+      scp,
+      `ssh://git@${host}:22/${name}.git`,
+      `ssh://git@altssh.${host}:443/${name}.git`,
+    ]) {
+      const { collect } = transport(
+        document(project({ origin, remote })),
+        document([issue()]),
+      );
+      const saved = await collect(selected);
+      const normalized = normalizeSnykIssues(saved, "local");
+      const prepared = await checkout.prepareNormalized(normalized);
+      expect(prepared.preview.findings).toHaveLength(1);
+    }
+    for (const remote of [
+      scp.toLowerCase(),
+      `other@${host}:${name}`,
+      `ssh://git@${host}:2222/${name}`,
+      `ssh://other@altssh.${host}:443/${name}`,
+      `ssh://git@altssh.${host}:22/${name}`,
+      `git@scm.example.test:${name}`,
+    ]) {
+      const { collect, requests } = transport(
+        document(project({ origin, remote })),
+      );
+      await expect(collect(selected)).rejects.toThrow("target URL");
+      expect(requests).toHaveLength(1);
     }
   },
 );
@@ -1160,286 +1168,281 @@ test.each(["open-source", "code"] as const)(
     const url = "https://scm.example.test/Org/project";
     const remote = "git@scm.example.test:org/PROJECT.git";
     const sourceKey = `${organizationId}/${projectId}/${product}`;
-    const fixture = await snykCheckout(remote, sourceKey);
-    const wrong = await snykCheckout(
+    await using fixture = await snykCheckout(remote, sourceKey);
+    await using wrong = await snykCheckout(
       "https://github.com/example/other",
       sourceKey,
     );
-    try {
-      const manager = product === "code" ? "sast" : "npm";
-      const report = (options?: Parameters<typeof snykRestFixture>[1]) => ({
-        ...snykRestFixture(product, { ...options, sourceRepositoryUrl: url }),
-        project: project({ manager, origin: "github-enterprise", remote }),
+    const manager = product === "code" ? "sast" : "npm";
+    const report = (options?: Parameters<typeof snykRestFixture>[1]) => ({
+      ...snykRestFixture(product, { ...options, sourceRepositoryUrl: url }),
+      project: project({ manager, origin: "github-enterprise", remote }),
+    });
+    const initial = report();
+    const prepare = async (
+      report: SnykIssuesExport,
+      local = fixture,
+      references?: ExternalSourceRepository[],
+      sourceRepositoryUrl = references?.[0]?.url,
+    ) => {
+      const filename = join(local.root, "snyk-hosted.json");
+      await writeFile(filename, JSON.stringify(report));
+      return prepareLocalExternalImport(
+        filename,
+        { ...local.selection, sourceRepositoryUrl },
+        {
+          environment: local.environment,
+          sourceRepositories: references,
+        },
+      );
+    };
+    const empty = report({ issues: [] });
+    await expect(
+      prepare(
+        initial,
+        fixture,
+        undefined,
+        "https://scm.example.test/unusable path/../Org/project",
+      ),
+    ).rejects.toThrow("percent-encode");
+    const excluded = report({
+      issues: [issue({ type: "license" })],
+    });
+    for (const report of [initial, empty, excluded]) {
+      await expect(prepare(report, wrong)).rejects.toThrow(
+        /does not match a configured remote/,
+      );
+    }
+    const normalizedEmpty = normalizeSnykIssues(empty, "local");
+    await expect(wrong.prepareNormalized(normalizedEmpty)).rejects.toThrow(
+      /does not match a configured remote/,
+    );
+    expect(
+      (await fixture.prepareNormalized(normalizedEmpty)).preview.findings,
+    ).toHaveLength(0);
+    const {
+      sourceRepositoryUrl: _url,
+      sourceRepositoryPlatform: _platform,
+      ...rows
+    } = normalizeSnykIssues(initial, "local");
+    expect(
+      (await fixture.prepareNormalized(rows)).preview.findings,
+    ).toHaveLength(1);
+    const binding = [{ url: url.toLowerCase(), platform: "github" as const }];
+    for (const saved of [empty, initial]) {
+      const withProject = (origin: string, remote: string | null) => ({
+        ...saved,
+        project: project({ manager, origin, remote }),
       });
-      const initial = report();
-      const prepare = async (
-        report: SnykIssuesExport,
-        local = fixture,
-        references?: ExternalSourceRepository[],
-      ) => {
-        const filename = join(local.root, "snyk-hosted.json");
-        await writeFile(filename, JSON.stringify(report));
-        return prepareLocalExternalImport(
-          filename,
-          { ...local.selection, sourceRepositoryUrl: references?.[0]?.url },
-          {
-            environment: local.environment,
-            sourceRepositories: references,
-          },
-        );
-      };
-      const empty = report({ issues: [] });
-      const excluded = report({
-        issues: [issue({ type: "license" })],
-      });
-      for (const report of [initial, empty, excluded]) {
-        await expect(prepare(report, wrong)).rejects.toThrow(
-          /does not match a configured remote/,
-        );
-      }
-      const normalizedEmpty = normalizeSnykIssues(empty, "local");
-      await expect(wrong.prepareNormalized(normalizedEmpty)).rejects.toThrow(
+      const unknownReport = withProject("github-enterprise", null);
+      const unknown = normalizeSnykIssues(unknownReport, "local");
+      await expect(fixture.prepareNormalized(unknown)).rejects.toThrow(
         /does not match a configured remote/,
       );
       expect(
-        (await fixture.prepareNormalized(normalizedEmpty)).preview.findings,
-      ).toHaveLength(0);
-      const {
-        sourceRepositoryUrl: _url,
-        sourceRepositoryPlatform: _platform,
-        ...rows
-      } = normalizeSnykIssues(initial, "local");
+        (await fixture.prepareNormalized(unknown, binding)).preview.read,
+      ).toBe(unknown.read);
       expect(
-        (await fixture.prepareNormalized(rows)).preview.findings,
-      ).toHaveLength(1);
-      const binding = [{ url: url.toLowerCase(), platform: "github" as const }];
-      for (const saved of [empty, initial]) {
-        const withProject = (origin: string, remote: string | null) => ({
-          ...saved,
-          project: project({ manager, origin, remote }),
-        });
-        const unknownReport = withProject("github-enterprise", null);
-        const unknown = normalizeSnykIssues(unknownReport, "local");
-        await expect(fixture.prepareNormalized(unknown)).rejects.toThrow(
+        (await prepare(unknownReport, fixture, binding)).preview.read,
+      ).toBe(unknown.read);
+      const { relationships: _links, ...linkless } = project({
+        manager,
+        origin: "azure-repos",
+      });
+      for (const nonGitHubReport of [
+        withProject("gitlab", url),
+        withProject("gitlab", null),
+        { ...saved, project: linkless },
+      ]) {
+        const normalized = normalizeSnykIssues(nonGitHubReport, "local");
+        await expect(
+          prepare(nonGitHubReport, fixture, binding),
+        ).rejects.toThrow("does not match");
+        await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
           /does not match a configured remote/,
         );
-        expect(
-          (await fixture.prepareNormalized(unknown, binding)).preview.read,
-        ).toBe(unknown.read);
-        expect(
-          (await prepare(unknownReport, fixture, binding)).preview.read,
-        ).toBe(unknown.read);
-        const { relationships: _links, ...linkless } = project({
-          manager,
-          origin: "azure-repos",
-        });
-        for (const nonGitHubReport of [
-          withProject("gitlab", url),
-          withProject("gitlab", null),
-          { ...saved, project: linkless },
-        ]) {
-          const normalized = normalizeSnykIssues(nonGitHubReport, "local");
-          await expect(
-            prepare(nonGitHubReport, fixture, binding),
-          ).rejects.toThrow("does not match");
-          await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
-            /does not match a configured remote/,
-          );
-          await expect(
-            fixture.prepareNormalized(normalized, binding),
-          ).rejects.toThrow("does not match");
-        }
+        await expect(
+          fixture.prepareNormalized(normalized, binding),
+        ).rejects.toThrow("does not match");
       }
-      const importReport = async (report: SnykIssuesExport) =>
-        (await prepare(report)).import();
-      expect((await importReport(initial)).counts.created).toBe(1);
-      expect((await importReport(initial)).counts.unchanged).toBe(1);
-      expect((await importReport(empty)).ready).toBe(0);
-
-      const updated = report({
-        title: "Updated source title",
-        updatedAt: "2025-02-04T00:00:00Z",
-      });
-      expect((await importReport(updated)).counts.updated).toBe(1);
-      const stored = await listLocalExternalFindings(fixture.selection, {
-        environment: fixture.environment,
-      });
-      expect(stored).toHaveLength(1);
-      const finding = normalizeSnykIssues(updated).findings[0]!;
-      expect(stored).toMatchObject([
-        {
-          sourceFindingId: finding.source_finding_id,
-          version: 2,
-          assessment: { state: "not_assessed" },
-          evidence: finding.evidence,
-        },
-      ]);
-    } finally {
-      await Promise.all([fixture.dispose(), wrong.dispose()]);
     }
+    const importReport = async (report: SnykIssuesExport) =>
+      (await prepare(report)).import();
+    expect((await importReport(initial)).counts.created).toBe(1);
+    expect((await importReport(initial)).counts.unchanged).toBe(1);
+    expect((await importReport(empty)).ready).toBe(0);
+
+    const updated = report({
+      title: "Updated source title",
+      updatedAt: "2025-02-04T00:00:00Z",
+    });
+    expect((await importReport(updated)).counts.updated).toBe(1);
+    const stored = await listLocalExternalFindings(fixture.selection, {
+      environment: fixture.environment,
+    });
+    expect(stored).toHaveLength(1);
+    const finding = normalizeSnykIssues(updated).findings[0]!;
+    expect(stored).toMatchObject([
+      {
+        sourceFindingId: finding.source_finding_id,
+        version: 2,
+        assessment: { state: "not_assessed" },
+        evidence: finding.evidence,
+      },
+    ]);
   },
 );
 
 test("local Snyk replay accepts the verified GitLab.com SSH alias and preserves namespace case", async () => {
   const url = "https://gitlab.com/Group/project";
   const remote = "git@gitlab.com:Group/project.git";
-  const fixture = await snykCheckout(
+  await using fixture = await snykCheckout(
     "ssh://git@gitlab.com:bad/other/project",
     "gitlab",
   );
-  try {
-    execFileSync("git", [
-      "-C",
-      fixture.repository,
-      "remote",
-      "add",
-      "upstream",
-      remote,
-    ]);
-    const input = normalizeSnykIssues({
-      ...envelope(),
-      sourceRepositoryUrl: url,
-      project: project({ origin: "gitlab", remote }),
-    });
-    const prepare = (reference: string) =>
-      fixture.prepareNormalized(input, [{ url: reference }]);
-    expect((await prepare(remote)).preview.findings).toHaveLength(1);
-    await expect(prepare(remote.toLowerCase())).rejects.toThrow(
-      "does not match",
-    );
-  } finally {
-    await fixture.dispose();
-  }
+  execFileSync("git", [
+    "-C",
+    fixture.repository,
+    "remote",
+    "add",
+    "upstream",
+    remote,
+  ]);
+  const input = normalizeSnykIssues({
+    ...envelope(),
+    sourceRepositoryUrl: url,
+    project: project({ origin: "gitlab", remote }),
+  });
+  const prepare = (reference: string) =>
+    fixture.prepareNormalized(input, [{ url: reference }]);
+  expect((await prepare(remote)).preview.findings).toHaveLength(1);
+  await expect(prepare(remote.toLowerCase())).rejects.toThrow("does not match");
 });
 
 test("mixing Snyk project origins keeps case-sensitive native repository claims", async () => {
   const url = "https://scm.example.test/Owner/project";
-  const fixture = await snykCheckout(url, "mixed");
-  try {
-    const row = (origin: string, source: string, remote = source) =>
-      normalizeSnykIssues({
-        ...envelope([issue({ key: origin })]),
-        sourceRepositoryUrl: source,
-        project: project({ origin, remote }),
-      }).findings[0]!;
-    const github = row("github-enterprise", url);
-    const gitlab = row("gitlab", url.toLowerCase());
-    const nativeCase = row("github-enterprise", url, url.toLowerCase());
+  await using fixture = await snykCheckout(url, "mixed");
+  const row = (origin: string, source: string, remote = source) =>
+    normalizeSnykIssues({
+      ...envelope([issue({ key: origin })]),
+      sourceRepositoryUrl: source,
+      project: project({ origin, remote }),
+    }).findings[0]!;
+  const github = row("github-enterprise", url);
+  const gitlab = row("gitlab", url.toLowerCase());
+  const nativeCase = row("github-enterprise", url, url.toLowerCase());
+  await expect(
+    fixture.prepareNormalized({
+      read: 1,
+      findings: [nativeCase],
+      excluded: [],
+      sourceRepositoryPlatform: "other",
+    }),
+  ).rejects.toThrow("does not match");
+  for (const findings of [
+    [github, gitlab],
+    [gitlab, github],
+    [nativeCase, row("gitlab", url)],
+  ]) {
     await expect(
       fixture.prepareNormalized({
-        read: 1,
-        findings: [nativeCase],
-        excluded: [],
-        sourceRepositoryPlatform: "other",
-      }),
-    ).rejects.toThrow("does not match");
-    for (const findings of [
-      [github, gitlab],
-      [gitlab, github],
-      [nativeCase, row("gitlab", url)],
-    ]) {
-      await expect(
-        fixture.prepareNormalized({
-          sourceRepositoryUrl: url,
-          read: 2,
-          findings,
-          excluded: [],
-        }),
-      ).rejects.toThrow("does not match");
-    }
-    const projected = normalizeSnykIssues({
-      ...snykRestFixture("code", { sourceRepositoryUrl: url.toLowerCase() }),
-      project: project({
-        manager: "sast",
-        origin: "gitlab",
-        remote: url.toLowerCase(),
-      }),
-    });
-    delete projected.sourceRepositoryUrl;
-    delete projected.findings[0]!.evidence.source_data;
-    await expect(
-      fixture.prepareNormalized({
-        ...projected,
+        sourceRepositoryUrl: url,
         read: 2,
-        findings: [github, ...projected.findings],
+        findings,
+        excluded: [],
       }),
     ).rejects.toThrow("does not match");
-    await expect(
-      fixture.prepareNormalized(projected, [{ url, platform: "github" }]),
-    ).rejects.toThrow("does not match");
-    const sca = normalizeSnykIssues({
-      ...envelope(),
-      sourceRepositoryUrl: url.toLowerCase(),
-      project: project({ origin: "gitlab", remote: null }),
-    });
-    delete sca.sourceRepositoryUrl;
-    delete sca.findings[0]!.evidence.source_data;
-    await expect(
-      fixture.prepareNormalized(sca, [
-        { url: url.toLowerCase(), platform: "github" },
-      ]),
-    ).rejects.toThrow("does not match");
-    expect(
-      (await fixture.prepareNormalized(sca, [{ url, platform: "github" }]))
-        .preview.findings,
-    ).toHaveLength(1);
-    expect(
-      (await fixture.prepareNormalized(sca)).preview.findings,
-    ).toHaveLength(1);
-    const other = "https://gitlab.com/Other/project";
-    execFileSync("git", [
-      "-C",
-      fixture.repository,
-      "remote",
-      "add",
-      "other",
-      other,
-    ]);
-    const references = [{ url }, { url: other }];
-    for (const platform of ["github", "other"] as const)
-      await expect(
-        fixture.prepareNormalized(
-          { ...sca, sourceRepositoryPlatform: platform },
-          references,
-        ),
-      ).rejects.toThrow("does not match");
-    delete sca.sourceRepositoryPlatform;
-    expect(
-      (await fixture.prepareNormalized(sca, references)).preview.findings,
-    ).toHaveLength(1);
-    sca.sourceRepositoryPlatform = "github";
-    const ssh = {
-      url: "git@scm.example.test:owner/project.git",
-      platform: "github" as const,
-    };
-    for (const refs of [
-      [ssh],
-      [ssh, { url }],
-      [{ url }, ssh],
-      [
-        {
-          ...ssh,
-          url: "ssh://%67it@%73cm.example.test%3A22/owner/project.git",
-        },
-      ],
-    ])
-      expect(
-        (await fixture.prepareNormalized(sca, refs)).preview.findings,
-      ).toHaveLength(1);
-    const unsupported = "ssh://deploy@scm.example.test/Owner/project.git";
-    execFileSync("git", [
-      "-C",
-      fixture.repository,
-      "remote",
-      "set-url",
-      "other",
-      unsupported,
-    ]);
-    sca.sourceRepositoryPlatform = "other";
-    await expect(
-      fixture.prepareNormalized(sca, [{ url: unsupported }]),
-    ).rejects.toThrow("HTTP(S)");
-  } finally {
-    await fixture.dispose();
   }
+  const projected = normalizeSnykIssues({
+    ...snykRestFixture("code", { sourceRepositoryUrl: url.toLowerCase() }),
+    project: project({
+      manager: "sast",
+      origin: "gitlab",
+      remote: url.toLowerCase(),
+    }),
+  });
+  delete projected.sourceRepositoryUrl;
+  delete projected.findings[0]!.evidence.source_data;
+  await expect(
+    fixture.prepareNormalized({
+      ...projected,
+      read: 2,
+      findings: [github, ...projected.findings],
+    }),
+  ).rejects.toThrow("does not match");
+  await expect(
+    fixture.prepareNormalized(projected, [{ url, platform: "github" }]),
+  ).rejects.toThrow("does not match");
+  const sca = normalizeSnykIssues({
+    ...envelope(),
+    sourceRepositoryUrl: url.toLowerCase(),
+    project: project({ origin: "gitlab", remote: null }),
+  });
+  delete sca.sourceRepositoryUrl;
+  delete sca.findings[0]!.evidence.source_data;
+  await expect(
+    fixture.prepareNormalized(sca, [
+      { url: url.toLowerCase(), platform: "github" },
+    ]),
+  ).rejects.toThrow("does not match");
+  expect(
+    (await fixture.prepareNormalized(sca, [{ url, platform: "github" }]))
+      .preview.findings,
+  ).toHaveLength(1);
+  expect((await fixture.prepareNormalized(sca)).preview.findings).toHaveLength(
+    1,
+  );
+  const other = "https://gitlab.com/Other/project";
+  execFileSync("git", [
+    "-C",
+    fixture.repository,
+    "remote",
+    "add",
+    "other",
+    other,
+  ]);
+  const references = [{ url }, { url: other }];
+  for (const platform of ["github", "other"] as const)
+    await expect(
+      fixture.prepareNormalized(
+        { ...sca, sourceRepositoryPlatform: platform },
+        references,
+      ),
+    ).rejects.toThrow("does not match");
+  delete sca.sourceRepositoryPlatform;
+  expect(
+    (await fixture.prepareNormalized(sca, references)).preview.findings,
+  ).toHaveLength(1);
+  sca.sourceRepositoryPlatform = "github";
+  const ssh = {
+    url: "git@scm.example.test:owner/project.git",
+    platform: "github" as const,
+  };
+  for (const refs of [
+    [ssh],
+    [ssh, { url }],
+    [{ url }, ssh],
+    [
+      {
+        ...ssh,
+        url: "ssh://%67it@%73cm.example.test%3A22/owner/project.git",
+      },
+    ],
+  ])
+    expect(
+      (await fixture.prepareNormalized(sca, refs)).preview.findings,
+    ).toHaveLength(1);
+  const unsupported = "ssh://deploy@scm.example.test/Owner/project.git";
+  execFileSync("git", [
+    "-C",
+    fixture.repository,
+    "remote",
+    "set-url",
+    "other",
+    unsupported,
+  ]);
+  sca.sourceRepositoryPlatform = "other";
+  await expect(
+    fixture.prepareNormalized(sca, [{ url: unsupported }]),
+  ).rejects.toThrow("HTTP(S)");
 });

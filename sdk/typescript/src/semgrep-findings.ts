@@ -4,10 +4,11 @@ import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type {
-  ExternalFindings,
-  HostedExternalFindings,
-  ExternalSourceRepository,
+import {
+  HOSTED_FINDINGS_FORMATS,
+  type ExternalFindings,
+  type HostedExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   isSemgrepPlatformReport,
@@ -437,5 +438,9 @@ export async function readSemgrepFindings(
   options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<HostedExternalFindings> {
-  return normalizeSemgrepFindings(await readScannerJson(path), options, target);
+  return normalizeSemgrepFindings(
+    await readScannerJson(path, HOSTED_FINDINGS_FORMATS.semgrep),
+    options,
+    target,
+  );
 }

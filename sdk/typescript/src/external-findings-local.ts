@@ -143,6 +143,9 @@ const gitTransportPorts: Readonly<Record<string, string>> = {
   "ftps:": "990",
 };
 
+// Imported scanner paths retain their source machine's drive, independent of this checkout's OS.
+const windowsDrivePath = /^[a-z]:[\\/]/iu;
+
 /** Compare transport forms without changing retained scanner evidence. */
 function remoteRepository(
   value: string,
@@ -526,7 +529,7 @@ async function requireMatchingRepository(
       throw error;
     })
   ).split("\0");
-  const remotes: string[] = [];
+  const remotes: { url: string; forcedHelper: boolean }[] = [];
   let hasUnverifiedRemote = false;
   for (const rawName of remoteNames.split("\n").filter(Boolean)) {
     const name = utf8(rawName);
@@ -573,8 +576,7 @@ async function requireMatchingRepository(
             // Inspector can retain an unrecognized spelling as a literal repository key.
             (provider === "inspector" &&
               remoteRepository(url, provider, true)?.key === url)
-          : /^https?:$/iu.test(transport ?? "") &&
-            /^(?:https?|ftps?)$/u.test(helper);
+          : curl && /^(?:https?|ftps?)$/u.test(helper);
       // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
       if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
         hasUnverifiedRemote = true;
@@ -596,10 +598,16 @@ async function requireMatchingRepository(
             throw error;
         }
       }
-      remotes.push(url);
+      remotes.push({ url, forcedHelper: helper !== undefined });
     }
   }
   if (!hasUnverifiedRemote && !remotes.length) return;
+  const mismatch = (url: string) =>
+    new CodexSecurityError(
+      `Imported repository ${JSON.stringify(url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+    );
+  const drive = sources.find(({ url }) => windowsDrivePath.test(url));
+  if (drive) throw mismatch(drive.url);
   if (hosted) {
     const platform = hosted.platform ?? provider;
     const key = (url: string) =>
@@ -608,7 +616,7 @@ async function requireMatchingRepository(
     const httpKey = http.test(hosted.url)
       ? remoteRepository(hosted.url, platform, true, key)?.key
       : undefined;
-    for (const remote of remotes) {
+    for (const { url: remote } of remotes) {
       const parsed = remoteRepository(remote, platform, true, key);
       if (!parsed) continue;
       // Git's HTTP credentials and default port don't change the checkout repository.
@@ -619,10 +627,9 @@ async function requireMatchingRepository(
       )
         return;
     }
-    throw new CodexSecurityError(
-      `Imported repository ${JSON.stringify(hosted.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
-    );
+    throw mismatch(hosted.url);
   }
+  const ftpUrl = /^ftps?:\/\//iu;
   const identity = (value: string, platform: Provider) =>
     remoteRepository(value, platform, provider === "inspector");
   const githubRepositories = new Set(
@@ -639,9 +646,17 @@ async function requireMatchingRepository(
       (githubKey !== undefined && githubRepositories.has(githubKey))
         ? "github"
         : provider;
-    const targets = remotes.flatMap(
-      (remote) => identity(remote, sourceProvider) ?? [],
-    );
+    const targets = remotes.flatMap(({ url, forcedHelper }) => {
+      // A curl helper uses the inner URL's transport. An FTP login or path can identify
+      // a different repository from the same host's HTTPS endpoint.
+      if (
+        forcedHelper &&
+        (ftpUrl.test(url) || ftpUrl.test(source.url)) &&
+        url !== source.url
+      )
+        return [];
+      return identity(url, sourceProvider) ?? [];
+    });
     const target = identity(source.url, sourceProvider);
     if (
       !target ||
@@ -657,9 +672,7 @@ async function requireMatchingRepository(
             account === target.account),
       )
     )
-      throw new CodexSecurityError(
-        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
-      );
+      throw mismatch(source.url);
   }
 }
 
@@ -852,7 +865,11 @@ export async function prepareLocalImport(
     const platform = inspector.platform ?? options.provider;
     const native = remoteRepository(inspector.url, platform, true);
     for (const url of sources.keys()) {
-      if (!native || remoteRepository(url, platform, true)?.key !== native.key)
+      if (
+        windowsDrivePath.test(url) ||
+        !native ||
+        remoteRepository(url, platform, true)?.key !== native.key
+      )
         throw new CodexSecurityError(
           `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
         );

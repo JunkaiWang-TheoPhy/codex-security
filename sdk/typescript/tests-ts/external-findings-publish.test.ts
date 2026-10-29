@@ -1301,9 +1301,19 @@ test("hosted Snyk resolves an unverified Enterprise mapping against the connecte
     provider: "snyk" as const,
     sourceRepositoryUrl: url.toLowerCase(),
   };
-  const prepare = () =>
-    prepareExternalPublication(cloud.file, selected, cloud.deps);
-  expect((await prepare()).preview.findings).toHaveLength(1);
+  const prepare = (sourceRepositoryUrl = selected.sourceRepositoryUrl) =>
+    prepareExternalPublication(
+      cloud.file,
+      { ...selected, sourceRepositoryUrl },
+      cloud.deps,
+    );
+  expect(
+    (await prepare("https://scm.example.test/old/../team/project")).preview
+      .findings,
+  ).toHaveLength(1);
+  await expect(
+    prepare("https://scm.example.test/unusable path/../team/project"),
+  ).rejects.toThrow("percent-encode");
   cloud.state.repositoryUrl += "-foreign";
   await expect(prepare()).rejects.toThrow("does not match");
   cloud.state.repositoryUrl = url.toLowerCase();

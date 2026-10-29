@@ -486,5 +486,8 @@ export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
 ): Promise<HostedExternalFindings> {
-  return normalizeSnykInput(await readScannerJson(path), target);
+  return normalizeSnykInput(
+    await readScannerJson(path, SNYK_REST_ISSUES_FORMAT),
+    target,
+  );
 }

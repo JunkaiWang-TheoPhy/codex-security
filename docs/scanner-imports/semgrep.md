@@ -18,8 +18,8 @@ codex-security publish findings platform.json --to local --provider semgrep \
   --repository ./project --source-key example/project/main/platform-sast --dry-run
 ```
 
-The collector resolves the SCM URL and reads all pages for the selected
-project ID, ref and product. For collections spanning multiple pages, it checks
+The collector resolves the SCM URL and requests up to 3,000 findings per page
+for the selected project ID, ref and product. For collections spanning multiple pages, it checks
 for overlapping finding IDs and rereads the first page. Retry if either check
 detects a change. The API does not provide an atomic snapshot, so concurrent
 changes confined to later pages can still cause findings to be skipped.
@@ -44,6 +44,11 @@ value, scoped to deployment, project ID, ref and product. Reimport with the
 same source key to refresh imported triage, locations or dependency evidence.
 Keep a separate key for CLI scans. Individual API pages and Guardian/MCP
 summaries are unsupported.
+
+The importer uses the file paths and line ranges reported by Semgrep. Run
+`semgrep ci` from the Git repository root and use `--subdir` to scan part of a
+monorepo. The Findings API cannot reconstruct a missing path prefix if the scan
+starts below the repository root. [Semgrep monorepo guidance](https://docs.semgrep.dev/kb/semgrep-ci/scan-monorepo-in-parts).
 
 ## CLI and CI scans
 

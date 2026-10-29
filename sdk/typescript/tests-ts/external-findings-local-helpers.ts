@@ -21,6 +21,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
       options.remote,
     ]);
   const stateDirectory = join(root, "state");
+  const dispose = () => rm(root, { recursive: true, force: true });
   return {
     root,
     repository,
@@ -35,6 +36,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     },
-    dispose: () => rm(root, { recursive: true, force: true }),
+    dispose,
+    [Symbol.asyncDispose]: dispose,
   };
 }

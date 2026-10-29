@@ -101,6 +101,11 @@ const bindings: [string, string, string?][] = [
     "https://host.test/team/other",
     "https://host.test/team/repo",
   ],
+  [
+    process.platform === "win32" ? "git@c:/org/repo" : "c:/org/repo",
+    "C:/org/repo",
+    "ssh://git@c/org/repo",
+  ],
   [" ssh://host.test/team/repo", "https://host.test/team/repo"],
   ["ssh://bad@host.test:invalid/team/repo", "https://host.test/team/repo"],
   ["ssh://other.test%2Fx@github.com/team/repo", "https://github.com/team/repo"],

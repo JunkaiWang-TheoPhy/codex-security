@@ -1,7 +1,8 @@
-import type {
-  HostedExternalFindings,
-  ExternalPublicationInput,
-  ExternalSourceRepository,
+import {
+  HOSTED_FINDINGS_FORMATS,
+  type HostedExternalFindings,
+  type ExternalPublicationInput,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
@@ -11,6 +12,7 @@ import {
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings } from "./snyk-findings.js";
+import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import {
   normalizeSemgrepReport,
   semgrepSarifSourceRepositories,
@@ -77,7 +79,14 @@ export async function readExternalFindings(
   }
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
-    if (findings.sourceRepositoryUrl) {
+    if (
+      findings.sourceRepositoryUrl &&
+      options.sourceRepositoryUrl !== undefined
+    ) {
+      const declared = hostedRepositoryUrl(
+        options.sourceRepositoryUrl,
+        "Snyk source repository URL",
+      );
       const github =
         findings.sourceRepositoryPlatform === "github" ||
         (findings.sourceRepositoryPlatform === undefined &&
@@ -87,9 +96,8 @@ export async function readExternalFindings(
               references,
             )));
       if (
-        options.sourceRepositoryUrl &&
         hostedRepositoryUrlKey(findings.sourceRepositoryUrl, github) !==
-          hostedRepositoryUrlKey(options.sourceRepositoryUrl, github)
+        hostedRepositoryUrlKey(declared, github)
       )
         throw new Error(
           "Snyk REST source repository does not match the declared source repository URL.",
@@ -100,7 +108,7 @@ export async function readExternalFindings(
   if (options.provider === "semgrep") {
     // Cloud checks retained URLs against its connected destination before publication.
     const findings = normalizeSemgrepReport(
-      await readScannerJson(path),
+      await readScannerJson(path, HOSTED_FINDINGS_FORMATS.semgrep),
       { sourceRepositoryUrl: options.sourceRepositoryUrl },
       target,
       (url) =>

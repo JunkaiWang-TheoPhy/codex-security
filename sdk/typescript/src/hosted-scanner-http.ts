@@ -1,7 +1,11 @@
 import { CodexSecurityError } from "./errors.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
-import { decodeScannerJson, requiredText } from "./scanner-import.js";
+import {
+  decodeScannerJson,
+  parseHostedScannerJson,
+  requiredText,
+} from "./scanner-import.js";
 
 export interface HostedScannerHttpOptions {
   environment?: NodeJS.ProcessEnv;
@@ -113,20 +117,6 @@ export function hostedEnvironmentToken(
   return token;
 }
 
-function preserveLargeNumbers(
-  _key: string,
-  value: unknown,
-  context?: { source?: string },
-): unknown {
-  if (
-    typeof value === "number" &&
-    (!Number.isFinite(value) ||
-      (Number.isInteger(value) && !Number.isSafeInteger(value)))
-  )
-    return requiredText(context?.source, "Exact scanner numeric value");
-  return value;
-}
-
 export function hostedScannerHttp(
   dependencies: HostedScannerHttpOptions,
   callerSignal?: AbortSignal,
@@ -156,9 +146,8 @@ export function hostedScannerHttp(
         `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
       );
     }
-    return JSON.parse(
+    return parseHostedScannerJson(
       decodeScannerJson(await response.arrayBuffer()),
-      preserveLargeNumbers,
     );
   }
   return { signal, getJson };
