@@ -500,15 +500,3 @@ export async function readSnykFindings(
 ): Promise<ExternalFindings> {
   return normalizeSnykInput(await readScannerJson(path), target);
 }
-
-export function snykReportRepositoryUrls(report: ExternalFindings): string[] {
-  if (report.sourceRepositoryUrl !== undefined)
-    return [report.sourceRepositoryUrl];
-  return [
-    ...new Set(
-      report.findings.flatMap(({ evidence }) =>
-        snykRepositoryUrls(evidence.source_data, { normalizeGitRemote: false }),
-      ),
-    ),
-  ];
-}

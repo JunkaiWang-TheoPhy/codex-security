@@ -13,7 +13,6 @@ import {
 import {
   normalizeSnykInput,
   readSnykFindings,
-  snykReportRepositoryUrls,
   snykRepositoryUrls,
 } from "../src/snyk-findings.js";
 
@@ -197,7 +196,7 @@ test("collects only one region, org, project and Open Source issue type across J
   expect(
     JSON.stringify(normalized.findings[0]!.evidence.source_data),
   ).not.toContain("second-key");
-  expect(snykReportRepositoryUrls(normalized)).toEqual([sourceRepositoryUrl]);
+  expect(normalized.sourceRepositoryUrl).toBe(sourceRepositoryUrl);
 });
 
 test("collects hosted Code, retaining source locations, ranges, flow omissions, rule and independent ignore state", async () => {
@@ -419,9 +418,9 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     `${apiOrigin}/rest/orgs/${organizationId}/targets/${targetId}?version=${version}`,
   );
   expect(report.target).toEqual(target);
-  expect(snykReportRepositoryUrls(normalizeSnykIssues(report))).toEqual([
+  expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(
     sourceRepositoryUrl,
-  ]);
+  );
   for (const bad of [
     { ...target, id: otherId },
     { ...target, attributes: { url: "https://github.com/example/other" } },
@@ -547,7 +546,7 @@ test("reads saved complete empty and excluded exports offline, retaining report-
         expect(output.findings).toEqual([]);
         expect(output.read).toBe(rows.length);
         expect(output.excluded).toHaveLength(rows.length);
-        expect(snykReportRepositoryUrls(output)).toEqual([sourceRepositoryUrl]);
+        expect(output.sourceRepositoryUrl).toBe(sourceRepositoryUrl);
       }
     }
   } finally {
