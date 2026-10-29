@@ -48,6 +48,7 @@ import {
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
+  snapshotExternalFindings,
   snapshotImportOptions,
   type ExternalFindings,
   type ExternalPublicationInput,
@@ -399,12 +400,8 @@ function normalizedPublicationInput(
   input: ExternalFindings,
 ): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const { report, ...parsed } = input;
-  const current: ExternalFindings = structuredClone(parsed);
-  if (report !== undefined) {
-    current.report = structuredClone(report);
-    validateExternalReport(current.report);
-  }
+  const current = snapshotExternalFindings(input);
+  validateExternalReport(current.report);
   // structuredClone preserves aliases. Detach every raw record before adding
   // typed defaults, including aliases shared with another finding's evidence.
   for (const finding of current.findings)
@@ -599,14 +596,19 @@ async function preparePublicationInput(
     (parsed.sourceRepositoryPlatform === "other" ||
       [...hostedSnyk.values()].some(({ platform }) => platform === "other"));
   const reportKey = strictSnyk ? repositoryUrlKey : cloudRepositoryUrlKey;
-  const reportUrl =
+  const previousUrl =
     parsed.sourceRepositoryUrl && reportKey(parsed.sourceRepositoryUrl);
-  const repositoryKey = strictSnyk ? ["other", reportUrl ?? null] : reportUrl;
-  const digest = (identity: unknown) =>
-    hash(
+  const reportUrl =
+    hostedReport && parsed.sourceRepositoryUrl
+      ? hostedRepositoryUrlKey(parsed.sourceRepositoryUrl, !strictSnyk)
+      : previousUrl;
+  const digest = (identity: unknown, url = reportUrl) => {
+    const binding = strictSnyk ? ["other", url ?? null] : url;
+    return hash(
       "sha256",
-      canonicalJson(repositoryKey ? [identity, repositoryKey] : identity),
+      canonicalJson(binding ? [identity, binding] : identity),
     );
+  };
   const inputDigest = digest(currentIdentity);
   const legacyInputDigest = digest(legacyIdentity);
   function validateSaved(
@@ -628,13 +630,20 @@ async function preparePublicationInput(
     const matches =
       content.inputProjection !== undefined
         ? sameFindingSelection(savedFindings, expected) &&
-          content.inputProjection?.inputDigest ===
-            (legacy ? legacyInputDigest : inputDigest) &&
+          (content.inputProjection.inputDigest ===
+            (legacy ? legacyInputDigest : inputDigest) ||
+            // Older checkpoints hashed the selected URL's original escape spelling.
+            (previousUrl !== reportUrl &&
+              content.inputProjection.inputDigest ===
+                digest(
+                  legacy ? legacyIdentity : currentIdentity,
+                  previousUrl,
+                ))) &&
           content.inputProjection?.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected) &&
           // Unknown legacy filenames must still block a duplicate. They may never be replayed here.
-          (!repositoryKey || projection === "unidentified");
+          ((!strictSnyk && !reportUrl) || projection === "unidentified");
     if (!matches)
       throw new Error(
         "Saved import evidence does not match the selected input.",

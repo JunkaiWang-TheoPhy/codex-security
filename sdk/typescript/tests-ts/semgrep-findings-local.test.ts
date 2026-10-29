@@ -273,6 +273,8 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
 test.each([
   "ssh://git@github.com/example/project.git?foreign",
   "ftp://github.com/example/project",
+  "https::https://github.com/example/foreign.git",
+  "http::ftp://github.com/example/project",
   "ssh://git@github.com/example/other/../project.git",
   "https://github.com/example/other/%2e%2e/project.git",
   "https://github.com/example\\project.git",
@@ -310,6 +312,11 @@ test.each([
     "https://github.com:443/example/project",
   ],
   ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
+  [
+    repositoryUrl,
+    "ftps::https://github.com:443/example/project.git",
+    "https://github.com:443/example/project",
+  ],
   [
     "https://github.com:443/example/project",
     "git@github.com:example/project.git",

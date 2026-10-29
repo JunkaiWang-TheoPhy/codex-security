@@ -30,6 +30,32 @@ export interface ExternalFindings {
   }[];
 }
 
+/** Capture the public SDK fields once, including class accessors, before any asynchronous work. */
+export function snapshotExternalFindings(
+  input: ExternalFindings,
+): ExternalFindings {
+  const {
+    read,
+    findings,
+    excluded,
+    report,
+    sourceRepositoryUrl,
+    sourceRepositoryPlatform,
+    ...rest
+  } = input;
+  const current: ExternalFindings = structuredClone({
+    ...rest,
+    read,
+    findings,
+    excluded,
+    ...("sourceRepositoryUrl" in input && { sourceRepositoryUrl }),
+    ...("sourceRepositoryPlatform" in input && { sourceRepositoryPlatform }),
+  });
+  // Report metadata may alias evidence that receives Cloud defaults.
+  if (report !== undefined) current.report = structuredClone(report);
+  return current;
+}
+
 /** @internal Keep earlier provider projections only for immutable request replay. */
 export interface ExternalPublicationInput {
   current: ExternalFindings;

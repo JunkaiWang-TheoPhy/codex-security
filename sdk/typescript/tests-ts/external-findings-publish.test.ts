@@ -25,6 +25,7 @@ import {
   type ExternalPublicationProgress,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
+import { canonicalJson } from "../src/record.js";
 import { snykRepositoryClaims } from "../src/snyk-findings.js";
 import { normalizeGitRepositoryUrl } from "../src/git-remote.js";
 import { readGitHubFindings } from "../src/github-findings.js";
@@ -1321,6 +1322,60 @@ test("hosted Snyk resolves an unverified Enterprise mapping against the connecte
   await expect(prepare()).rejects.toThrow("does not match the declared");
 });
 
+test("local and Cloud preparations snapshot a class report's repository accessors before resolving its destination", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const checkout = url.toLowerCase();
+  const cloud = await fixture([], checkout);
+  const local = await localFindingsFixture({ remote: checkout });
+  cleanups.push(local.dispose);
+  const settings = { ...options, provider: "snyk" as const };
+  let source = url;
+  let platform: "github" | "other" = "other";
+  const reads = { url: 0, platform: 0 };
+  class ImportedReport {
+    read = 1;
+    findings = [
+      {
+        source_finding_id: "example",
+        evidence: { title: "Example", severity: "low" as const },
+      },
+    ];
+    excluded = [];
+    get sourceRepositoryUrl() {
+      reads.url++;
+      return source;
+    }
+    get sourceRepositoryPlatform() {
+      reads.platform++;
+      return platform;
+    }
+  }
+  const input = new ImportedReport();
+  const localResult = prepareNormalizedLocalImport(
+    input,
+    { ...settings, repository: local.repository },
+    {
+      environment: local.environment,
+      sourceRepositories: [{ url: checkout, platform: "github" }],
+    },
+  );
+  const cloudResult = prepareNormalizedExternalPublication(
+    input,
+    settings,
+    cloud.deps,
+  );
+  source = checkout;
+  platform = "github";
+  expect(reads).toEqual({ url: 2, platform: 2 });
+  for (const result of await Promise.allSettled([localResult, cloudResult]))
+    expect(result).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({
+        message: expect.stringContaining("does not match"),
+      }),
+    });
+});
+
 test("verified Snyk repositories retain case-sensitive identity when optional raw evidence is projected out", async () => {
   const url = "https://scm.example.test/Team/Project";
   const report = {
@@ -1470,6 +1525,58 @@ test("hosted Snyk compares legacy SSH claims with the verified platform's casing
   }
   expect(cloud.posts).toHaveLength(0);
 });
+
+test.each(["current", "previous"] as const)(
+  "resumes %s hosted URL bindings with the original request bytes",
+  async (version) => {
+    const original = "https://scm.example.test/Team/my%2Drepo";
+    const plain = "https://scm.example.test/Team/my-repo";
+    const cloud = await fixture([], plain);
+    const prepare = (sourceRepositoryUrl: string) =>
+      prepareNormalizedExternalPublication(
+        {
+          read: 1,
+          findings: [
+            {
+              source_finding_id: "issue-1",
+              evidence: { title: "Example finding", severity: "high" },
+            },
+          ],
+          excluded: [],
+          sourceRepositoryUrl,
+          sourceRepositoryPlatform: "other",
+        },
+        { ...options, provider: "snyk" },
+        cloud.deps,
+      );
+    const first = await prepare(original);
+    cloud.state.loseResponse = true;
+    const error = await first.publish().catch((error: unknown) => error);
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    const path = error.result.savedSubmission!;
+    if (version === "previous") {
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      const request: FindingImportRequest = JSON.parse(cloud.posts[0]!);
+      const findings = request.items.map(({ source_finding_id, evidence }) => ({
+        source_finding_id,
+        evidence,
+      }));
+      saved.inputProjection.inputDigest = hash(
+        "sha256",
+        canonicalJson([findings, ["other", original]]),
+      );
+      await writeFile(path, JSON.stringify(saved));
+    }
+    cloud.state.repositoryUrl += "-renamed";
+    await expect(prepare(plain.replace("Team", "team"))).rejects.toThrow(
+      "does not match",
+    );
+    const retry = await prepare(version === "previous" ? original : plain);
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(cloud.posts[1]).toBe(cloud.posts[0]);
+  },
+);
 
 test("hosted Semgrep binds retained SARIF provenance after typed evidence is projected out", async () => {
   const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");

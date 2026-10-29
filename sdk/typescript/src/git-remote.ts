@@ -5,6 +5,9 @@ export interface GitRemote {
   scpStyle: boolean;
 }
 
+// Git treats a colon followed by "//" as the start of a URL transport.
+const scpRemote = /^(?:([^@/:\s?#]+)@)?(\[[^\]]+\]|[^@/:\s?#]+):(?!\/\/)(.+)$/u;
+
 /** Parse transport syntax only; callers decide which hosts and credentials are allowed. */
 export function parseGitRemote(remote: string): GitRemote | undefined {
   if (remote.includes("://")) {
@@ -15,14 +18,12 @@ export function parseGitRemote(remote: string): GitRemote | undefined {
       scpStyle: false,
     };
   }
-  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
-    remote,
-  );
+  const scp = scpRemote.exec(remote);
   if (scp === null) return undefined;
   return {
-    url: new URL(`ssh://${scp[1]}`),
+    url: new URL(`ssh://${scp[1] ? `${scp[1]}@` : ""}${scp[2]}`),
     // An SCP path's ?, #, and dot segments are literal Git path characters.
-    path: scp[2]!,
+    path: scp[3]!,
     scpStyle: true,
   };
 }
@@ -41,8 +42,13 @@ export function gitTransportBytes(raw: string, scpStyle: boolean): string {
 export function decodeUnreserved(value: string): string {
   return value.replace(/%([0-9a-f]{2})/giu, (escape, hex: string) => {
     const byte = String.fromCharCode(parseInt(hex, 16));
-    return /^[a-z0-9._~-]$/iu.test(byte) ? byte : escape;
+    return /^[a-z0-9._~-]$/iu.test(byte) ? byte : escape.toUpperCase();
   });
+}
+
+/** Git decodes the port separator before checking the port number. */
+function decodeGitSshAuthority(value: string): string {
+  return decodeUnreserved(value).replace(/%3A(?=\d+$)/u, ":");
 }
 
 /** Represent upload-pack path bytes relative to an HTTP repository origin. */
@@ -87,16 +93,27 @@ export function publicGitSsh443Host(authority: string): string | undefined {
   }
 }
 
-/** Standard public SSH clone aliases, plus a GitHub host established by the caller. */
+function matchesHttpsHost(url: string | undefined, hostname: string): boolean {
+  const source = url && URL.parse(url);
+  return (
+    !!source &&
+    source.protocol === "https:" &&
+    source.hostname.toLowerCase() === hostname
+  );
+}
+
+/** Standard public SSH aliases, plus a GitHub host established by the caller. */
 export function normalizeHostedGitRepositoryUrl(
   remote: string,
-  source: string,
+  source: string | undefined,
   github: boolean,
 ): string {
-  const host = URL.parse(source)?.hostname ?? "";
-  return normalizeGitRepositoryUrl(
+  // A projected single-project report may retain only its SSH spelling.
+  return normalizeGitSshAlias(
     remote,
-    github || isPublicGitHost(host) ? source : undefined,
+    (host) =>
+      (github || isPublicGitHost(host)) &&
+      matchesHttpsHost(source ?? `https://${host}`, host),
   );
 }
 
@@ -104,26 +121,28 @@ export function normalizeGitRepositoryUrl(
   repository: string,
   sshAliasUrl?: string,
 ): string {
-  // The caller identifies a host whose standard Git SSH login maps to HTTPS.
-  const destination = sshAliasUrl ? URL.parse(sshAliasUrl) : undefined;
-  const connectedHost =
-    destination?.protocol === "https:"
-      ? destination.hostname.toLowerCase()
-      : undefined;
-  const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
+  return normalizeGitSshAlias(repository, (host) =>
+    matchesHttpsHost(sshAliasUrl, host),
+  );
+}
+
+function normalizeGitSshAlias(
+  repository: string,
+  isAliasHost: (host: string) => boolean,
+): string {
   const isGitSshUser = (username: string, hostname: string) =>
-    (username === "git" &&
-      (hostname === "github.com" || hostname === connectedHost)) ||
-    (username === connectedTenant && hostname === connectedHost);
+    (username === "git" && hostname === "github.com") ||
+    (isAliasHost(hostname) &&
+      (username === "git" ||
+        username === /^([^.]+)\.ghe\.com$/u.exec(hostname)?.[1]));
   const httpsAlias = (host: string, rawPath: string, scpStyle: boolean) => {
     const bytes = gitTransportBytes(rawPath, scpStyle);
     if (/[?#\\]/u.test(bytes) || /(?:^|\/)\.{1,2}(?:\/|$)/u.test(bytes))
       return repository;
     return `https://${host}/${gitPathToHttpPath(bytes)}`;
   };
-  // Git treats a colon followed by "//" as the start of a URL transport.
-  const scp = /^([^@/:]+)@([^/:]+):(?!\/\/)(.+)$/u.exec(repository);
-  if (scp && isGitSshUser(scp[1]!, scp[2]!.toLowerCase()))
+  const scp = scpRemote.exec(repository);
+  if (scp?.[1] && isGitSshUser(scp[1], scp[2]!.toLowerCase()))
     return httpsAlias(scp[2]!, scp[3]!, true);
   // Git decodes the authority and passes '?' and '#' to SSH as hostname bytes.
   const ssh =
@@ -132,8 +151,8 @@ export function normalizeGitRepositoryUrl(
     );
   if (ssh && !/[\t\r\n]/u.test(repository)) {
     const user = decodeUnreserved(ssh[1]!);
-    const authority = decodeUnreserved(ssh[2]!);
-    // Git decodes reserved authority delimiters before it separates host, port and path.
+    const authority = decodeGitSshAuthority(ssh[2]!);
+    // Other reserved escapes can change where Git separates the host, port and path.
     if (authority.includes("%")) return repository;
     const url = URL.parse(`ssh://${authority}/`);
     if (!url) return repository;

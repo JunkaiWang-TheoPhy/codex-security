@@ -594,6 +594,27 @@ test.each([
   },
 );
 
+test("Snyk compares encoded repository bytes without folding Azure project names", () => {
+  const url = "https://dev.azure.com/example/Jalape%c3%b1o/_git/project";
+  const remote = url.replace("%c3%b1", "%C3%B1");
+  const report = {
+    ...envelope(),
+    sourceRepositoryUrl: url,
+    project: project({ origin: "azure-repos", remote }),
+  };
+  const saved = normalizeSnykIssues(report);
+  expect(saved.sourceRepositoryUrl).toBe(url);
+  expect(saved.findings[0]!.evidence.source_data).toMatchObject({
+    project: report.project,
+  });
+  expect(() =>
+    normalizeSnykIssues({
+      ...report,
+      sourceRepositoryUrl: url.replace("J", "j"),
+    }),
+  ).toThrow("target URL");
+});
+
 test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
   const source = "https://scm.example.test/Org/project";
   const check = (
@@ -857,6 +878,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
   const github = "github.com/example/repository";
   for (const [remote, selected] of [
     ["github.com/Example/repository.git", github],
+    [github, "github.com/example/%72epository"],
     ["github.com:22/Example/repository.git", github],
     [
       "github.com:22/Example/repository.git",
@@ -868,6 +890,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
       "github.com:443/example/repository",
     ],
     ["ssh.github.com:443/Example/repository.git", github],
+    ["ssh.github.com:443/example/%72epository", github],
     [
       "ssh.github.com:443/example%2Frepository.git",
       "github.com/example%2Frepository",
@@ -906,8 +929,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["git.example.test/group/project", "git.example.test/group/project"],
     ["github.com/example%2Frepository", github],
     ["github.com:22/example%2Frepository", github],
-    ["ssh.github.com:443/example/%72epository", github],
-    ["github.com/example/repository", "github.com/example/%72epository"],
+    ["github.com/example%252Frepository", "github.com/example%2Frepository"],
   ] as const) {
     const { collect, requests } = transport(
       document(project({ origin, remote: "http://" + remote })),
@@ -937,9 +959,15 @@ test("compares native HTTP repository escapes while preserving Snyk CLI's ambigu
     expect(report.findings[0]!.evidence.source_data).toMatchObject({
       project: project({ origin: "gitlab", remote: "http://" + native }),
     });
-    expect(() => check(native, declared, "cli")).toThrow("target URL");
+    expect(check(native, declared, "cli").sourceRepositoryUrl).toBe(
+      "http://" + declared,
+    );
   }
   const privateRepo = "git.example.test/Group/my%2Dproject";
+  expect(
+    check("git.example.test/Group/my-project", privateRepo, "cli")
+      .sourceRepositoryUrl,
+  ).toBe("http://" + privateRepo);
   expect(() => check(privateRepo, privateRepo, "cli")).toThrow("target URL");
   expect(check(privateRepo, privateRepo, "gitlab").sourceRepositoryUrl).toBe(
     "http://" + privateRepo,
@@ -1296,7 +1324,7 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
       [
         {
           ...ssh,
-          url: "ssh://%67it@%73cm.example.test/owner/project.git",
+          url: "ssh://%67it@%73cm.example.test%3A22/owner/project.git",
         },
       ],
     ])

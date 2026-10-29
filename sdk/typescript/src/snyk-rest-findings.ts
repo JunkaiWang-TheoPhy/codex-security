@@ -1,6 +1,5 @@
 import {
   hostedRepositoryUrlKey,
-  repositoryUrlKey,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -223,11 +222,11 @@ function matchesCliRepository(remote: string, source: string) {
   // A private server may host both literal SCP "my%2Drepo" and HTTP "my-repo".
   if (!publicWebHost && !sshHost && /%[\da-f]{2}/iu.test(path)) return false;
   return (
-    repositoryUrlKey(remote) === source ||
+    hostedRepositoryUrlKey(remote) === source ||
     (publicWebHost &&
-      repositoryUrlKey(`https://${authority}${path}`) === source) ||
+      hostedRepositoryUrlKey(`https://${authority}${path}`) === source) ||
     (sshHost !== undefined &&
-      repositoryUrlKey(`https://${sshHost}${path}`) === source)
+      hostedRepositoryUrlKey(`https://${sshHost}${path}`) === source)
   );
 }
 
@@ -241,14 +240,14 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
+  const source = hostedRepositoryUrlKey(
+    selected.sourceRepositoryUrl,
+    enterprise,
+  );
   const matches =
     origin === "cli" && /^http:\/\//iu.test(url)
-      ? matchesCliRepository(
-          url,
-          repositoryUrlKey(selected.sourceRepositoryUrl),
-        )
-      : hostedRepositoryUrlKey(normalized, enterprise) ===
-        hostedRepositoryUrlKey(selected.sourceRepositoryUrl, enterprise);
+      ? matchesCliRepository(url, source)
+      : hostedRepositoryUrlKey(normalized, enterprise) === source;
   if (/[?#]/u.test(url) || !matches)
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",

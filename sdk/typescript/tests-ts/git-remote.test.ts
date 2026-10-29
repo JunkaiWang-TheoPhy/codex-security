@@ -100,6 +100,8 @@ test.each([
   ["ssh", "github.com", "my-repo", "my%2Drepo", true],
   ["ssh", "github.com", "my%2Drepo", "my-repo", true],
   ["scp", "github.com", "my%2Drepo", "my%2Drepo", false],
+  ["scp", "gitlab.com", "my%2frepo", "my%252Frepo", false],
+  ["scp", "gitlab.com", "my%2Frepo", "my%252Frepo", true],
   ["ssh", "github.com", "my%252Drepo", "my%2Drepo", false],
   ["ssh", "github.com", "my%2Frepo", "my%2Frepo", false],
   ["ssh", "gitlab.com", "My-repo", "my%2Drepo", false],
@@ -122,7 +124,10 @@ test.each([
   ["ssh://g%69t@%67ithub.com", true],
   ["ssh://git@github%2Ecom:2%32", true],
   ["ssh://%67it@ssh.github.com:443", true],
-  ["ssh://git@github.com%3A22", false],
+  ["ssh://git@github.com%3A22", true],
+  ["ssh://git@ssh.github.com%3a443", true],
+  ["ssh://git@github.com%3A2222", false],
+  ["ssh://git@github.com%253A22", false],
   ["ssh://git@github.com%40other", false],
   ["ssh://git@github.com%2Fother", false],
   ["ssh://git@github.com%23suffix", false],
@@ -141,6 +146,9 @@ test.each([
   ["/org/my%2Drepo", "/org/my-repo", true],
   ["/org/%252Drepo", "/org/%2Drepo", false],
   ["/org/my%2Frepo", "/org/my/repo", false],
+  ["/org/my%2frepo", "/org/my%2Frepo", true],
+  ["/org/%2e%2E/repo", "/org/%2E%2e/repo", true],
+  ["/org/my%252frepo", "/org/my%252Frepo", false],
   ["/org/%2e%2e/repo", "/org/../repo", false],
   ["/org/my%2Drepo?x=%2D#%41", "/org/my-repo?x=-#A", false],
   ["/Org/my%2Drepo", "/org/my-repo", false],
@@ -150,4 +158,16 @@ test.each([
     hostedRepositoryUrlKey(host + first) ===
       hostedRepositoryUrlKey(host + second),
   ).toBe(matches);
+});
+
+test("recognizes bracketed IPv6 SCP authorities on a verified Enterprise host", () => {
+  const source = "https://[2001:db8::1]/org/repo";
+  const remote = "git@[2001:db8::1]:org/repo";
+  expect(normalizeHostedGitRepositoryUrl(remote, source, true)).toBe(source);
+  expect(normalizeHostedGitRepositoryUrl(remote, source, false)).toBe(remote);
+  for (const other of [
+    "other@[2001:db8::1]:org/repo",
+    "git@[2001:db8::2]:org/repo",
+  ])
+    expect(normalizeHostedGitRepositoryUrl(other, source, true)).toBe(other);
 });

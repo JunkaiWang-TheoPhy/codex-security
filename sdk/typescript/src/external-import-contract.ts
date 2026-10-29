@@ -65,7 +65,7 @@ export function cloudRepositoryUrlKey(value: string): string {
   return repositoryUrlKey(value).toLowerCase();
 }
 
-/** Compare hosted HTTP path spellings without changing retained evidence or checkpoint keys. */
+/** Compare hosted HTTP path spellings without changing the retained evidence. */
 export function hostedRepositoryUrlKey(value: string, github = false): string {
   const url = value.replace(
     /^(https?:\/\/[^/?#]+\/)([^?#]*)/iu,
@@ -76,7 +76,9 @@ export function hostedRepositoryUrlKey(value: string, github = false): string {
         .map((segment) => {
           const decoded = decodeUnreserved(segment);
           // Git's HTTP transport removes literal dot segments but sends escaped ones as written.
-          return decoded === "." || decoded === ".." ? segment : decoded;
+          return decoded === "." || decoded === ".."
+            ? segment.toUpperCase()
+            : decoded;
         })
         .join("/"),
   );

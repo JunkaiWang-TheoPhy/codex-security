@@ -16,6 +16,7 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  snapshotExternalFindings,
   snapshotImportOptions,
   type ExternalFindings,
   type ExternalSourceRepository,
@@ -33,7 +34,6 @@ import type {
 } from "./external-import-models.js";
 import {
   gitPathToHttpPath,
-  decodeUnreserved,
   gitTransportBytes,
   isGitHubCloudHost,
   normalizeHostedGitRepositoryUrl,
@@ -492,7 +492,13 @@ async function requireMatchingRepository(
       ? remoteRepository(hosted.url, platform, true, key)?.key
       : undefined;
     let hasNetworkRemote = false;
-    for (const remote of remotes) {
+    for (const configured of remotes) {
+      // Git's built-in curl helpers take the network URL after the first "::".
+      const helperUrl = /^(?:https?|ftps?)::(.+)$/su.exec(configured)?.[1];
+      const remote =
+        helperUrl && /^(?:https?|ftps?):\/\//iu.test(helperUrl)
+          ? helperUrl
+          : configured;
       const parsed = remoteRepository(remote, platform, true, key);
       if (!parsed) continue;
       hasNetworkRemote = true;
@@ -629,7 +635,7 @@ export async function prepareLocalImport(
   dependencies: LocalExternalImportDependencies,
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = structuredClone(input);
+  const current = snapshotExternalFindings(input);
   validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
@@ -751,21 +757,12 @@ export async function prepareLocalImport(
   if (source) {
     const github =
       snykGitHub ?? references.some(({ platform }) => platform === "github");
-    // A projected report can retain only SSH references. The Git parser supplies the
-    // candidate host; only a supported hosted SSH alias can establish its HTTPS URL.
-    let url = source;
-    if (projectedUrl) {
-      const address = source.replace(
-        /^(?:ssh|git\+ssh|ssh\+git):\/\/[^/]+/u,
-        decodeUnreserved,
-      );
-      const reference =
-        remoteRepository(address, options.provider, true)?.key ?? source;
-      url = hostedRepositoryUrl(
-        normalizeHostedGitRepositoryUrl(source, reference, github),
-        "Projected source repository URL",
-      );
-    }
+    const url = projectedUrl
+      ? hostedRepositoryUrl(
+          normalizeHostedGitRepositoryUrl(projectedUrl, undefined, github),
+          "Projected source repository URL",
+        )
+      : source;
     hosted = { url, platform: github ? "github" : undefined };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
