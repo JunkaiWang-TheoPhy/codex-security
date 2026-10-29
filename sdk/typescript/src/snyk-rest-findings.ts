@@ -4,13 +4,13 @@ import {
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import type {
-  ExternalFindings,
-  ExternalSourceRepository,
-} from "./external-findings.js";
+import type { ExternalFindings } from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { normalizeGitRepositoryUrl } from "./git-remote.js";
+import {
+  isPublicGitHost,
+  normalizeHostedGitRepositoryUrl,
+} from "./git-remote.js";
 import {
   hostedScannerHttp,
   hostedEnvironmentToken,
@@ -207,13 +207,10 @@ function checkOrganization(
 function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
-  const normalized = normalizeGitRepositoryUrl(
+  const normalized = normalizeHostedGitRepositoryUrl(
     url,
-    origin === "gitlab"
-      ? "https://gitlab.com"
-      : origin.startsWith("github")
-        ? selected.sourceRepositoryUrl
-        : undefined,
+    selected.sourceRepositoryUrl,
+    origin.startsWith("github"),
   );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
@@ -221,15 +218,21 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   const target = key(normalized);
   const source = key(selected.sourceRepositoryUrl);
   // Snyk CLI renders the Git remote as HTTP even when it was cloned over HTTPS or SSH.
-  const cliGitHubTarget =
+  const authority = /^http:\/\/([^/]+)\//u.exec(target)?.[1];
+  const cliTarget =
     origin === "cli" &&
-    target.startsWith("http://github.com/") &&
+    authority !== undefined &&
+    (isPublicGitHost(authority) ||
+      authority === "dev.azure.com" ||
+      /^[a-z\d-]+\.visualstudio\.com$/u.test(authority)) &&
     source === target.replace("http:", "https:");
-  if (/[?#]/u.test(url) || (target !== source && !cliGitHubTarget))
+  if (/[?#]/u.test(url) || (target !== source && !cliTarget))
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
-  return enterprise ? ("github" as const) : undefined;
+  if (enterprise) return "github" as const;
+  if (scmOrigins.has(origin) && !origin.startsWith("github"))
+    return "other" as const;
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -250,6 +253,14 @@ function projectContext(project: Resource, selected: Scope) {
     throw new Error(
       `Snyk project type ${manager} from ${origin} is not a supported ${selected.product} project.`,
     );
+  const context = {
+    manager,
+    scm,
+    origin,
+    manifest: scm ? repoPath(attributes["target_file"]) : null,
+  };
+  if (project["relationships"] === undefined)
+    return { ...context, targetId: undefined, expandedUrl: undefined };
   const relationships = record(
     project["relationships"],
     "Snyk project relationships",
@@ -261,10 +272,7 @@ function projectContext(project: Resource, selected: Scope) {
       ? undefined
       : record(link["attributes"], "Snyk expanded target attributes")["url"];
   return {
-    manager,
-    scm,
-    origin,
-    manifest: scm ? repoPath(attributes["target_file"]) : null,
+    ...context,
     targetId: resourceId(link, "target"),
     expandedUrl,
   };
@@ -275,24 +283,46 @@ function checkTarget(
   selected: Scope,
   { expandedUrl, targetId, origin }: ReturnType<typeof projectContext>,
 ) {
-  if (expandedUrl !== undefined) {
+  if (targetId === undefined || expandedUrl !== undefined) {
     if (value !== null)
       throw new Error(
-        "Unexpected separate Snyk target in an expanded project report.",
+        "Unexpected separate Snyk target without a project target lookup.",
       );
-    return checkRemote(expandedUrl, selected, origin);
+    if (expandedUrl !== undefined)
+      return checkRemote(expandedUrl, selected, origin);
+    return;
   }
   const target = record(value, "Snyk target resource");
   if (resourceId(target, "target") !== targetId)
     throw new Error(
       "Snyk target does not match the selected project's target.",
     );
-  if (target["relationships"] !== undefined)
-    checkOrganization(
-      record(target["relationships"], "Snyk target relationships"),
-      selected,
-      true,
+  if (target["relationships"] !== undefined) {
+    const relationships = record(
+      target["relationships"],
+      "Snyk target relationships",
     );
+    checkOrganization(relationships, selected, true);
+    if (relationships["integration"] !== undefined) {
+      const integration = relationship(relationships, "integration");
+      const attributes = record(
+        integration["attributes"],
+        "Snyk integration attributes",
+      );
+      const type = requiredText(
+        attributes["integration_type"],
+        "Snyk integration type",
+      );
+      if (
+        scmOrigins.has(origin) &&
+        scmOrigins.has(type) &&
+        origin.split("-")[0] !== type.split("-")[0]
+      )
+        throw new Error(
+          "Snyk target integration does not match the project's SCM origin.",
+        );
+    }
+  }
   return checkRemote(
     record(target["attributes"], "Snyk target attributes")["url"],
     selected,
@@ -388,7 +418,12 @@ export async function collectSnykIssues(
         environment,
         "SNYK_TOKEN",
         selected.apiOrigin,
+        "API_V3_URL",
+        "SNYK_API_V3_URL",
+        "API_REST_URL",
+        "SNYK_API_REST_URL",
         "SNYK_API",
+        "SNYK_CFG_ENDPOINT",
       ),
     "Snyk API token (SNYK_TOKEN)",
   );
@@ -406,7 +441,7 @@ export async function collectSnykIssues(
   const project = await getResource(projectUrl, "project");
   const context = projectContext(project, selected);
   const target =
-    context.expandedUrl !== undefined
+    context.targetId === undefined || context.expandedUrl !== undefined
       ? null
       : await getResource(
           endpoint(selected, `targets/${context.targetId}`),
@@ -456,9 +491,10 @@ function savedContext(document: Resource) {
   };
 }
 
-export function snykRestFindingRepository(
-  sourceData: Resource,
-): ExternalSourceRepository {
+export function snykRestFindingRepository(sourceData: Resource): {
+  url: string;
+  platform?: ExternalFindings["sourceRepositoryPlatform"];
+} {
   const { source, platform } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
   return { url: source.sourceRepositoryUrl, platform };

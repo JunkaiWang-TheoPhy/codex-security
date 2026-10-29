@@ -24,9 +24,11 @@ for overlapping finding IDs and rereads the first page. Retry if either check
 detects a change. The API does not provide an atomic snapshot, so concurrent
 changes confined to later pages can still cause findings to be skipped.
 If the project has no SCM URL, supply `--source-repository-url` when collecting.
-The saved `semgrep-platform-findings/v1` report keeps that mapping
-separate from the project metadata for local or Cloud import. This endpoint
-excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
+The saved `semgrep-platform-findings/v1` report retains native URLs and any
+distinct operator mapping. An import verifies path casing on custom hosts
+against a known GitHub binding. For split projects, Semgrep's project ID scopes
+the request. Rows can name the project or its physical repository.
+This endpoint excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
 The SDK exposes `collectSemgrepPlatformFindings` and

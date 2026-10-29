@@ -70,6 +70,23 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test.each(["snyk", "semgrep"] as const)(
+    "populated %s imports require hosted rows before using hosted report metadata",
+    async (provider) => {
+      const url = "https://github.com/example/project";
+      const f = await fixture({ remote: url });
+      const report = {
+        ...input(),
+        sourceRepositoryUrl: "https://github.com/other/project",
+      };
+      const prepared = await prepareNormalizedLocalImport(
+        report,
+        { ...source, provider, repository: f.repository },
+        { environment: f.environment, sourceRepositories: [{ url }] },
+      );
+      expect(prepared.preview.findings).toEqual(report.findings);
+    },
+  );
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };

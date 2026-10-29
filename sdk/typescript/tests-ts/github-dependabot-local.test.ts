@@ -85,7 +85,8 @@ test("two Dependabot alerts for one advisory retain separate repository historie
 });
 
 test("normalized local imports bind projected Dependabot occurrences to a single repository", async () => {
-  const fixture = await localFindingsFixture();
+  const checkout = "https://github.com/example/project";
+  const fixture = await localFindingsFixture({ remote: checkout });
   try {
     const options = {
       repository: fixture.repository,
@@ -101,6 +102,14 @@ test("normalized local imports bind projected Dependabot occurrences to a single
       githubDependabotAlert(2, "example/other"),
       "local",
     );
+    // Unrelated hosted-scanner metadata cannot replace the retained alert repository.
+    await expect(
+      prepareNormalizedLocalImport(
+        { ...second, sourceRepositoryUrl: checkout },
+        options,
+        deps,
+      ),
+    ).rejects.toThrow(/does not match a configured remote/);
     delete first.findings[0]!.evidence.source_data;
     await expect(
       prepareNormalizedLocalImport(

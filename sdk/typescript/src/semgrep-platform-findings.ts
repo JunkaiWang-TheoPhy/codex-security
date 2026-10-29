@@ -1,5 +1,6 @@
 import {
   type ExternalImportTarget,
+  cloudRepositoryUrlKey,
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
@@ -49,7 +50,7 @@ export interface SemgrepPlatformReport {
   format: typeof format;
   deployment: string;
   project: Project;
-  /** Operator-supplied mapping when the project has no SCM URL. */
+  /** Operator mapping retained when absent from or case-distinct from the native project URL. */
   sourceRepositoryUrl?: string;
   ref: string;
   product: Product;
@@ -95,38 +96,49 @@ function parsePlatformJson(body: string): unknown {
   );
 }
 
-function assertRepository(
+function matchingRepositoryUrl(
   value: unknown,
   expected: string,
   key: typeof repositoryUrlKey,
-): void {
+): string {
   const url = hostedRepositoryUrl(value, "Semgrep repository URL");
   if (key(url) !== key(expected))
     throw new Error(
       "Semgrep Platform repository does not match the selected source repository.",
     );
+  return url;
 }
 
 function projectContext(
   value: unknown,
-  declared?: unknown,
-  key = repositoryUrlKey,
+  declared: unknown,
+  key: typeof repositoryUrlKey,
 ) {
   const { id, name, url: nativeUrl } = record(value, "Semgrep project");
   const url = hostedRepositoryUrl(
     text(nativeUrl) ?? declared,
     "Semgrep project repository URL",
   );
-  if (declared !== undefined) assertRepository(declared, url, key);
+  const mapping =
+    declared === undefined
+      ? undefined
+      : matchingRepositoryUrl(declared, url, key);
   const project: Project = {
     id: requiredId(id, "Semgrep project ID"),
     name: requiredText(name, "Semgrep project name"),
     url: text(nativeUrl),
   };
-  const binding = project.url
-    ? { project }
-    : { project, sourceRepositoryUrl: url };
-  return { binding, url, key };
+  const binding =
+    mapping &&
+    (!project.url || repositoryUrlKey(mapping) !== repositoryUrlKey(url))
+      ? { project, sourceRepositoryUrl: mapping }
+      : { project };
+  const scmPath = new URL(url).pathname.slice(1).replace(/(?:\.git)?\/?$/u, "");
+  const names = [project.name, scmPath].flatMap((path) => [
+    path,
+    path.split("/").at(-1),
+  ]);
+  return { binding, url, key, names };
 }
 
 function scopedFinding(
@@ -134,14 +146,13 @@ function scopedFinding(
   selected: ReturnType<typeof projectContext>,
   ref: string,
 ) {
-  const { name: projectName } = selected.binding.project;
   const finding = record(value, "Semgrep Platform finding");
   const { url, name } = record(
     finding["repository"],
     "Semgrep finding repository",
   );
-  if (text(url)) assertRepository(url, selected.url, selected.key);
-  else if (name !== projectName && name !== projectName.split("/").at(-1))
+  if (text(url)) matchingRepositoryUrl(url, selected.url, selected.key);
+  else if (typeof name !== "string" || !selected.names.includes(name))
     throw new Error(
       "Semgrep Platform finding lacks a matching source repository.",
     );
@@ -191,7 +202,12 @@ export async function collectSemgrepPlatformFindings(
   const lookup = await get(
     new URL(`${base}/projects/${encodeURIComponent(name)}`),
   );
-  const selected = projectContext(lookup["project"], sourceRepositoryUrl);
+  // Collection retains both URL spellings. The importer verifies Enterprise casing against its destination.
+  const selected = projectContext(
+    lookup["project"],
+    sourceRepositoryUrl,
+    cloudRepositoryUrlKey,
+  );
   const { project } = selected.binding;
   if (project.name !== name)
     throw new Error("Semgrep returned a different project than requested.");
@@ -299,7 +315,8 @@ export function normalizePlatformReport(
     input["sourceRepositoryUrl"] ?? declared,
     key,
   );
-  if (declared !== undefined) assertRepository(declared, selected.url, key);
+  if (declared !== undefined)
+    matchingRepositoryUrl(declared, selected.url, key);
   const ref = requiredText(input["ref"], "Semgrep ref");
   const product = productType(input["product"]);
   const findings = array(input["findings"], "Semgrep Platform findings");

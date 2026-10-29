@@ -200,6 +200,46 @@ test("keeps an operator mapping separate from a URL-less project and its short r
   ).toThrow("matching source repository");
 });
 
+test("binds URL-less split-project findings to the selected project or physical repository", async () => {
+  const project = {
+    ...platformProject,
+    name: "example/mono/moduleA",
+    url: "https://github.com/example/mono.git/",
+  };
+  const rows = ["example/mono", "mono", project.name, "moduleA"].map(
+    (name, i) => ({
+      ...platformFinding(i + 1),
+      repository: { name },
+    }),
+  );
+  // SEMGREP_REPO_NAME and the selected project's display name can differ even on GitHub.
+  const customName = {
+    ...platformFinding(5),
+    repository: { name: "example/mono/moduleB", url: project.url },
+  };
+  const responses = [{ project }, { findings: [...rows, customName] }];
+  const report = await collectSemgrepPlatformFindings(
+    { ...options, project: project.name },
+    {
+      environment,
+      fetch: async () => Response.json(responses.shift()),
+    },
+  );
+  expect(normalizeSemgrepPlatformFindings(report).findings).toHaveLength(5);
+  for (const repository of [
+    { name: "example/mono/moduleB" },
+    { name: "mono", url: "https://github.com/other/mono" },
+  ]) {
+    expect(() =>
+      normalizeSemgrepPlatformFindings({
+        ...report,
+        findingCount: 1,
+        findings: [{ ...rows[0], repository }],
+      }),
+    ).toThrow("repository");
+  }
+});
+
 test("losslessly captures distinct int64 IDs and rejects a truncated saved report", async () => {
   const ids = ["9223372036854775806", "9223372036854775807"];
   const records = ids.map((id) => ({

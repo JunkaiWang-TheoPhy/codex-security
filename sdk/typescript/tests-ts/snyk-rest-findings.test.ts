@@ -432,6 +432,13 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     },
     relationships: {
       organization: { data: { type: "organization", id: organizationId } },
+      integration: {
+        data: {
+          type: "integration",
+          id: otherId,
+          attributes: { integration_type: "github-cloud-app" },
+        },
+      },
     },
   };
   const lookup = document(project({ expanded: false }));
@@ -454,6 +461,18 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     {
       ...target,
       relationships: {
+        ...target.relationships,
+        integration: {
+          data: {
+            ...target.relationships.integration.data,
+            attributes: { integration_type: "gitlab" },
+          },
+        },
+      },
+    },
+    {
+      ...target,
+      relationships: {
         organization: { data: { id: otherId, type: "organization" } },
       },
     },
@@ -464,6 +483,35 @@ test("looks up an unexpanded target by org and ID, never follows a relationship 
     expect(() => normalizeSnykIssues({ ...report, target: bad })).toThrow();
   }
   expect(() => normalizeSnykIssues({ ...report, target: null })).toThrow();
+});
+
+test("uses the declared repository when Snyk omits the project's relationships", async () => {
+  const { relationships: _links, ...withoutLinks } = project();
+  const { collect, requests } = transport(
+    document(withoutLinks),
+    document([issue()]),
+  );
+  const report = await collect();
+  expect(requests.map(({ url }) => url.pathname)).toEqual([
+    `/rest/orgs/${organizationId}/projects/${projectId}`,
+    path,
+  ]);
+  expect(report.target).toBeNull();
+  const normalized = normalizeSnykIssues(report);
+  expect(normalized.sourceRepositoryUrl).toBe(sourceRepositoryUrl);
+  expect(normalized.sourceRepositoryPlatform).toBeUndefined();
+  expect(normalized.findings).toHaveLength(1);
+  expect(() =>
+    normalizeSnykIssues({
+      ...report,
+      target: { type: "target", id: targetId },
+    }),
+  ).toThrow("separate Snyk target");
+  const mixed = transport(
+    document(withoutLinks),
+    document([issue({}, { project: otherId })]),
+  );
+  await expect(mixed.collect()).rejects.toThrow("selected project");
 });
 
 test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
@@ -501,44 +549,46 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
     expect(() => check(remote)).toThrow();
 });
 
-test("collects and replays GitLab.com SSH targets for the selected namespace and project", async () => {
-  const selected = {
-    ...options,
-    sourceRepositoryUrl: "https://gitlab.com/Group/subgroup/project",
-  };
-  const checkout = await snykCheckout(
-    "git@gitlab.com:Group/subgroup/project.git",
-  );
-  try {
-    for (const remote of [
-      "git@gitlab.com:Group/subgroup/project.git",
-      "ssh://git@gitlab.com:22/Group/subgroup/project.git",
-    ]) {
-      const { collect } = transport(
-        document(project({ origin: "gitlab", remote })),
-        document([issue()]),
-      );
-      const saved = await collect(selected);
-      const normalized = normalizeSnykIssues(saved, "local");
-      const prepared = await checkout.prepareNormalized(normalized);
-      expect(prepared.preview.findings).toHaveLength(1);
+test.each([
+  ["gitlab", "gitlab.com", "Group/subgroup/project"],
+  ["bitbucket-cloud", "bitbucket.org", "Group/project"],
+])(
+  "collects and replays %s SSH targets for the selected namespace and project",
+  async (origin, host, name) => {
+    const scp = `git@${host}:${name}.git`;
+    const selected = {
+      ...options,
+      sourceRepositoryUrl: `https://${host}/${name}`,
+    };
+    const checkout = await snykCheckout(scp);
+    try {
+      for (const remote of [scp, `ssh://git@${host}:22/${name}.git`]) {
+        const { collect } = transport(
+          document(project({ origin, remote })),
+          document([issue()]),
+        );
+        const saved = await collect(selected);
+        const normalized = normalizeSnykIssues(saved, "local");
+        const prepared = await checkout.prepareNormalized(normalized);
+        expect(prepared.preview.findings).toHaveLength(1);
+      }
+      for (const remote of [
+        scp.toLowerCase(),
+        `other@${host}:${name}`,
+        `ssh://git@${host}:2222/${name}`,
+        `git@scm.example.test:${name}`,
+      ]) {
+        const { collect, requests } = transport(
+          document(project({ origin, remote })),
+        );
+        await expect(collect(selected)).rejects.toThrow("target URL");
+        expect(requests).toHaveLength(1);
+      }
+    } finally {
+      await checkout.dispose();
     }
-    for (const remote of [
-      "git@gitlab.com:group/subgroup/project",
-      "other@gitlab.com:Group/subgroup/project",
-      "ssh://git@gitlab.com:2222/Group/subgroup/project",
-      "git@gitlab.example.test:Group/subgroup/project",
-    ]) {
-      const { collect, requests } = transport(
-        document(project({ origin: "gitlab", remote })),
-      );
-      await expect(collect(selected)).rejects.toThrow("target URL");
-      expect(requests).toHaveLength(1);
-    }
-  } finally {
-    await checkout.dispose();
-  }
-});
+  },
+);
 
 test("issue identity is stable across updates, resource IDs, pages and display names, not across scopes", () => {
   const original = envelope();
@@ -709,22 +759,34 @@ test("a wrong project, product or repository fails before listing issues or acce
   );
 });
 
-test("matches the HTTP target spelling emitted by Snyk CLI for a public GitHub HTTPS remote", async () => {
-  const source = project({
-    origin: "cli",
-    remote: "http://github.com/Example/repository.git",
-  });
-  const report = await transport(
-    document(source),
-    document([issue()]),
-  ).collect();
-  expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(
-    sourceRepositoryUrl,
-  );
+test("matches the HTTP target spelling emitted by Snyk CLI for public HTTPS remotes", async () => {
+  for (const [remote, selected] of [
+    ["http://github.com/Example/repository.git", sourceRepositoryUrl],
+    ["http://gitlab.com/Team/project.git", "https://gitlab.com/Team/project"],
+    ["http://bitbucket.org/Team/project", "https://bitbucket.org/Team/project"],
+    ["http://example.ghe.com/Org/repo.git", "https://example.ghe.com/org/repo"],
+    ["http://dev.azure.com/Org/p/_git/r", "https://dev.azure.com/Org/p/_git/r"],
+    [
+      "http://org.visualstudio.com/p/_git/r",
+      "https://org.visualstudio.com/p/_git/r",
+    ],
+  ] as const) {
+    const source = project({ origin: "cli", remote });
+    const report = await transport(
+      document(source),
+      document([issue()]),
+    ).collect({ ...options, sourceRepositoryUrl: selected });
+    expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(selected);
+  }
   for (const [origin, remote, selected] of [
     ["github", "http://github.com/example/repository", sourceRepositoryUrl],
     ["cli", "http://github.com/example/other", sourceRepositoryUrl],
     ["cli", "http://github.com:80/example/repository", sourceRepositoryUrl],
+    [
+      "cli",
+      "http://gitlab.com/team/project",
+      "https://gitlab.com/Team/project",
+    ],
     [
       "cli",
       "http://git.example.test/group/project",
@@ -854,12 +916,21 @@ test.each(["open-source", "code"] as const)(
         project: project({ manager, origin: "github-enterprise", remote }),
       });
       const initial = report();
-      const prepare = async (report: SnykIssuesExport, local = fixture) => {
+      const prepare = async (
+        report: SnykIssuesExport,
+        local = fixture,
+        references?: ExternalSourceRepository[],
+      ) => {
         const filename = join(local.root, "snyk-hosted.json");
         await writeFile(filename, JSON.stringify(report));
-        return prepareLocalExternalImport(filename, local.selection, {
-          environment: local.environment,
-        });
+        return prepareLocalExternalImport(
+          filename,
+          { ...local.selection, sourceRepositoryUrl: references?.[0]?.url },
+          {
+            environment: local.environment,
+            sourceRepositories: references,
+          },
+        );
       };
       const empty = report({ issues: [] });
       const excluded = report({
@@ -885,15 +956,34 @@ test.each(["open-source", "code"] as const)(
       expect(
         (await fixture.prepareNormalized(rows)).preview.findings,
       ).toHaveLength(1);
-      for (const source of [
-        project({ manager, origin: "github-enterprise", remote: null }),
-        project({ manager, origin: "gitlab", remote: url }),
-      ]) {
+      const binding = [{ url: url.toLowerCase(), platform: "github" as const }];
+      for (const saved of [empty, initial]) {
+        const withProject = (origin: string, remote: string | null) => ({
+          ...saved,
+          project: project({ manager, origin, remote }),
+        });
+        const unknownReport = withProject("github-enterprise", null);
+        const unknown = normalizeSnykIssues(unknownReport, "local");
+        await expect(fixture.prepareNormalized(unknown)).rejects.toThrow(
+          /does not match a configured remote/,
+        );
+        expect(
+          (await fixture.prepareNormalized(unknown, binding)).preview.read,
+        ).toBe(unknown.read);
+        expect(
+          (await prepare(unknownReport, fixture, binding)).preview.read,
+        ).toBe(unknown.read);
+        const gitlabReport = withProject("gitlab", url);
+        const gitlab = normalizeSnykIssues(gitlabReport, "local");
+        await expect(prepare(gitlabReport, fixture, binding)).rejects.toThrow(
+          "does not match",
+        );
+        await expect(fixture.prepareNormalized(gitlab)).rejects.toThrow(
+          /does not match a configured remote/,
+        );
         await expect(
-          fixture.prepareNormalized(
-            normalizeSnykIssues({ ...empty, project: source }, "local"),
-          ),
-        ).rejects.toThrow(/does not match a configured remote/);
+          fixture.prepareNormalized(gitlab, binding),
+        ).rejects.toThrow("does not match");
       }
       const importReport = async (report: SnykIssuesExport) =>
         (await prepare(report)).import();

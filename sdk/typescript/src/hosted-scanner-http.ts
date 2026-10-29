@@ -34,7 +34,15 @@ export function hostedEnvironmentToken(
     for (const name of originNames) {
       const configured = importEnvironmentSetting(environment, name)?.value;
       if (!configured) continue;
-      if (URL.parse(configured)?.origin !== origin)
+      const url = URL.parse(configured);
+      // Snyk derives its REST host from the general endpoint (e.g. app.eu.snyk.io).
+      if (
+        url &&
+        (name === "SNYK_API" || name === "SNYK_CFG_ENDPOINT") &&
+        !url.hostname.startsWith("api.")
+      )
+        url.hostname = `api.${url.hostname.replace(/^app\./u, "")}`;
+      if (url?.protocol !== "https:" || url.origin !== origin)
         throw new Error(
           `${name} does not match ${origin}. Select a matching API origin and ${tokenName} before collecting findings.`,
         );

@@ -26,11 +26,20 @@ codex-security publish findings snyk-hosted.json --provider snyk --to local \
 For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
 separate source key. The default API origin is `https://api.snyk.io`. Use
 `--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
-When `SNYK_API` is set, its origin must match the selected region before the collector uses `SNYK_TOKEN`.
+Before sending `SNYK_TOKEN`, the collector checks the selected region against
+the first nonempty endpoint in [Snyk's REST configuration order](https://github.com/snyk/cli/blob/5f54805f14097c22cb13f11e064247c3c522dcda/src/lib/config/index.ts#L45-L60).
+From highest to lowest priority, the settings are
+`API_V3_URL`, `SNYK_API_V3_URL`, `API_REST_URL`, `SNYK_API_REST_URL`,
+`SNYK_API`, then `SNYK_CFG_ENDPOINT`. For example, when a REST override points
+to Europe and the general endpoint points to the US, select
+`--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
+the Snyk CLI configuration file, select it explicitly here as well.
+
 The collector checks the selected repository URL against the project target
-when Snyk supplies one. Standard Git SSH targets can match the selected HTTPS
-URL for GitHub SCM projects and GitLab.com projects. Other custom-host mappings
-require matching repository URLs.
+when Snyk supplies one. Standard Git SSH targets can match HTTPS repository
+URLs on GitHub.com, GitHub Enterprise Cloud (`*.ghe.com`), GitLab.com, and
+Bitbucket.org. A custom GitHub Enterprise host also requires GitHub SCM
+provenance from the Snyk project.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.

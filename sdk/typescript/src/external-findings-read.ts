@@ -79,7 +79,9 @@ export async function readExternalFindings(
       const key =
         findings.sourceRepositoryPlatform === "github"
           ? cloudRepositoryUrlKey
-          : repositoryUrlKey;
+          : findings.sourceRepositoryPlatform === "other" || target === "cloud"
+            ? repositoryUrlKey
+            : (url: string) => localRepositoryUrlKey(url, references);
       if (
         options.sourceRepositoryUrl &&
         key(findings.sourceRepositoryUrl) !== key(options.sourceRepositoryUrl)

@@ -11,7 +11,10 @@ import {
   normalizeSemgrepSarif,
   readSemgrepFindings,
 } from "../src/semgrep-findings.js";
-import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import {
+  collectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
+} from "../src/semgrep-platform-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   platformFinding,
@@ -94,17 +97,37 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
         .findings,
     ).toEqual([]);
 
-    const row = platformFinding(7);
-    const file = join(fixture.root, "semgrep.json");
-    await writeFile(
-      file,
-      JSON.stringify({
-        ...platformReport([
-          { ...row, repository: { ...row.repository, url: url.toLowerCase() } },
-        ]),
-        project: { ...report.project, url },
-      }),
+    const row = {
+      ...platformFinding(7),
+      repository: { name: "project", url: url.toLowerCase() },
+    };
+    const responses = [
+      { project: { ...report.project, url } },
+      { findings: [row] },
+    ];
+    const collected = await collectSemgrepPlatformFindings(
+      {
+        deployment: report.deployment,
+        project: report.project.name,
+        ref: report.ref,
+        sourceRepositoryUrl: url.toLowerCase(),
+        token: "synthetic-token",
+      },
+      {
+        environment: fixture.environment,
+        fetch: async () => Response.json(responses.shift()),
+      },
     );
+    expect(collected).toMatchObject({
+      project: { url },
+      sourceRepositoryUrl: url.toLowerCase(),
+      findings: [row],
+    });
+    expect(() => normalizeSemgrepPlatformFindings(collected)).toThrow(
+      "does not match",
+    );
+    const file = join(fixture.root, "semgrep.json");
+    await writeFile(file, JSON.stringify(collected));
     const prepareFile = (source?: { url: string; platform?: "github" }) =>
       prepareLocalExternalImport(
         file,
@@ -140,6 +163,10 @@ test.each([
   "https://github.com/example/project.git?other",
   "https://github.com:8443/example/project.git",
   "other@github.com:example/project.git",
+  "git+ssh://other@github.com/example/project",
+  "ssh+git://git@github.com:2222/example/project",
+  "git+ssh://git@github.com/elsewhere/%2e%2e/example/project",
+  "ssh+git://git@github.com/example/project.git#foreign",
 ])(
   "an empty Platform report rejects a checkout whose remote is %s",
   async (remote) => {
@@ -176,6 +203,16 @@ test.each([
     "https://github.com:443/example/project",
   ],
   ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
+  [
+    "https://bitbucket.org/team/project",
+    "git+ssh://git@bitbucket.org:22/team/project.git",
+    "https://bitbucket.org:443/team/project",
+  ],
+  [
+    "https://gitlab.com/Group/project",
+    "ssh+git://git@gitlab.com/Group/project.git",
+    "https://gitlab.com:443/Group/project",
+  ],
 ])(
   "hosted %s matches the equivalent checkout %s while keeping explicit source ports distinct",
   async (url, remote, otherSource) => {

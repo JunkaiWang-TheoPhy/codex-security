@@ -31,6 +31,26 @@ export function isGitHubCloudHost(host: string): boolean {
   return host === "github.com" || host.endsWith(".ghe.com");
 }
 
+export function isPublicGitHost(host: string): boolean {
+  return (
+    isGitHubCloudHost(host) || host === "gitlab.com" || host === "bitbucket.org"
+  );
+}
+
+/** Standard public SSH clone aliases, plus a GitHub host established by the caller. */
+export function normalizeHostedGitRepositoryUrl(
+  remote: string,
+  source: string,
+  github: boolean,
+): string {
+  return normalizeGitRepositoryUrl(
+    remote,
+    github || isPublicGitHost(URL.parse(source)?.hostname ?? "")
+      ? source
+      : undefined,
+  );
+}
+
 export function normalizeGitRepositoryUrl(
   repository: string,
   sshAliasUrl?: string,
@@ -50,7 +70,9 @@ export function normalizeGitRepositoryUrl(
   if (scp && isGitSshUser(scp[1]!, scp[2]!.toLowerCase()))
     return `https://${scp[2]}/${scp[3]}`;
   // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/@]+)@[^/@]+(\/.*)$/u.exec(repository);
+  const ssh = /^(?:ssh|git\+ssh|ssh\+git):\/\/([^/@]+)@[^/@]+(\/.*)$/u.exec(
+    repository,
+  );
   if (ssh) {
     // Git retains these bytes, but URL parsing would erase them from the alias.
     if (/[\t\r\n]/u.test(repository)) return repository;

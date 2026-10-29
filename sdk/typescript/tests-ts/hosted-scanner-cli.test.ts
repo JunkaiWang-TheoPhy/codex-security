@@ -33,7 +33,16 @@ test(transportTest, async () => {
   if (runTestInSubprocess(import.meta.path, transportTest)) return;
   process.env["SNYK_TOKEN"] = process.env["SEMGREP_APP_TOKEN"] =
     "synthetic-inherited";
-  for (const key of ["SNYK_API", "SEMGREP_URL", "SEMGREP_APP_URL"])
+  for (const key of [
+    "API_V3_URL",
+    "SNYK_API_V3_URL",
+    "API_REST_URL",
+    "SNYK_API_REST_URL",
+    "SNYK_API",
+    "SNYK_CFG_ENDPOINT",
+    "SEMGREP_URL",
+    "SEMGREP_APP_URL",
+  ])
     delete process.env[key];
   using fallback = spyOn(globalThis, "fetch").mockRejectedValue(
     new Error("unexpected global fetch"),
@@ -77,11 +86,6 @@ test(transportTest, async () => {
   await expect(snyk()).rejects.toThrow("injected transport");
   await expect(semgrep()).rejects.toThrow("injected transport");
 
-  transport.environment["SNYK_API"] = "https://api.eu.snyk.io/v1";
-  await expect(snyk()).rejects.toThrow("SNYK_API");
-  snykOptions.apiOrigin = "https://api.eu.snyk.io";
-  await expect(snyk()).rejects.toThrow("injected transport");
-
   transport.environment["SEMGREP_APP_URL"] = "https://example.invalid";
   await expect(semgrep()).rejects.toThrow("SEMGREP_APP_URL");
   await expect(semgrep("explicit")).rejects.toThrow("injected transport");
@@ -91,11 +95,53 @@ test(transportTest, async () => {
   expect(transport.requests).toEqual([
     "token synthetic-snyk",
     "Bearer synthetic-semgrep",
-    "token synthetic-snyk",
     "Bearer explicit",
     "Bearer synthetic-semgrep",
   ]);
   expect(fallback).not.toHaveBeenCalled();
+});
+
+test("Snyk checks the effective REST endpoint before sending an environment token", async () => {
+  const eu = "https://api.eu.snyk.io";
+  const us = "https://api.us.snyk.io";
+  const settings: NodeJS.ProcessEnv = { ...environment };
+  const requests: string[] = [];
+  const collect = (apiOrigin: string, token?: string) =>
+    collectSnykIssues(
+      {
+        organizationId,
+        projectId,
+        sourceRepositoryUrl,
+        product: "code",
+        apiOrigin,
+        token,
+      },
+      {
+        environment: settings,
+        async fetch(url, init) {
+          requests.push(
+            `${url.origin} ${new Headers(init.headers).get("authorization")}`,
+          );
+          throw new Error("requested project");
+        },
+      },
+    );
+  // Set each higher-priority setting without removing the shadowed endpoint.
+  for (const [name, endpoint, origin] of [
+    ["SNYK_CFG_ENDPOINT", "https://app.eu.snyk.io/api/v1", eu],
+    ["SNYK_API", "https://us.snyk.io/", us],
+    ["SNYK_API_REST_URL", eu + "/rest", eu],
+    ["API_REST_URL", us + "/rest", us],
+    ["SNYK_API_V3_URL", eu + "/rest", eu],
+    ["API_V3_URL", us + "/rest", us],
+  ] as const) {
+    settings[name] = endpoint;
+    await expect(collect(origin === eu ? us : eu)).rejects.toThrow(name);
+    await expect(collect(origin)).rejects.toThrow("requested project");
+    expect(requests.splice(0)).toEqual([`${origin} token synthetic`]);
+  }
+  await expect(collect(eu, "explicit")).rejects.toThrow("requested project");
+  expect(requests).toEqual([`${eu} token explicit`]);
 });
 
 test("the Semgrep CLI emits a replayable report without a framework wrapper", async () => {

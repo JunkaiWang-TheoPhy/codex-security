@@ -29,7 +29,7 @@ import type {
 } from "./external-import-models.js";
 import {
   isGitHubCloudHost,
-  normalizeGitRepositoryUrl,
+  normalizeHostedGitRepositoryUrl,
   parseGitRemote,
 } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -428,14 +428,7 @@ function hostedRepositoryMatches(
 ): boolean {
   const github = source.platform === "github";
   const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
-  // A verified GitHub Enterprise host and the public Git services support their
-  // standard SSH clone aliases. Other transports retain their own identity.
-  const url = normalizeGitRepositoryUrl(
-    value,
-    github || isGitHubCloudHost(URL.parse(source.url)?.hostname ?? "")
-      ? source.url
-      : "https://gitlab.com",
-  );
+  const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
   return key(url) === key(source.url);
 }
 
@@ -676,9 +669,16 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  let hostedUrl = current.sourceRepositoryUrl;
-  let snykGitHub: boolean | undefined;
-  if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
+  const emptyHostedReport =
+    !current.findings.length &&
+    (options.provider === "snyk" || options.provider === "semgrep");
+  let hostedUrl = emptyHostedReport ? current.sourceRepositoryUrl : undefined;
+  let snykGitHub =
+    emptyHostedReport &&
+    options.provider === "snyk" &&
+    current.sourceRepositoryPlatform
+      ? current.sourceRepositoryPlatform === "github"
+      : undefined;
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
@@ -690,8 +690,10 @@ export async function prepareLocalImport(
     ) {
       const source = snykRestFindingRepository(data);
       native = source.url;
-      // Every native Snyk row must support Enterprise aliases and case folding.
-      snykGitHub = (snykGitHub ?? true) && source.platform === "github";
+      // A verified non-GitHub target keeps its case-sensitive identity. A
+      // target without a platform can use an independently supplied binding.
+      if (source.platform !== undefined)
+        snykGitHub = (snykGitHub ?? true) && source.platform === "github";
     }
     if (options.provider === "semgrep")
       native = semgrepPlatformFindingRepository(data, (url) =>
@@ -702,6 +704,10 @@ export async function prepareLocalImport(
       sources.set(native, { url: native });
     }
   }
+  if (hostedUrl && current.sourceRepositoryUrl)
+    sources.set(current.sourceRepositoryUrl, {
+      url: current.sourceRepositoryUrl,
+    });
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
@@ -733,10 +739,7 @@ export async function prepareLocalImport(
   if (hostedUrl) {
     const github =
       snykGitHub ??
-      ((!current.findings.length &&
-        options.provider === "snyk" &&
-        current.sourceRepositoryPlatform === "github") ||
-        [...sources.values()].some((source) => source.platform === "github"));
+      [...sources.values()].some((source) => source.platform === "github");
     hosted = { url: hostedUrl, platform: github ? "github" : undefined };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
