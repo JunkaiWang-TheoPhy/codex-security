@@ -8,6 +8,8 @@ export interface GitRemote {
 // Git treats a colon followed by "//" as the start of a URL transport.
 const scpRemote = /^(?:([^@/:\s?#]+)@)?(\[[^\]]+\]|[^@/:\s?#]+):(?!\/\/)(.+)$/u;
 
+const sshRemote = /^(?:ssh|git\+ssh|ssh\+git):\/\/([^/]+?)(?:\/|%2[fF])/u;
+
 /** A native file URL or an unambiguous local path. */
 export function isLocalGitRemote(remote: string): boolean {
   if (remote.includes("://")) return remote.startsWith("file://");
@@ -24,12 +26,17 @@ export function isWindowsGitDrive(remote: string): boolean {
   );
 }
 
-function isGitScpRemote(remote: string): boolean {
-  return (
-    !isLocalGitRemote(remote) &&
+function parseScpRemote(remote: string): RegExpExecArray | null {
+  return !isLocalGitRemote(remote) &&
     !remote.includes("://") &&
     !/^[a-z\d][a-z\d+.-]*::/iu.test(remote)
-  );
+    ? scpRemote.exec(remote)
+    : null;
+}
+
+/** Identify retained SSH selectors without requiring the hostname to be a web URL. */
+export function isGitSshRemote(remote: string): boolean {
+  return sshRemote.test(remote) || parseScpRemote(remote) !== null;
 }
 
 function sshAuthority(host: string): URL | null {
@@ -54,7 +61,7 @@ export function parseGitRemote(remote: string): GitRemote | undefined {
       scpStyle: false,
     };
   }
-  const scp = isGitScpRemote(remote) && scpRemote.exec(remote);
+  const scp = parseScpRemote(remote);
   if (!scp) return undefined;
   const url = sshAuthority(scp[2]!);
   if (!url?.hostname) throw new TypeError("Invalid Git SCP authority.");
@@ -186,18 +193,16 @@ function normalizeGitSshAlias(
       return repository;
     return `https://${alternate || hostname}/${gitPathToHttpPath(bytes)}`;
   };
-  if (isGitScpRemote(repository)) {
-    const scp = scpRemote.exec(repository);
-    if (!scp?.[1]) return repository;
+  const scp = parseScpRemote(repository);
+  if (scp) {
+    if (!scp[1]) return repository;
     const authority = sshAuthority(scp[2]!);
     return authority
       ? hostedAlias(authority, scp[1], scp[3]!, true)
       : repository;
   }
   // Git separates the decoded authority from the path at the first slash.
-  const ssh = /^(?:ssh|git\+ssh|ssh\+git):\/\/([^/]+?)(?:\/|%2[fF])/u.exec(
-    repository,
-  );
+  const ssh = sshRemote.exec(repository);
   if (ssh && !/[\t\r\n]/u.test(repository)) {
     const authority = gitTransportBytes(ssh[1]!, false);
     const login = /^([^@:]+)@([^@]+)$/u.exec(authority);

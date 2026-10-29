@@ -220,9 +220,10 @@ function matchesCliRepository(remote: string, source: string) {
   const publicWebHost =
     isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
   const publicSshHost = isPublicGitHost(hostname);
+  const sshAuthority = authority.replace(/:0+(?=\d)/u, ":");
   const sshEndpoint =
-    publicGitSsh443Host(authority) ||
-    (publicSshHost && authority === `${hostname}:22`);
+    publicGitSsh443Host(sshAuthority) ||
+    (publicSshHost && sshAuthority === `${hostname}:22`);
   // The CLI drops the SSH login, so a private user's home-relative path can look like an HTTP URL.
   if (!publicWebHost && !sshEndpoint) return false;
   // HTTP resolves literal dot segments, while SSH sends them to the repository service.

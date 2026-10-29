@@ -138,10 +138,11 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
   );
   expect((await prepared.import()).counts.created).toBe(2);
 
-  const native = JSON.stringify(semgrepJson()).replace(
-    '"offset":20',
-    '"offset":9007199254740993',
-  );
+  // Native imports ignore timing data, even when a JSON reviver would overflow.
+  const timing = "[".repeat(12000) + "0" + "]".repeat(12000);
+  const native = JSON.stringify({ ...semgrepJson(), time: "timing-data" })
+    .replace('"timing-data"', timing)
+    .replace('"offset":20', '"offset":9007199254740993');
   await writeFile(fixture.file, native);
   const options = { sourceRepositoryUrl: repositoryUrl };
   expect(await readSemgrepFindings(fixture.file, options)).toEqual(

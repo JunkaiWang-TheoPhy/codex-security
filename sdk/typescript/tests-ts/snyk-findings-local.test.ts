@@ -14,8 +14,10 @@ import {
   snykSarif,
 } from "./support/snyk-import-fixtures.js";
 
-test("a case-sensitive Snyk plugin report preserves an exact private SSH repository", async () => {
-  const url = "git@scm.example.test:Team/Repo.git";
+test.each([
+  "git@scm.example.test:Team/Repo.git",
+  "ssh://git@[scm.example.test]/Team/Repo.git",
+])("a case-sensitive Snyk plugin report preserves %s", async (url) => {
   await using f = await localFindingsFixture({ remote: url });
   const report = snykPluginExport();
   report.collection.target.repository = url;

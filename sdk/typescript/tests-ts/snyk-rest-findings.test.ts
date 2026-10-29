@@ -609,6 +609,7 @@ test.each([
 test.each([
   ["Jalape%c3%b1o", "Jalape%C3%B1o"],
   ["Jalapeño", "Jalape%C3%B1o"],
+  ["Product\u00a0API", "Product%C2%A0API"],
   ["Jalape%c3%b1o", "Jalapeño"],
 ])(
   "Snyk compares Azure project names %s and %s by their HTTP spelling",
@@ -927,6 +928,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["github.com/Example/repository.git", github],
     [github, "github.com/example/%72epository"],
     ["github.com:22/Example/repository.git", github],
+    ["github.com:022/Example/repository.git", github],
     [
       "github.com:22/Example/repository.git",
       "github.com:22/example/repository",
@@ -942,6 +944,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
       "github.com:443/example/repository",
     ],
     ["ssh.github.com:443/Example/repository.git", github],
+    ["ssh.github.com:0443/Example/repository.git", github],
     ["ssh.github.com:443/example/%72epository", github],
     ["ssh.github.com:443/example%2Frepository.git", github],
     ["altssh.gitlab.com:443/Group%2Frepo.git", "gitlab.com/Group/repo"],

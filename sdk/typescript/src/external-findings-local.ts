@@ -43,6 +43,7 @@ import {
   gitPathToHttpPath,
   gitTransportBytes,
   isGitHubCloudHost,
+  isGitSshRemote,
   isLocalGitRemote,
   isWindowsGitDrive,
   normalizeHostedGitRepositoryUrl,
@@ -824,9 +825,7 @@ export async function prepareLocalImport(
         else if (
           !hostedUrl &&
           reportPlatform === "other" &&
-          /^(?:ssh|git\+ssh|ssh\+git):$/u.test(
-            parseGitRemote(source.url)?.url.protocol ?? "",
-          )
+          isGitSshRemote(source.url)
         )
           // A private SSH selector retained by Snyk can match the same transport literally.
           hostedUrl = normalizeHostedGitRepositoryUrl(

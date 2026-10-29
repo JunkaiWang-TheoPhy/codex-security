@@ -32,7 +32,7 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
   if (
     !url ||
     url.pathname === "/" ||
-    !/^https?:\/\/[^@/?#\\\s]+\/[^?#\\\s]+$/iu.test(raw)
+    !/^https?:\/\/[^@/?#\\\s]+\/[^?#\\]+$/iu.test(raw)
   )
     throw new Error(
       "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
