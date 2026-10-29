@@ -58,6 +58,15 @@ export function isPublicGitHost(host: string): boolean {
   );
 }
 
+/** Public Git service hosts whose HTTPS repository identity is known. */
+export function isKnownGitHost(host: string): boolean {
+  return (
+    isPublicGitHost(host) ||
+    host === "dev.azure.com" ||
+    /^[a-z\d-]+\.visualstudio\.com$/u.test(host)
+  );
+}
+
 /** Public SSH-over-443 authorities and their HTTPS repository hosts. */
 function publicGitSsh443Host(authority: string): string | undefined {
   switch (authority) {
@@ -76,17 +85,18 @@ export function normalizeHostedGitRepositoryUrl(
   source: string,
   github: boolean,
 ): string {
+  const host = URL.parse(source)?.hostname ?? "";
   return normalizeGitRepositoryUrl(
     remote,
-    github || isPublicGitHost(URL.parse(source)?.hostname ?? "")
-      ? source
-      : undefined,
+    github || isPublicGitHost(host) ? source : undefined,
+    github || isGitHubCloudHost(host),
   );
 }
 
 export function normalizeGitRepositoryUrl(
   repository: string,
   sshAliasUrl?: string,
+  githubPath = true,
 ): string {
   // The caller identifies a host whose standard Git SSH login maps to HTTPS.
   const destination = sshAliasUrl ? URL.parse(sshAliasUrl) : undefined;
@@ -99,11 +109,26 @@ export function normalizeGitRepositoryUrl(
     (username === "git" &&
       (hostname === "github.com" || hostname === connectedHost)) ||
     (username === connectedTenant && hostname === connectedHost);
-  const httpsAlias = (host: string, path: string, scpStyle: boolean) => {
-    const bytes = gitTransportBytes(path, scpStyle);
+  const httpsAlias = (host: string, rawPath: string, scpStyle: boolean) => {
+    const bytes = gitTransportBytes(rawPath, scpStyle);
     if (/[?#\\]/u.test(bytes) || /(?:^|\/)\.{1,2}(?:\/|$)/u.test(bytes))
       return repository;
-    return `https://${host}/${gitPathToHttpPath(bytes)}`;
+    const path = `/${gitPathToHttpPath(bytes)}`;
+    const declared = destination?.pathname;
+    if (declared?.includes("%")) {
+      // Only unreserved HTTP escapes identify the same literal path byte.
+      const decoded = declared.replace(/%[0-9a-f]{2}/giu, (escape) => {
+        const byte = String.fromCharCode(parseInt(escape.slice(1), 16));
+        return /^[a-z0-9._~-]$/iu.test(byte) ? byte : escape;
+      });
+      const pathKey = (value: string) => {
+        const bare = value.replace(/(?:\.git)?\/?$/u, "");
+        return githubPath ? bare.toLowerCase() : bare;
+      };
+      if (pathKey(path) === pathKey(decoded))
+        return `https://${host}${declared}`;
+    }
+    return `https://${host}${path}`;
   };
   // Git treats a colon followed by "//" as the start of a URL transport.
   const scp = /^([^@/:]+)@([^/:]+):(?!\/\/)(.+)$/u.exec(repository);

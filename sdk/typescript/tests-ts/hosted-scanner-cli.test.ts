@@ -116,15 +116,10 @@ test(transportTest, async () => {
   expect(fallback).not.toHaveBeenCalled();
 });
 
-test("Snyk checks the effective REST endpoint before sending an environment token", async () => {
-  const eu = "https://api.eu.snyk.io";
-  const us = "https://api.us.snyk.io";
-  const settings: NodeJS.ProcessEnv = {
-    ...environment,
-    [process.platform === "win32" ? "Scanner_Region" : "scanner_region"]: "eu",
-  };
+function snykRequestProbe() {
+  const settings: NodeJS.ProcessEnv = { ...environment };
   const requests: string[] = [];
-  const collect = (apiOrigin: string, token?: string) =>
+  const collect = (apiOrigin?: string, token?: string) =>
     collectSnykIssues(
       {
         organizationId,
@@ -144,6 +139,16 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
         },
       },
     );
+  return { collect, requests, settings };
+}
+
+test("Snyk checks the effective REST endpoint before sending an environment token", async () => {
+  const eu = "https://api.eu.snyk.io";
+  const us = "https://api.us.snyk.io";
+  const { collect, requests, settings } = snykRequestProbe();
+  const region =
+    process.platform === "win32" ? "Scanner_Region" : "scanner_region";
+  settings[region] = "eu";
   // Set each higher-priority setting without removing the shadowed endpoint.
   for (const [name, endpoint, origin] of [
     ["SNYK_CFG_ENDPOINT", "https://app.eu.snyk.io/api/v1", eu],
@@ -159,14 +164,41 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
     expect(requests.splice(0)).toEqual([`${origin} token synthetic`]);
   }
   delete settings["API_V3_URL"];
-  delete settings[
-    process.platform === "win32" ? "Scanner_Region" : "scanner_region"
-  ];
+  delete settings[region];
   await expect(collect(eu)).rejects.toThrow(
     "missing environment variable scanner_region",
   );
   await expect(collect(eu, "explicit")).rejects.toThrow("requested project");
   expect(requests).toEqual([`${eu} token explicit`]);
+});
+
+test("Snyk sends access tokens only to their embedded API host", async () => {
+  const eu = "https://api.eu.snyk.io";
+  const us = "https://api.snyk.io";
+  const { collect, requests, settings } = snykRequestProbe();
+  for (const [kind, host] of [
+    ["uat", "api.eu.snyk.io"],
+    ["sat", eu],
+  ]) {
+    const payload = Buffer.from(JSON.stringify({ h: host })).toString(
+      "base64url",
+    );
+    const token = `snyk_${kind}.12345678.${payload}.synthetic`;
+    settings["SNYK_TOKEN"] = token;
+    await expect(collect()).rejects.toThrow("access token's API host");
+    await expect(collect(eu)).rejects.toThrow("requested project");
+    settings["SNYK_API"] = us;
+    await expect(collect(us, token)).rejects.toThrow("access token's API host");
+    await expect(collect(eu, token)).rejects.toThrow("requested project");
+    expect(requests.splice(0)).toEqual([
+      `${eu} token ${token}`,
+      `${eu} token ${token}`,
+    ]);
+    delete settings["SNYK_API"];
+  }
+  settings["SNYK_TOKEN"] = "00000000-0000-4000-8000-000000000001";
+  await expect(collect()).rejects.toThrow("requested project");
+  expect(requests).toEqual([`${us} token ${settings["SNYK_TOKEN"]}`]);
 });
 
 test("hosted collection rejects invalid UTF-8 before it can replace vendor evidence", async () => {

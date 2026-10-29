@@ -1,5 +1,13 @@
+import {
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
+} from "../src/external-import-contract.js";
 import { expect, test } from "bun:test";
-import { isGitHubCloudHost, parseGitRemote } from "../src/git-remote.js";
+import {
+  isGitHubCloudHost,
+  normalizeHostedGitRepositoryUrl,
+  parseGitRemote,
+} from "../src/git-remote.js";
 
 test.each([
   [
@@ -89,3 +97,26 @@ test.each([
 ] as const)("recognizes GitHub Cloud host %s", (host, expected) => {
   expect(isGitHubCloudHost(host)).toBe(expected);
 });
+
+test.each([
+  ["ssh", "github.com", "My%2DRepo", "my%2Drepo", true],
+  ["ssh", "github.com", "my-repo", "my%2Drepo", true],
+  ["ssh", "github.com", "my%2Drepo", "my-repo", true],
+  ["scp", "github.com", "my%2Drepo", "my%2Drepo", false],
+  ["ssh", "github.com", "my%252Drepo", "my%2Drepo", false],
+  ["ssh", "github.com", "my%2Frepo", "my%2Frepo", false],
+  ["ssh", "gitlab.com", "My-repo", "my%2Drepo", false],
+] as const)(
+  "compares %s bytes on %s (%s, %s)",
+  (scheme, host, path, expected, matches) => {
+    const source = `https://${host}/org/${expected}`;
+    const remote =
+      scheme === "scp"
+        ? `git@${host}:org/${path}.git`
+        : `ssh://git@${host}/org/${path}.git`;
+    const alias = normalizeHostedGitRepositoryUrl(remote, source, false);
+    const key =
+      host === "github.com" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    expect(key(alias) === key(source)).toBe(matches);
+  },
+);

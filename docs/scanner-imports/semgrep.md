@@ -35,7 +35,10 @@ This endpoint excludes removed findings and Secrets. [Project API](https://docs.
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
 The SDK exposes `collectSemgrepPlatformFindings` and
-`normalizeSemgrepPlatformFindings`. Finding IDs retain their exact integer
+`normalizeSemgrepPlatformFindings`. For a custom GitHub Enterprise host, pass
+`{ sourceRepositories: [{ url, platform: "github" }] }` as the second argument
+to `normalizeSemgrepPlatformFindings` or `normalizeSemgrepFindings` after
+independently identifying the repository. Finding IDs retain their exact integer
 value, scoped to deployment, project ID, ref and product. Reimport with the
 same source key to refresh imported triage, locations or dependency evidence.
 Keep a separate key for CLI scans. Individual API pages and Guardian/MCP

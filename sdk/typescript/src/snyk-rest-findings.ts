@@ -8,10 +8,11 @@ import type { ExternalFindings } from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
-  isPublicGitHost,
+  isKnownGitHost,
   normalizeHostedGitRepositoryUrl,
 } from "./git-remote.js";
 import {
+  checkSnykTokenOrigin,
   hostedScannerHttp,
   hostedEnvironmentToken,
   hostedRepositoryUrl,
@@ -211,9 +212,7 @@ function matchesCliRepository(remote: string, source: string) {
   const authority = parts[1]!.toLowerCase();
   const hostname = authority.replace(/:\d+$/u, "");
   if (
-    (isPublicGitHost(hostname) ||
-      hostname === "dev.azure.com" ||
-      /^[a-z\d-]+\.visualstudio\.com$/u.test(hostname)) &&
+    isKnownGitHost(hostname) &&
     repositoryUrlKey(`https://${authority}${parts[2]}`) === source
   )
     return true;
@@ -243,8 +242,6 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
       "Snyk target URL does not match the selected source repository URL.",
     );
   if (enterprise) return "github" as const;
-  if (scmOrigins.has(origin) && !origin.startsWith("github"))
-    return "other" as const;
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -441,6 +438,7 @@ export async function collectSnykIssues(
   );
   if (/[\r\n]/u.test(token))
     throw new Error("Snyk API token cannot contain a line break.");
+  checkSnykTokenOrigin(token, selected.apiOrigin);
   const get = async (url: URL, label: string) =>
     jsonApi(await getJson(url, `token ${token}`), label);
   const getResource = async (url: URL, kind: string) =>
@@ -495,7 +493,11 @@ function savedContext(document: Resource) {
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];
-  const platform = checkTarget(target, selected, context);
+  const platform =
+    checkTarget(target, selected, context) ??
+    (context.scm && !context.origin.startsWith("github")
+      ? ("other" as const)
+      : undefined);
   return {
     source: { ...formatVersion, ...selected, project, target },
     context,

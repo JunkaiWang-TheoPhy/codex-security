@@ -36,6 +36,8 @@ From highest to lowest priority, the settings are
 when a REST override points to Europe and the general endpoint points to the US, select
 `--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
 the Snyk CLI configuration file, select it explicitly here as well.
+When a Snyk user or service access token carries an API host, that host must
+also match the selected region, including for tokens supplied through the SDK.
 
 The collector checks the selected repository URL against the project target
 when Snyk supplies one. Standard Git SSH targets can match HTTPS repository

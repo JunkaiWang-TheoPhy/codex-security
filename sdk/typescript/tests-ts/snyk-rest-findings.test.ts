@@ -547,6 +547,25 @@ test("uses the declared repository when Snyk omits the project's relationships",
   await expect(mixed.collect()).rejects.toThrow("selected project");
 });
 
+test.each([
+  "azure-repos",
+  "bitbucket-cloud",
+  "bitbucket-connect-app",
+  "bitbucket-server",
+  "gitlab",
+])(
+  "preserves %s project provenance when Snyk omits the target URL",
+  (origin) => {
+    const normalized = normalizeSnykIssues({
+      ...envelope(),
+      project: project({ origin, remote: null }),
+    });
+    expect(normalized.sourceRepositoryPlatform).toBe("other");
+    const source = normalized.findings[0]!.evidence.source_data!;
+    expect(snykRestFindingRepository(source).platform).toBe("other");
+  },
+);
+
 test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
   const source = "https://scm.example.test/Org/project";
   const check = (
@@ -807,96 +826,58 @@ test("a wrong project, product or repository fails before listing issues or acce
 });
 
 test("matches the HTTP target spelling emitted by Snyk CLI for public Git remotes", async () => {
+  const github = "github.com/example/repository";
   for (const [remote, selected] of [
-    ["http://github.com/Example/repository.git", sourceRepositoryUrl],
-    ["http://github.com:22/Example/repository.git", sourceRepositoryUrl],
+    ["github.com/Example/repository.git", github],
+    ["github.com:22/Example/repository.git", github],
     [
-      "http://github.com:22/Example/repository.git",
-      "https://github.com:22/example/repository",
+      "github.com:22/Example/repository.git",
+      "github.com:22/example/repository",
     ],
+    ["gitlab.com:22/Group/project.git", "gitlab.com/Group/project"],
     [
-      "http://gitlab.com:22/Group/project.git",
-      "https://gitlab.com/Group/project",
+      "github.com:443/Example/repository.git",
+      "github.com:443/example/repository",
     ],
-    [
-      "http://github.com:443/Example/repository.git",
-      "https://github.com:443/example/repository",
-    ],
-    ["http://ssh.github.com:443/Example/repository.git", sourceRepositoryUrl],
-    [
-      "http://altssh.gitlab.com:443/Group/repo.git",
-      "https://gitlab.com/Group/repo",
-    ],
-    [
-      "http://altssh.bitbucket.org:443/Group/repo.git",
-      "https://bitbucket.org/Group/repo",
-    ],
-    [
-      "http://gitlab.com:8443/Group/repo.git",
-      "https://gitlab.com:8443/Group/repo",
-    ],
-    ["http://gitlab.com/Team/project.git", "https://gitlab.com/Team/project"],
-    ["http://bitbucket.org/Team/project", "https://bitbucket.org/Team/project"],
-    ["http://example.ghe.com/Org/repo.git", "https://example.ghe.com/org/repo"],
-    ["http://dev.azure.com/Org/p/_git/r", "https://dev.azure.com/Org/p/_git/r"],
-    [
-      "http://org.visualstudio.com/p/_git/r",
-      "https://org.visualstudio.com/p/_git/r",
-    ],
+    ["ssh.github.com:443/Example/repository.git", github],
+    ["altssh.gitlab.com:443/Group/repo.git", "gitlab.com/Group/repo"],
+    ["altssh.bitbucket.org:443/Group/repo.git", "bitbucket.org/Group/repo"],
+    ["gitlab.com:8443/Group/repo.git", "gitlab.com:8443/Group/repo"],
+    ["gitlab.com/Team/project.git", "gitlab.com/Team/project"],
+    ["bitbucket.org/Team/project", "bitbucket.org/Team/project"],
+    ["example.ghe.com/Org/repo.git", "example.ghe.com/org/repo"],
+    ["dev.azure.com/Org/p/_git/r", "dev.azure.com/Org/p/_git/r"],
+    ["org.visualstudio.com/p/_git/r", "org.visualstudio.com/p/_git/r"],
   ] as const) {
-    const source = project({ origin: "cli", remote });
+    const source = project({ origin: "cli", remote: "http://" + remote });
     const report = await transport(
       document(source),
       document([issue()]),
-    ).collect({ ...options, sourceRepositoryUrl: selected });
+    ).collect({ ...options, sourceRepositoryUrl: "https://" + selected });
     expect(
       normalizeSnykIssues(JSON.parse(JSON.stringify(report)))
         .sourceRepositoryUrl,
-    ).toBe(selected);
+    ).toBe("https://" + selected);
   }
-  for (const [origin, remote, selected] of [
-    ["github", "http://github.com/example/repository", sourceRepositoryUrl],
-    ["cli", "http://github.com/example/other", sourceRepositoryUrl],
-    ["cli", "http://github.com:80/example/repository", sourceRepositoryUrl],
-    ["cli", "http://github.com:443/example/repository", sourceRepositoryUrl],
-    ["cli", "http://github.com:2222/example/repository", sourceRepositoryUrl],
-    [
-      "cli",
-      "http://git.example.test:22/team/repo",
-      "https://git.example.test/team/repo",
-    ],
-    [
-      "cli",
-      "http://github.com:8443/example/repository",
-      "https://github.com:443/example/repository",
-    ],
-    ["cli", "http://ssh.github.com:22/example/repository", sourceRepositoryUrl],
-    [
-      "cli",
-      "http://user@ssh.github.com:443/example/repository",
-      sourceRepositoryUrl,
-    ],
-    [
-      "cli",
-      "http://other.github.com:443/example/repository",
-      sourceRepositoryUrl,
-    ],
-    [
-      "cli",
-      "http://gitlab.com/team/project",
-      "https://gitlab.com/Team/project",
-    ],
-    [
-      "cli",
-      "http://git.example.test/group/project",
-      "https://git.example.test/group/project",
-    ],
+  for (const [remote, selected, origin = "cli"] of [
+    [github, github, "github"],
+    ["github.com/example/other", github],
+    ["github.com:80/example/repository", github],
+    ["github.com:443/example/repository", github],
+    ["github.com:2222/example/repository", github],
+    ["git.example.test:22/team/repo", "git.example.test/team/repo"],
+    ["github.com:8443/example/repository", "github.com:443/example/repository"],
+    ["ssh.github.com:22/example/repository", github],
+    ["user@ssh.github.com:443/example/repository", github],
+    ["other.github.com:443/example/repository", github],
+    ["gitlab.com/team/project", "gitlab.com/Team/project"],
+    ["git.example.test/group/project", "git.example.test/group/project"],
   ] as const) {
     const { collect, requests } = transport(
-      document(project({ origin, remote })),
+      document(project({ origin, remote: "http://" + remote })),
     );
     await expect(
-      collect({ ...options, sourceRepositoryUrl: selected }),
+      collect({ ...options, sourceRepositoryUrl: "https://" + selected }),
     ).rejects.toThrow("target URL");
     expect(requests).toHaveLength(1);
   }
@@ -1072,17 +1053,26 @@ test.each(["open-source", "code"] as const)(
         expect(
           (await prepare(unknownReport, fixture, binding)).preview.read,
         ).toBe(unknown.read);
-        const gitlabReport = withProject("gitlab", url);
-        const gitlab = normalizeSnykIssues(gitlabReport, "local");
-        await expect(prepare(gitlabReport, fixture, binding)).rejects.toThrow(
-          "does not match",
-        );
-        await expect(fixture.prepareNormalized(gitlab)).rejects.toThrow(
-          /does not match a configured remote/,
-        );
-        await expect(
-          fixture.prepareNormalized(gitlab, binding),
-        ).rejects.toThrow("does not match");
+        const { relationships: _links, ...linkless } = project({
+          manager,
+          origin: "azure-repos",
+        });
+        for (const nonGitHubReport of [
+          withProject("gitlab", url),
+          withProject("gitlab", null),
+          { ...saved, project: linkless },
+        ]) {
+          const normalized = normalizeSnykIssues(nonGitHubReport, "local");
+          await expect(
+            prepare(nonGitHubReport, fixture, binding),
+          ).rejects.toThrow("does not match");
+          await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+            /does not match a configured remote/,
+          );
+          await expect(
+            fixture.prepareNormalized(normalized, binding),
+          ).rejects.toThrow("does not match");
+        }
       }
       const importReport = async (report: SnykIssuesExport) =>
         (await prepare(report)).import();
@@ -1171,6 +1161,45 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
         }),
       ).rejects.toThrow("does not match");
     }
+    const projected = normalizeSnykIssues({
+      ...snykRestFixture("code", { sourceRepositoryUrl: url.toLowerCase() }),
+      project: project({
+        manager: "sast",
+        origin: "gitlab",
+        remote: url.toLowerCase(),
+      }),
+    });
+    delete projected.sourceRepositoryUrl;
+    delete projected.findings[0]!.evidence.source_data;
+    await expect(
+      fixture.prepareNormalized({
+        ...projected,
+        read: 2,
+        findings: [github, ...projected.findings],
+      }),
+    ).rejects.toThrow("does not match");
+    await expect(
+      fixture.prepareNormalized(projected, [{ url, platform: "github" }]),
+    ).rejects.toThrow("does not match");
+    const sca = normalizeSnykIssues({
+      ...envelope(),
+      sourceRepositoryUrl: url.toLowerCase(),
+      project: project({ origin: "gitlab", remote: null }),
+    });
+    delete sca.sourceRepositoryUrl;
+    delete sca.findings[0]!.evidence.source_data;
+    await expect(
+      fixture.prepareNormalized(sca, [
+        { url: url.toLowerCase(), platform: "github" },
+      ]),
+    ).rejects.toThrow("does not match");
+    expect(
+      (await fixture.prepareNormalized(sca, [{ url, platform: "github" }]))
+        .preview.findings,
+    ).toHaveLength(1);
+    expect(
+      (await fixture.prepareNormalized(sca)).preview.findings,
+    ).toHaveLength(1);
   } finally {
     await fixture.dispose();
   }

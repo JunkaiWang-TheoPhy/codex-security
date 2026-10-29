@@ -1492,14 +1492,15 @@ test.each(["semgrep", "snyk"] as const)(
       foreign,
     ]);
     const plain = await mkdtemp(join(local.root, "plain-"));
-    for (const repository of [local.repository, plain])
-      await expect(
-        prepareNormalizedLocalImport(
-          input,
-          { ...localOptions, repository },
-          localDeps,
-        ),
-      ).rejects.toThrow("does not match");
+    for (const sourceRepositoryUrl of [foreign, ""])
+      for (const repository of [local.repository, plain])
+        await expect(
+          prepareNormalizedLocalImport(
+            { ...input, sourceRepositoryUrl },
+            { ...localOptions, repository },
+            localDeps,
+          ),
+        ).rejects.toThrow("does not match");
   },
 );
 

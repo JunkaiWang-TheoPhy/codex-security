@@ -1,5 +1,6 @@
 import { CodexSecurityError } from "./errors.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
+import { isRecord } from "./record.js";
 import { decodeScannerJson, requiredText } from "./scanner-import.js";
 
 export interface HostedScannerHttpOptions {
@@ -46,6 +47,37 @@ function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
   return importEnvironmentSetting(environment, name)?.value;
 }
 
+function endpointOrigin(value: string, snykBase: boolean): string | undefined {
+  const url = URL.parse(value);
+  if (url?.protocol !== "https:") return undefined;
+  // Snyk derives its REST host from the general endpoint (e.g. app.eu.snyk.io).
+  if (snykBase && !url.hostname.startsWith("api."))
+    url.hostname = `api.${url.hostname.replace(/^app\./u, "")}`;
+  return url.origin;
+}
+
+export function checkSnykTokenOrigin(token: string, origin: string): void {
+  // Snyk user and service access tokens carry their API hostname in the h claim.
+  const payload =
+    /^snyk_(?:uat|sat)\.[a-z0-9]{8}\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$/u.exec(
+      token.trim(),
+    )?.[1];
+  if (!payload) return;
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return;
+  }
+  const host = isRecord(claims) ? claims["h"] : undefined;
+  if (typeof host !== "string" || !host) return;
+  const base = host.startsWith("http") ? host : `https://${host}`;
+  if (endpointOrigin(base, true) !== origin)
+    throw new Error(
+      `The Snyk access token's API host does not match ${origin}. Select its API origin before collecting findings.`,
+    );
+}
+
 /** Use a vendor environment token only at the origin configured for it. */
 export function hostedEnvironmentToken(
   environment: NodeJS.ProcessEnv,
@@ -58,15 +90,8 @@ export function hostedEnvironmentToken(
     for (const name of originNames) {
       const configured = endpointSetting(environment, name);
       if (!configured) continue;
-      const url = URL.parse(configured);
-      // Snyk derives its REST host from the general endpoint (e.g. app.eu.snyk.io).
-      if (
-        url &&
-        (name === "SNYK_API" || name === "SNYK_CFG_ENDPOINT") &&
-        !url.hostname.startsWith("api.")
-      )
-        url.hostname = `api.${url.hostname.replace(/^app\./u, "")}`;
-      if (url?.protocol !== "https:" || url.origin !== origin)
+      const snykBase = name === "SNYK_API" || name === "SNYK_CFG_ENDPOINT";
+      if (endpointOrigin(configured, snykBase) !== origin)
         throw new Error(
           `${name} does not match ${origin}. Select a matching API origin and ${tokenName} before collecting findings.`,
         );

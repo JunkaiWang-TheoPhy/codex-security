@@ -658,13 +658,11 @@ export async function prepareLocalImport(
   const sources = new Map<string, ExternalSourceRepository>();
   let hostedUrl =
     options.provider === "snyk" || options.provider === "semgrep"
-      ? current.sourceRepositoryUrl
+      ? current.sourceRepositoryUrl || undefined
       : undefined;
   if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
   const reportPlatform =
-    options.provider === "snyk" && hostedUrl
-      ? current.sourceRepositoryPlatform
-      : undefined;
+    options.provider === "snyk" ? current.sourceRepositoryPlatform : undefined;
   let snykGitHub: boolean | undefined =
     reportPlatform === "other" ? false : undefined;
   if (!current.findings.length && reportPlatform === "github")
@@ -698,6 +696,8 @@ export async function prepareLocalImport(
       }
     }
   }
+  // A projection can retain a case-sensitive platform and typed URLs without the original report URL.
+  if (reportPlatform === "other") hostedUrl ??= sources.keys().next().value;
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
@@ -718,11 +718,13 @@ export async function prepareLocalImport(
     ...(inspector ? [inspector] : []),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
-    // A reader's platform must not loosen an operator-supplied Inspector map.
+    // A supplied GitHub hint cannot loosen an existing case-sensitive source binding.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
         source.url,
-        options.inspectorProjectMap ? { url: source.url } : source,
+        options.inspectorProjectMap || reportPlatform === "other"
+          ? { url: source.url }
+          : source,
       );
   }
   let hosted: ExternalSourceRepository | undefined;

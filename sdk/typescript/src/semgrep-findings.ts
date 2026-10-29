@@ -4,7 +4,10 @@ import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import {
   isSemgrepPlatformReport,
   normalizePlatformReport,
@@ -34,6 +37,8 @@ import {
 export interface SemgrepImportOptions {
   /** Source repository declared by the caller; never inferred from the destination. */
   sourceRepositoryUrl?: string;
+  /** Independently resolved sources used to verify GitHub Enterprise URLs in Platform reports. */
+  sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
 function sourceRepository(options: SemgrepImportOptions): string {
@@ -183,12 +188,7 @@ export function normalizeSemgrepReport(
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
-    return normalizePlatformReport(
-      document,
-      options.sourceRepositoryUrl,
-      target,
-      isGitHub,
-    );
+    return normalizePlatformReport(document, options, target, isGitHub);
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);

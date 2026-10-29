@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import {
   collectSemgrepPlatformFindings,
   normalizeSemgrepPlatformFindings,
@@ -214,7 +215,7 @@ test("detects removals before the next offset even when no finding ID repeats", 
   const report = await collectPages(
     { findings: initial },
     { findings: [] },
-    { findings: reread },
+    { findings: reread.reverse() },
   );
   expect(report.findings).toEqual(initial);
 });
@@ -287,6 +288,58 @@ test("binds URL-less split-project findings to the selected project or physical 
         findings: [{ ...rows[0], repository }],
       }),
     ).toThrow("repository");
+  }
+});
+
+test("normalizes in-memory Enterprise reports against the caller's identified GitHub repository", () => {
+  const url = "https://scm.example.test/Team/Repo";
+  const row = {
+    ...platformFinding(1),
+    repository: { url: "git@scm.example.test:team/repo.git" },
+  };
+  const report = {
+    ...platformReport([row]),
+    project: { ...platformProject, url },
+  };
+  for (const normalize of [
+    normalizeSemgrepFindings,
+    normalizeSemgrepPlatformFindings,
+  ]) {
+    const source = { url: url.toLowerCase(), platform: "github" as const };
+    expect(
+      normalize(report, { sourceRepositories: [source] }).findings,
+    ).toHaveLength(1);
+    expect(() =>
+      normalize(report, {
+        sourceRepositories: [{ ...source, url: source.url + "-other" }],
+      }),
+    ).toThrow();
+    expect(() => normalize(report)).toThrow();
+  }
+});
+
+test("keeps known non-GitHub URLs case-sensitive during collection", async () => {
+  for (const host of [
+    "gitlab.com",
+    "bitbucket.org",
+    "dev.azure.com",
+    "example.visualstudio.com",
+  ]) {
+    const url = `https://${host}/Team/Repo`;
+    const responses = [
+      { project: { ...platformProject, url } },
+      {
+        findings: [
+          { ...platformFinding(1), repository: { url: url.toLowerCase() } },
+        ],
+      },
+    ];
+    await expect(
+      collectSemgrepPlatformFindings(options, {
+        environment,
+        fetch: async () => Response.json(responses.shift()),
+      }),
+    ).rejects.toThrow("does not match");
   }
 });
 

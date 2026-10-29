@@ -2,6 +2,7 @@ import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
   repositoryUrlKey,
+  isVerifiedGitHubRepository,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -12,7 +13,12 @@ import {
   hostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
-import { normalizeHostedGitRepositoryUrl } from "./git-remote.js";
+import type { SemgrepImportOptions } from "./semgrep-findings.js";
+import {
+  isGitHubCloudHost,
+  isKnownGitHost,
+  normalizeHostedGitRepositoryUrl,
+} from "./git-remote.js";
 import { position, weaknessIds } from "./native-json-findings.js";
 import { canonicalJson, isRecord } from "./record.js";
 import {
@@ -226,7 +232,10 @@ export async function collectSemgrepPlatformFindings(
   const selected = projectContext(
     lookup["project"],
     sourceRepositoryUrl,
-    () => true,
+    (url) => {
+      const host = new URL(url).hostname;
+      return isGitHubCloudHost(host) || !isKnownGitHost(host);
+    },
   );
   const { project } = selected.binding;
   if (project.name !== name)
@@ -250,7 +259,7 @@ export async function collectSemgrepPlatformFindings(
   const pageId = (rows: Record<string, unknown>[]) =>
     stableId(
       "page",
-      rows.map((row) => platformId(row["id"]) ?? canonicalJson(row)),
+      rows.map((row) => platformId(row["id"]) ?? canonicalJson(row)).sort(),
     );
   const findings: Record<string, unknown>[] = [];
   const previousIds = new Set<number | string>();
@@ -319,20 +328,26 @@ export function semgrepPlatformFindingRepository(
 
 export function normalizeSemgrepPlatformFindings(
   input: unknown,
-  declared?: string,
+  options: string | SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings & { sourceRepositoryUrl: string } {
   if (!isSemgrepPlatformReport(input))
     throw new Error("Expected a complete Semgrep Platform export.");
-  return normalizePlatformReport(input, declared, target);
+  return normalizePlatformReport(
+    input,
+    typeof options === "string" ? { sourceRepositoryUrl: options } : options,
+    target,
+  );
 }
 
 export function normalizePlatformReport(
   input: Record<string, unknown>,
-  declared: string | undefined,
+  options: SemgrepImportOptions,
   target: ExternalImportTarget,
-  isGitHub: (url: string) => boolean = () => false,
+  isGitHub: (url: string) => boolean = (url) =>
+    isVerifiedGitHubRepository(url, options.sourceRepositories),
 ): ExternalFindings & { sourceRepositoryUrl: string } {
+  const declared = options.sourceRepositoryUrl;
   const deployment = requiredText(input["deployment"], "Semgrep deployment");
   const selected = projectContext(
     input["project"],
