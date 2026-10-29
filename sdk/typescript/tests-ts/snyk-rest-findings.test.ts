@@ -645,25 +645,28 @@ test("accepts a custom-host .git alias only when the Snyk integration establishe
   expect(normalizeSnykIssues(report("api", url)).findings).toHaveLength(1);
 });
 
-test("a Snyk integration label cannot alias distinct Azure repository names", async () => {
-  const url = "https://dev.azure.com/example/project/_git/library";
-  await using checkout = await snykCheckout(url);
-  for (const origin of ["github-enterprise", "gitlab"]) {
-    const report = {
-      ...envelope(),
-      sourceRepositoryUrl: url + ".git",
-      project: project({ origin, remote: url + ".git" }),
-    };
-    expect(() =>
-      normalizeSnykIssues({ ...report, sourceRepositoryUrl: url }),
-    ).toThrow("target URL");
-    const exact = normalizeSnykIssues(report);
-    expect(exact.sourceRepositoryPlatform).toBe("other");
-    await expect(checkout.prepareNormalized(exact)).rejects.toThrow(
-      "does not match",
-    );
-  }
-});
+test.each(["dev.azure.com", "dev.azure.com."])(
+  "a Snyk integration label cannot alias distinct Azure repository names on %s",
+  async (host) => {
+    const url = `https://${host}/example/project/_git/library`;
+    await using checkout = await snykCheckout(url);
+    for (const origin of ["github-enterprise", "gitlab"]) {
+      const report = {
+        ...envelope(),
+        sourceRepositoryUrl: url + ".git",
+        project: project({ origin, remote: url + ".git" }),
+      };
+      expect(() =>
+        normalizeSnykIssues({ ...report, sourceRepositoryUrl: url }),
+      ).toThrow("target URL");
+      const exact = normalizeSnykIssues(report);
+      expect(exact.sourceRepositoryPlatform).toBe("other");
+      await expect(checkout.prepareNormalized(exact)).rejects.toThrow(
+        "does not match",
+      );
+    }
+  },
+);
 
 test.each([
   ["Jalape%c3%b1o", "Jalape%C3%B1o"],

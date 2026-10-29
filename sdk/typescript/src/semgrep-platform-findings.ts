@@ -19,6 +19,7 @@ import {
 } from "./hosted-scanner-http.js";
 import type { SemgrepImportOptions } from "./semgrep-findings.js";
 import {
+  gitServiceHostname,
   isGitHubCloudHost,
   isKnownGitHost,
   isPublicGitHost,
@@ -284,7 +285,7 @@ export async function collectSemgrepPlatformFindings(
     nativeProject,
     sourceRepositoryUrl,
     (url) => {
-      const host = new URL(url).hostname;
+      const host = gitServiceHostname(url);
       return isGitHubCloudHost(host) || !isKnownGitHost(host);
     },
     [],

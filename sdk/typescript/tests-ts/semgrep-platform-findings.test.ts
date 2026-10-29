@@ -467,6 +467,7 @@ test("keeps known non-GitHub URLs case-sensitive during collection", async () =>
     "bitbucket.org",
     "dev.azure.com",
     "example.visualstudio.com",
+    "example.visualstudio.com.",
   ]) {
     const url = `https://${host}/Team/Repo`;
     const finding = {

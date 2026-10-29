@@ -289,6 +289,12 @@ test("local file and normalized imports retain the repository references selecte
     ...fixture.dependencies,
     sourceRepositories: [reference],
   };
+  const selected = {
+    sourceRepositoryUrl: url.toLowerCase(),
+    sourceRepositories: dependencies.sourceRepositories,
+  };
+  const read = readSemgrepFindings(fixture.file, selected);
+  const expected = normalizeSemgrepPlatformFindings(report, selected);
   const prepared = Promise.all([
     prepareLocalExternalImport(fixture.file, fixture.options, dependencies),
     prepareNormalizedLocalImport(
@@ -297,8 +303,10 @@ test("local file and normalized imports retain the repository references selecte
       dependencies,
     ),
   ]);
+  selected.sourceRepositoryUrl += "-foreign";
   reference.url += "-foreign";
   dependencies.sourceRepositories.length = 0;
+  expect(await read).toEqual(expected);
   expect((await prepared).map(({ preview }) => preview.findings)).toEqual([
     [],
     [],

@@ -457,7 +457,6 @@ function hostedRepositoryMatches(
   expectedKey?: string,
   gitlab = source.gitlab,
 ): boolean {
-  validateHostedRepositoryUrl(value);
   if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
   const github = source.platform === "github";
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
@@ -994,7 +993,8 @@ export async function prepareLocalImport(
       gitlab: snyk?.destinationSuffix,
     };
     // Validate the entire report even when the checkout has several remotes or none.
-    for (const url of sources.keys())
+    for (const url of sources.keys()) {
+      validateHostedRepositoryUrl(url);
       if (
         !hostedRepositoryMatches(
           hosted,
@@ -1006,6 +1006,7 @@ export async function prepareLocalImport(
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );
+    }
   }
   if (dependabotSource)
     sources.set(dependabotSource, {

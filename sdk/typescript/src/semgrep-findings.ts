@@ -6,6 +6,7 @@ import {
 } from "./external-import-contract.js";
 import {
   HOSTED_FINDINGS_FORMATS,
+  snapshotSourceRepositories,
   type ExternalFindings,
   type HostedExternalFindings,
   type ExternalSourceRepository,
@@ -421,9 +422,13 @@ export function normalizeSemgrepSarif(
 
 export async function readSemgrepFindings(
   path: string,
-  options: SemgrepImportOptions = {},
+  { sourceRepositoryUrl, sourceRepositories }: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<HostedExternalFindings> {
+  const options = {
+    sourceRepositoryUrl,
+    sourceRepositories: snapshotSourceRepositories(sourceRepositories),
+  };
   return normalizeSemgrepFindings(
     await readScannerJson(path, HOSTED_FINDINGS_FORMATS.semgrep),
     options,

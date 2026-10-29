@@ -106,6 +106,11 @@ export function gitPathToHttpPath(bytes: string): string {
     );
 }
 
+/** Ignore the optional DNS root dot for provider classification only. */
+export function gitServiceHostname(url: string): string {
+  return new URL(url).hostname.replace(/\.$/u, "");
+}
+
 export function isGitHubCloudHost(host: string): boolean {
   return host === "github.com" || host.endsWith(".ghe.com");
 }

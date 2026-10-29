@@ -10,6 +10,7 @@ import {
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
+  gitServiceHostname,
   isGitHubCloudHost,
   isKnownGitHost,
   normalizeHostedGitRepositoryUrl,
@@ -226,7 +227,7 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk CLI HTTP target URL cannot verify a repository. Set an explicit HTTPS URL with snyk monitor --remote-repo-url and collect the resulting project.",
     );
-  const host = new URL(selected.sourceRepositoryUrl).hostname;
+  const host = gitServiceHostname(selected.sourceRepositoryUrl);
   const customHost = !isKnownGitHost(host);
   const github =
     origin.startsWith("github") && (customHost || isGitHubCloudHost(host));

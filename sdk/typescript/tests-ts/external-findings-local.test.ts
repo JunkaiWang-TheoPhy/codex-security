@@ -120,7 +120,10 @@ describe("local normalized scanner findings", () => {
     "projected %s reports match a private SSH repository literally",
     async (provider) => {
       const url = "git@scm.example.test:Team/Repo.git";
-      const f = await fixture({ remote: url });
+      const f = await fixture({ remote: "https://other.example.test/a/%2e/b" });
+      execFileSync("git", ["config", "--add", "remote.origin.url", url], {
+        cwd: f.repository,
+      });
       const report = { ...input(), sourceRepositoryPlatform: "other" as const };
       const prepare = (url: string) =>
         prepareNormalizedLocalImport(
