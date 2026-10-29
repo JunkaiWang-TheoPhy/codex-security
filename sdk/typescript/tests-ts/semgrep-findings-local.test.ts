@@ -140,23 +140,43 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
 test("replays numeric int64 Platform finding IDs from a file while preserving native JSON numbers", async () => {
   await using fixture = await platformCheckout(repositoryUrl);
   const ids = ["9007199254740992", "9007199254740993"];
+  const ratio = "0.1234567890123456789";
   const { format, ...platform } = platformReport(
-    ids.map((id) => ({ ...platformFinding(1), id })),
+    ids.map((id) => ({ ...platformFinding(1), id, metadata: { ratio } })),
   );
   const report = { ...platform, format };
+  const quoted = JSON.stringify(report).replace(/"(\d{16})"/gu, "$1");
   await writeFile(
     fixture.file,
-    JSON.stringify(report).replace(/"(\d{16})"/gu, "$1"),
+    quoted.replace(`"ratio":"${ratio}"`, `"ratio":${ratio}`),
   );
   const expected = normalizeSemgrepPlatformFindings(report);
   expect(expected.findings).toHaveLength(2);
-  expect(await readSemgrepFindings(fixture.file)).toEqual(expected);
+  const numeric = await readSemgrepFindings(fixture.file);
+  expect(numeric).toMatchObject(expected);
+  expect(
+    numeric.findings.map((row) => row.evidence.source_data?.["numericFields"]),
+  ).toEqual([
+    { finding: { id: ids[0], metadata: { ratio } } },
+    { finding: { id: ids[1] } },
+  ]);
   const prepared = await prepareLocalExternalImport(
     fixture.file,
     fixture.options,
     fixture.dependencies,
   );
   expect((await prepared.import()).counts.created).toBe(2);
+  // Changing one vendor fraction to the same quoted digits updates only that finding.
+  await writeFile(fixture.file, quoted);
+  const changed = await prepareLocalExternalImport(
+    fixture.file,
+    fixture.options,
+    fixture.dependencies,
+  );
+  expect((await changed.import()).counts).toMatchObject({
+    updated: 1,
+    unchanged: 1,
+  });
 
   // A rounded fractional token must not overwrite the genuine occurrence for ID 1.
   const small = JSON.stringify(platformReport([platformFinding(1)]));
@@ -192,8 +212,12 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
     fixture.file,
     JSON.stringify(exponential).replace(JSON.stringify(amount), amount),
   );
-  expect(await readSemgrepFindings(fixture.file)).toEqual(
-    normalizeSemgrepPlatformFindings(exponential),
+  const measured = await readSemgrepFindings(fixture.file);
+  expect(measured).toMatchObject(normalizeSemgrepPlatformFindings(exponential));
+  expect(measured.findings[0]!.evidence.source_data?.["numericFields"]).toEqual(
+    {
+      finding: { measurements: { 0: amount } },
+    },
   );
 
   // Native imports ignore timing data, even when a JSON reviver would overflow.
@@ -292,6 +316,39 @@ test("replays native SSH evidence and URL-less labels from the selected Semgrep 
     ).toThrow();
   }
 });
+
+test.each([
+  ["github.com.", "git", "ssh://git@ssh.github.com.:443/team/project.git"],
+  ["example.ghe.com.", "example", "example@example.ghe.com.:team/project.git"],
+])(
+  "replays native and checkout SSH aliases for the same %s authority",
+  async (host, user, remote) => {
+    const url = `https://${host}/team/project`;
+    const project = {
+      ...platformProject,
+      url: `${user}@${host}:team/project.git`,
+    };
+    const finding = {
+      ...platformFinding(9),
+      repository: { url: `ssh://${user}@${host}/team/project.git` },
+    };
+    const report = await collectProject(project, [finding], url);
+    await using fixture = await platformCheckout(remote);
+    await writeFile(fixture.file, JSON.stringify(report));
+    const prepared = await prepareLocalExternalImport(
+      fixture.file,
+      fixture.options,
+      fixture.dependencies,
+    );
+    expect(prepared.preview.findings[0]?.evidence.source_data).toMatchObject({
+      project,
+      finding,
+    });
+    await expect(
+      collectProject(project, [finding], url.replace("./", "/")),
+    ).rejects.toThrow();
+  },
+);
 
 test("local file and normalized imports retain the repository references selected at invocation", async () => {
   const url = "https://scm.example.test/Team/Project";

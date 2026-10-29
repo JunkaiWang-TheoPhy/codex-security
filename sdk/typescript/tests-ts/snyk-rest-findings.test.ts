@@ -117,7 +117,11 @@ test("preserves exact Snyk metadata and distinguishes numeric titles from text t
       },
     },
   });
-  const quoted = issue({ key: "quoted", title: digits });
+  const quoted = issue({
+    key: "quoted",
+    title: digits,
+    meta: { build: digits },
+  });
   const rows = [
     quoted,
     issue({ key: "numeric", title: "numeric-title" }, { id: otherId }),
@@ -140,7 +144,14 @@ test("preserves exact Snyk metadata and distinguishes numeric titles from text t
     title: digits,
     source_data: { project: source },
   });
-  expect(result.findings).toEqual(historical.findings);
+  expect(result.findings).toMatchObject(historical.findings);
+  expect(historical.findings[0]!.evidence.source_data).not.toHaveProperty(
+    "numericFields",
+  );
+  expect(result.findings[0]!.evidence.source_data?.["numericFields"]).toEqual({
+    project: report.numericFields?.["project"],
+    issue: { attributes: { meta: { build: digits } } },
+  });
   expect(result.excluded).toEqual([
     {
       position: 2,
@@ -772,9 +783,11 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
 
 test.each([
   ["gitlab", "gitlab.com", "Group/subgroup/project"],
+  ["gitlab", "gitlab.com.", "Group/subgroup/project"],
   ["bitbucket-cloud", "bitbucket.org", "Group/project"],
+  ["bitbucket-cloud", "bitbucket.org.", "Group/project"],
 ])(
-  "collects and replays %s SSH targets for the selected namespace and project",
+  "collects and replays %s SSH targets on %s for the selected namespace and project",
   async (origin, host, name) => {
     const scp = `git@${host}:${name}.git`;
     const selected = {

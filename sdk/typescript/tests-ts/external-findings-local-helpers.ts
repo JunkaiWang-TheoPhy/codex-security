@@ -40,6 +40,8 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
             name.toUpperCase() !== "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
         ),
       ),
+      GIT_CONFIG_GLOBAL: join(root, "global-git-config"),
+      GIT_CONFIG_NOSYSTEM: "1",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     },

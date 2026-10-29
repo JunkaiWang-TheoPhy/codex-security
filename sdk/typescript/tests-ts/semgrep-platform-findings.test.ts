@@ -434,14 +434,23 @@ test.each([
 
 test("preserves .git on custom repository URLs and legacy name-only rows", () => {
   const url = "https://git.example.test/team/lib";
-  const read = (repository: { url?: string; name?: string }) =>
-    normalizeSemgrepPlatformFindings({
-      ...platformReport([{ ...platformFinding(10), repository }]),
-      project: { ...platformProject, name: "scan-project", url: url + ".git" },
-    });
+  const read = (repository: { url?: string; name?: string }, github = false) =>
+    normalizeSemgrepPlatformFindings(
+      {
+        ...platformReport([{ ...platformFinding(10), repository }]),
+        project: {
+          ...platformProject,
+          name: "scan-project",
+          url: url + ".git",
+        },
+      },
+      github ? { sourceRepositories: [{ url, platform: "github" }] } : {},
+    );
   expect(() => read({ url })).toThrow("repository");
   expect(() => read({ name: "lib" })).toThrow("repository");
   expect(read({ name: "lib.git" }).findings).toHaveLength(1);
+  for (const name of ["lib.git", "lib"])
+    expect(read({ name }, true).findings).toHaveLength(1);
 });
 
 test("legacy name-only rows match SCM path segments in plain or URL spelling", () => {
@@ -536,7 +545,14 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
     ...platformReport(records),
     repositoryAliases: ["project"],
   });
-  expect(JSON.stringify(parsed.findings)).toBe(JSON.stringify(legacy.findings));
+  expect(parsed.findings).toMatchObject(legacy.findings);
+  expect(
+    parsed.findings.map((row) => row.evidence.source_data?.["numericFields"]),
+  ).toEqual(
+    ids
+      .slice(0, 2)
+      .map((id) => ({ finding: { id, first_seen_scan_id: digits } })),
+  );
   expect(parsed.findings[0]!.evidence).toMatchObject({
     title: digits,
     description: digits,

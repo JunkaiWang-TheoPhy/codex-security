@@ -210,12 +210,13 @@ function remoteRepository(
       : repository;
   };
   if (!bound) {
-    // SCP passes percent escapes literally. SSH URLs decode reserved path bytes,
-    // including those WHATWG exposes as a query or fragment.
+    // SCP paths are literal. SSH URI paths include their query and fragment text.
     if (scpStyle) path = path.replaceAll("%", "%25");
-    else if (ssh || url.protocol === "git:")
-      path = (path + rawSuffix).replace(/%3f/giu, "?").replace(/%23/giu, "#");
-    return { key: requestKey(path) };
+    else if (ssh || url.protocol === "git:") path += rawSuffix;
+    // Keep literal path delimiters in URL-escaped form, separate from HTTP selectors.
+    return {
+      key: requestKey(path.replace(/%3f|\?/giu, "%3F").replaceAll("#", "%23")),
+    };
   }
 
   if (!ssh && url.protocol !== "git:") {
@@ -562,20 +563,43 @@ async function requireMatchingRepository(
     const standard = name.toLowerCase();
     if (!/^(?:https?|ftps?)$/u.test(standard)) return false;
     if (name === standard) return true;
-    // Git searches its exec path first. A differently cased name may be a distinct helper.
     execPath ||= utf8(await readGit(["--exec-path"]));
     if (!execPath) return false;
-    const first = execPath.split(delimiter, 1)[0]!;
-    const directory = isAbsolute(first) ? first : repository + sep + first;
-    const prefix = directory + sep + "git-remote-";
-    const suffix = process.platform === "win32" ? ".exe" : "";
-    const candidate = prefix + name + suffix;
-    const file = await stat(candidate).catch(() => null);
-    return (
-      !!file?.isFile() &&
-      (process.platform === "win32" || (file.mode & 0o100) !== 0) &&
-      sameFile(candidate, prefix + standard + suffix)
-    );
+    const path = environmentEntry(environment ?? process.env, "PATH");
+    let search = path === undefined ? execPath : execPath + delimiter + path;
+    let cwd = repository;
+    if (search.split(delimiter).some((dir) => !isAbsolute(dir))) {
+      const cdup = utf8(await readGit(["rev-parse", "--show-cdup"]));
+      if (cdup === undefined) return false;
+      cwd = resolve(repository, cdup);
+      // Git enters the worktree root before starting its remote helper subprocess.
+      // Each Git process prepends its exec path from its own working directory.
+      if (!isAbsolute(execPath)) {
+        search = repository + sep + search;
+        if (cwd !== repository)
+          search = cwd + sep + execPath + delimiter + search;
+      }
+    }
+    const windows = process.platform === "win32";
+    const findHelper = async (helper: string) => {
+      for (const dir of search.split(delimiter)) {
+        if (windows && !dir) continue;
+        const directory = isAbsolute(dir) ? dir : cwd + sep + dir;
+        for (const suffix of windows ? [".exe", ""] : [""]) {
+          const candidate = directory + sep + "git-remote-" + helper + suffix;
+          const file = await stat(candidate).catch(() => null);
+          if (file?.isFile() && (windows || (file.mode & 0o100) !== 0))
+            return candidate;
+          if (windows && suffix && file) return undefined;
+        }
+      }
+      return undefined;
+    };
+    const [requested, stock] = await Promise.all([
+      findHelper(name),
+      findHelper(standard),
+    ]);
+    return !!requested && !!stock && sameFile(requested, stock);
   };
   const multilineRewrite = remoteConfig.some(
     (entry) =>

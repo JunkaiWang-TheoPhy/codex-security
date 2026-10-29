@@ -130,15 +130,13 @@ export function isKnownGitHost(host: string): boolean {
   );
 }
 
-/** Public SSH-over-443 authorities and their HTTPS repository hosts. */
-function publicGitSsh443Host(authority: string): string | undefined {
-  switch (authority) {
-    case "ssh.github.com:443":
-      return "github.com";
-    case "altssh.gitlab.com:443":
-      return "gitlab.com";
-    case "altssh.bitbucket.org:443":
-      return "bitbucket.org";
+/** Public SSH-over-443 hosts share the HTTPS hostname after the first DNS label. */
+function publicGitSsh443Host(hostname: string): string | undefined {
+  switch (gitServiceHostname(hostname)) {
+    case "ssh.github.com":
+    case "altssh.gitlab.com":
+    case "altssh.bitbucket.org":
+      return hostname.slice(hostname.indexOf(".") + 1);
   }
 }
 
@@ -161,7 +159,7 @@ export function normalizeHostedGitRepositoryUrl(
   return normalizeGitSshAlias(
     remote,
     (host) =>
-      (github || isPublicGitHost(host)) &&
+      (github || isPublicGitHost(gitServiceHostname(host))) &&
       matchesHttpsHost(source ?? `https://${host}`, host),
   );
 }
@@ -183,7 +181,8 @@ function normalizeGitSshAlias(
     (username === "git" && hostname === "github.com") ||
     (isAliasHost(hostname) &&
       (username === "git" ||
-        username === /^([^.]+)\.ghe\.com$/u.exec(hostname)?.[1]));
+        username ===
+          /^([^.]+)\.ghe\.com$/u.exec(gitServiceHostname(hostname))?.[1]));
   const hostedAlias = (
     url: URL,
     user: string,
@@ -194,7 +193,7 @@ function normalizeGitSshAlias(
     const standard =
       isGitSshUser(user, hostname) && (url.port === "" || url.port === "22");
     const alternate =
-      user === "git" && publicGitSsh443Host(url.host.toLowerCase());
+      user === "git" && url.port === "443" && publicGitSsh443Host(hostname);
     if (!standard && !alternate) return repository;
     const bytes = gitTransportBytes(path, scpStyle);
     if (/[?#\\]/u.test(bytes) || /(?:^|\/)\.{1,2}(?:\/|$)/u.test(bytes))

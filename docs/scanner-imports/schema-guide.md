@@ -19,7 +19,8 @@ Keep it with the export. The reader uses it to validate a numeric ID as a number
 and a quoted title as text, even when they contain the same digits. Earlier v1
 exports with quoted digits and no marker are read as strings because their
 original JSON type cannot be recovered. Semgrep accepts exact int64 ID strings
-from these exports.
+from these exports. Each normalized finding keeps the markers for its own
+raw evidence in `source_data.numericFields`.
 
 ## Choose the record and source key
 
@@ -196,9 +197,10 @@ recover:
 - **`savedSubmission` identifies an existing checkpoint:** rerun the same
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
-  but persisting a later receipt failed. If an upgrade accepts additional rows
-  from the same file, its preview is a new selection. Resume the original
-  selection first using the earlier version or the saved normalized SDK input.
+  but persisting a later receipt failed. An upgrade can select additional rows
+  or distinguish values an earlier Snyk or Semgrep client rounded or stored as
+  text. In either case, resume the original selection with the earlier client or
+  its saved normalized findings before approving the new preview.
   An older Snyk or Semgrep request saved without a repository binding needs a
   matching current catalog URL if its evidence cannot identify the original
   repository. Resume it before renaming. Ambiguous paths include those with a

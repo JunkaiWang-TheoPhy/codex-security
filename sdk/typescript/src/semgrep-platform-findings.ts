@@ -32,6 +32,7 @@ import {
   normalizeRecords,
   positiveInt64,
   hostedNumber,
+  hostedWireFields,
   hostedWireValue,
   type HostedNumericFields,
   restoreHostedNumbers,
@@ -201,9 +202,20 @@ function projectContext(
         project.name,
         pathname,
         github || isPublicGitHost(gitServiceHostname(hostname)),
-        !github && !legacyPublicHost,
+        !legacyPublicHost,
       );
-  return { binding, url, github, names: new Set(names), observed };
+  const projectNumbers =
+    typeof original["id"] === "number" && typeof project.id === "string"
+      ? { project: { id: project.id } }
+      : undefined;
+  return {
+    binding,
+    url,
+    github,
+    names: new Set(names),
+    observed,
+    projectNumbers,
+  };
 }
 
 function scopedFinding(
@@ -323,9 +335,7 @@ export async function collectSemgrepPlatformFindings(
         .sort(),
     );
   const findings: Record<string, unknown>[] = [];
-  const numericFields: HostedNumericFields = Object.create(null);
-  if (typeof nativeProject["id"] === "number" && typeof project.id === "string")
-    numericFields["project"] = { id: project.id };
+  const numericFields: HostedNumericFields = { ...selected.projectNumbers };
   const previousIds = new Set<number | string>();
   for (let page = 0; ; page++) {
     const batch = await readPage(page, true);
@@ -536,7 +546,7 @@ export function normalizePlatformReport(
             ...(selected.observed
               ? { repositoryAliases: label ? [label] : [] }
               : {}),
-            finding: hostedWireValue(finding),
+            ...hostedWireFields({ finding }, selected.projectNumbers),
           }),
           ...productEvidence,
         },

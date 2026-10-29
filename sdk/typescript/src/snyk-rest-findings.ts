@@ -27,6 +27,7 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
+  hostedWireFields,
   hostedWireValue,
   type HostedNumericFields,
   restoreHostedNumbers,
@@ -533,8 +534,7 @@ function savedContext(document: Resource) {
     source: {
       ...formatVersion,
       ...selected,
-      project: hostedWireValue(project),
-      target: hostedWireValue(target),
+      ...hostedWireFields({ project, target }),
     },
     context,
     repository: {
@@ -713,7 +713,7 @@ export function normalizeSnykIssues(
           source_updated_at: Math.floor(updated / 1000),
           source_data: structuredClone({
             ...source,
-            issue: hostedWireValue(issue),
+            ...hostedWireFields({ issue }, source.numericFields),
           }),
           ...(code && {
             details: {

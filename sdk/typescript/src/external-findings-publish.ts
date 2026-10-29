@@ -38,13 +38,15 @@ import {
   readExternalFindings,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
-import { canonicalJson } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
+import { hostedNumber, restoreHostedNumbers } from "./scanner-import.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryClaims, snykRepositoryScope } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
+  HOSTED_FINDINGS_FORMATS,
   checkHostedFindingProvider,
   snapshotExternalFindings,
   snapshotImportOptions,
@@ -415,6 +417,50 @@ export async function prepareNormalizedExternalPublication<P extends Provider>(
   );
 }
 
+function publicationIdentity({ findings, report }: ExternalFindings) {
+  return report === undefined
+    ? findings
+    : { findings, report: reportForJson(report) };
+}
+
+// Older collectors rounded JSON numbers before the immutable request was staged.
+// Semgrep encoded unsafe integers as text, including their exact token spelling.
+function previousNumericIdentity(
+  parsed: HostedExternalFindings,
+  provider: Provider,
+) {
+  if (provider !== "snyk" && provider !== "semgrep") return;
+  let witnessed = false;
+  const findings = parsed.findings.map((finding) => {
+    const raw = finding.evidence.source_data;
+    if (
+      raw?.["format"] !== HOSTED_FINDINGS_FORMATS[provider] ||
+      !isRecord(raw["numericFields"]) ||
+      !Object.keys(raw["numericFields"]).length
+    )
+      return finding;
+    try {
+      const { numericFields: _fields, ...old } = restoreHostedNumbers(raw);
+      const source_data =
+        provider === "snyk"
+          ? old
+          : JSON.parse(
+              JSON.stringify(old, function (key, value: unknown) {
+                return Number.isInteger(value) && !Number.isSafeInteger(value)
+                  ? hostedNumber(this, key)
+                  : value;
+              }),
+            );
+      witnessed = true;
+      return { ...finding, evidence: { ...finding.evidence, source_data } };
+    } catch {
+      // Opaque normalized SDK metadata can use this property for unrelated data.
+      return finding;
+    }
+  });
+  if (witnessed) return publicationIdentity({ ...parsed, findings });
+}
+
 function normalizedPublicationInput(
   input: HostedExternalFindings,
   provider: Provider,
@@ -443,10 +489,7 @@ function normalizedPublicationInput(
     identities.add(id);
     finding.evidence = validateExternalEvidence(finding.evidence);
   }
-  const identity =
-    current.report === undefined
-      ? current.findings
-      : { findings: current.findings, report: reportForJson(current.report) };
+  const identity = publicationIdentity(current);
   return {
     current,
     legacy: current,
@@ -739,14 +782,19 @@ async function preparePublicationInput(
     hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
     historicalKey,
   ]);
-  async function rejectUnidentifiedLegacyCheckpoint(): Promise<void> {
+  async function rejectAmbiguousCheckpoint(): Promise<void> {
     const entries = await readdir(state, { withFileTypes: true }).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
       },
     );
-    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
+    if (!entries.length) return;
+    await validatePreparedOutputDir(state, undefined, true);
+    const previous = previousNumericIdentity(parsed, options.provider);
+    const previousKey =
+      previous &&
+      hash("sha256", canonicalJson([...checkpointIdentity, previous]));
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
@@ -754,6 +802,17 @@ async function preparePublicationInput(
       if (candidateKey === key || legacyKeys.has(candidateKey)) continue;
       const serialized = await readOptionalFile(join(state, entry.name));
       if (serialized === undefined) continue;
+      if (candidateKey === previousKey) {
+        const pending = JSON.parse(serialized) as SavedSubmission;
+        if (
+          pending.inputProjection?.inputDigest ===
+            hash("sha256", canonicalJson(previous)) &&
+          !wasReset(pending)
+        )
+          throw new CodexSecurityError(
+            "An older pending import could not distinguish these exact scanner numbers. Resume it with the earlier SDK and original input, or with the original normalized findings. The saved request was preserved without uploading.",
+          );
+      }
       try {
         // Locale-dependent filenames predate input projections. Later formats
         // must remain isolated by their deployment-bound checkpoint keys.
@@ -841,7 +900,7 @@ async function preparePublicationInput(
   const serialized = await readOptionalFile(pendingPath);
   const saved =
     serialized === undefined ? recovered : validateSaved(serialized);
-  if (!saved) await rejectUnidentifiedLegacyCheckpoint();
+  if (!saved) await rejectAmbiguousCheckpoint();
   if (saved && wasReset(saved)) {
     // The old request is never sent after reset. A subsequent explicit
     // invocation prepares a fresh submission and asks for approval again.
@@ -1118,8 +1177,7 @@ async function preparePublicationInput(
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readOptionalFile(pendingPath);
-        if (pending === undefined && !saved)
-          await rejectUnidentifiedLegacyCheckpoint();
+        if (pending === undefined && !saved) await rejectAmbiguousCheckpoint();
         const current =
           pending === undefined
             ? submission

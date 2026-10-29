@@ -229,6 +229,23 @@ export function hostedWireValue<T>(
   return mapNumbers(data, fields, true) as T;
 }
 
+/** Keep only the numeric type witnesses belonging to this row's vendor evidence. */
+export function hostedWireFields<T extends Record<string, unknown>>(
+  data: T,
+  shared?: HostedNumericFields,
+): T & { numericFields?: HostedNumericFields } {
+  const numericFields = { ...shared };
+  const values = Object.fromEntries(
+    Object.entries(data).map(([key, value]) => [
+      key,
+      hostedWireValue(value, numericFields, [key]),
+    ]),
+  ) as T;
+  return Object.keys(numericFields).length
+    ? { ...values, numericFields }
+    : values;
+}
+
 export function restoreHostedNumbers(
   report: Record<string, unknown>,
 ): Record<string, unknown> {

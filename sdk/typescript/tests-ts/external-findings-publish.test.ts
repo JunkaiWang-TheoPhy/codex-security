@@ -1733,6 +1733,77 @@ test.each([
   },
 );
 
+test.each([
+  ["snyk", "1.0000000000000001", 1],
+  ["snyk", "1e-999", 0],
+  ["snyk", "1e400", null],
+  ["snyk", "1.0000000000000001", "1.0000000000000001"],
+  ["semgrep", "9223372036854775807", "9223372036854775807"],
+] as const)(
+  "checks exact %s number %s against a public request that retained %j",
+  async (provider, exact, retained) => {
+    const cloud = await fixture();
+    const report =
+      provider === "snyk"
+        ? snykRestFixture("open-source", {
+            sourceRepositoryUrl: cloud.state.repositoryUrl,
+            issues: [snykRestIssue({ risk_score: "SCORE" })],
+          })
+        : platformReport([{ ...platformFinding(12), risk_score: "SCORE" }]);
+    const prepare = async (token: string) => {
+      await writeFile(
+        cloud.file,
+        JSON.stringify(report).replace('"SCORE"', token),
+      );
+      return prepareExternalPublication(
+        cloud.file,
+        { ...options, provider },
+        cloud.deps,
+      );
+    };
+    cloud.state.loseResponse = true;
+    const first = await prepare(JSON.stringify(retained));
+    const error = await first.publish().catch((error: unknown) => error);
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    const path = error.result.savedSubmission!;
+    // The current writer keeps the two inputs separate.
+    expect((await prepare(exact)).preview.resumed).toBe(false);
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    // The public writer hashed this fully populated evidence without the hosted scope.
+    saved.inputProjection.inputDigest =
+      saved.inputProjection.savedEvidenceDigest;
+    const previous = JSON.stringify(saved);
+    await writeFile(path, previous);
+    const held = provider === "semgrep" || typeof retained !== "string";
+    if (held) {
+      await expect(prepare(exact)).rejects.toThrow(/number|numeric|rounded/iu);
+    } else {
+      const fresh = await prepare(exact);
+      expect(fresh.preview.resumed).toBe(false);
+      expect((await fresh.publish()).verified).toBe(1);
+      expect(JSON.parse(cloud.posts[1]!).request_id).not.toBe(
+        saved.requests[0].request_id,
+      );
+    }
+    expect(await readFile(path, "utf8")).toBe(previous);
+    expect(cloud.posts).toHaveLength(held ? 1 : 2);
+    if (provider === "semgrep") {
+      cloud.state.marker = "generation-2";
+      expect((await prepare(exact)).preview.resumed).toBe(false);
+      expect(await readFile(path, "utf8")).toBe(previous);
+      await expect(prepare(JSON.stringify(retained))).rejects.toThrow(
+        "retired without uploading",
+      );
+      expect(cloud.posts).toHaveLength(1);
+      return;
+    }
+    const retry = await prepare(JSON.stringify(retained));
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(cloud.posts.at(-1)).toBe(cloud.posts[0]!);
+  },
+);
+
 test("a repository reset retires an unbound Semgrep request after a rename", async () => {
   const { findings, sourceRepositoryUrl } =
     normalizeSemgrepPlatformFindings(platformReport());
