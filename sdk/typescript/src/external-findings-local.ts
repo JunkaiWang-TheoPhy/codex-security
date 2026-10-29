@@ -16,9 +16,12 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  checkHostedFindingProvider,
   snapshotExternalFindings,
   snapshotImportOptions,
   type ExternalFindings,
+  type HostedExternalFindings,
+  type NormalizedFindingsFor,
   type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
@@ -41,9 +44,6 @@ import {
 } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
-import { endorRepositoryUrls } from "./endor-findings.js";
-import { wizFindingRepository } from "./wiz-findings.js";
-import { githubFindingRepository } from "./github-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
@@ -433,20 +433,11 @@ async function requireMatchingRepository(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   hosted: ExternalSourceRepository | undefined,
-  report: ExternalFindings,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
 ): Promise<void> {
   if (sources.length === 0) return;
-  const strict = report.sourceRepositoryPlatform === "other";
-  if (!hosted && report.sourceRepositoryUrl)
-    checkSourceRepositories(
-      provider,
-      sources,
-      [report.sourceRepositoryUrl],
-      strict,
-    );
   if (!(await hasGitMetadata(repository, signal))) return;
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
@@ -528,23 +519,8 @@ async function requireMatchingRepository(
       );
     return;
   }
-  checkSourceRepositories(provider, sources, remotes, strict, repository);
-}
-
-function checkSourceRepositories(
-  provider: Provider,
-  sources: readonly ExternalSourceRepository[],
-  remotes: readonly string[],
-  strict: boolean,
-  repository?: string,
-): void {
   const identity = (value: string, platform: Provider) =>
-    remoteRepository(
-      value,
-      platform,
-      provider === "inspector",
-      strict ? repositoryUrlKey : undefined,
-    );
+    remoteRepository(value, platform, provider === "inspector");
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
@@ -562,12 +538,7 @@ function checkSourceRepositories(
     const targets = remotes.flatMap(
       (remote) => identity(remote, sourceProvider) ?? [],
     );
-    // A checkout may have only local remotes. A report declaration still scopes every claim.
-    if (
-      !targets.length &&
-      (repository !== undefined || remotes.includes(source.url))
-    )
-      continue;
+    if (!targets.length) continue;
     const target = identity(source.url, sourceProvider);
     if (
       !target ||
@@ -584,9 +555,7 @@ function checkSourceRepositories(
       )
     )
       throw new CodexSecurityError(
-        repository === undefined
-          ? "The normalized repository does not match the declared report repository."
-          : `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
   }
 }
@@ -648,9 +617,9 @@ async function localContext(
 }
 
 /** Prepare scanner evidence without writing state or performing a security assessment. */
-export async function prepareNormalizedLocalImport(
-  input: ExternalFindings,
-  options: NormalizedLocalImportOptions,
+export async function prepareNormalizedLocalImport<P extends Provider>(
+  input: NormalizedFindingsFor<P>,
+  options: NormalizedLocalImportOptions & { provider: P },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
@@ -664,12 +633,12 @@ export async function prepareNormalizedLocalImport(
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
-  input: ExternalFindings,
+  input: HostedExternalFindings,
   options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies,
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = snapshotExternalFindings(input);
+  const current = snapshotExternalFindings(input, options.provider);
   validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
@@ -682,6 +651,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    checkHostedFindingProvider(options.provider, finding.evidence.source_data);
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -704,25 +674,10 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  const addSource = (source: ExternalSourceRepository) => {
-    // A reader's platform must not loosen an operator-supplied Inspector map.
-    if (sources.get(source.url)?.platform !== "github")
-      sources.set(
-        source.url,
-        options.inspectorProjectMap ? { url: source.url } : source,
-      );
-  };
   const reportUrl = current.sourceRepositoryUrl || undefined;
-  const declaredSource = Boolean(reportUrl || current.sourceRepositoryPlatform);
-  if (reportUrl) addSource({ url: reportUrl });
-  if (dependabotSource)
-    addSource({ url: dependabotSource, platform: "github" });
-  const hostedScanner =
-    options.provider === "snyk" || options.provider === "semgrep";
-  let hostedUrl = hostedScanner ? reportUrl : undefined;
-  const reportPlatform = hostedScanner
-    ? current.sourceRepositoryPlatform
-    : undefined;
+  if (reportUrl) sources.set(reportUrl, { url: reportUrl });
+  let hostedUrl = reportUrl;
+  const reportPlatform = current.sourceRepositoryPlatform;
   const singleProject = Boolean(
     hostedUrl ||
     reportPlatform ||
@@ -739,24 +694,15 @@ export async function prepareLocalImport(
     reportPlatform === "github"
   )
     hostedGitHub = true;
-  for (const finding of current.findings) {
-    const { evidence } = finding;
+  for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
-    if (url) addSource({ url });
+    if (url) sources.set(url, { url });
     const data = evidence.source_data;
-    if (declaredSource && options.provider === "github") {
-      const native = githubFindingRepository(finding, "local");
-      if (native) addSource({ url: native, platform: "github" });
-    }
-    if (declaredSource && options.provider === "wiz") {
-      const native = wizFindingRepository(finding);
-      if (native) addSource(native);
-    }
-    if (declaredSource && options.provider === "endor")
-      for (const url of endorRepositoryUrls(data)) addSource({ url });
     if (options.provider === "snyk") {
       for (const source of snykRepositoryClaims(data)) {
-        addSource({ url: source.url });
+        sources.set(source.url, { url: source.url });
+        if (source.nativeUrl)
+          sources.set(source.nativeUrl, { url: source.nativeUrl });
         if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
           hostedUrl ??= source.url;
         // Only retained or independent evidence can establish GitHub on a populated report.
@@ -773,10 +719,10 @@ export async function prepareLocalImport(
       );
       if (native) {
         hostedUrl ??= native;
-        addSource({ url: native });
+        sources.set(native, { url: native });
       } else if (singleProject) {
         for (const source of semgrepSarifSourceRepositories(data))
-          addSource(source);
+          sources.set(source.url, source);
       }
     }
   }
@@ -785,7 +731,6 @@ export async function prepareLocalImport(
     current.findings,
     "local",
     options.inspectorProjectMap,
-    current.sourceRepositoryPlatform === "other",
   );
   if (inspector) {
     const platform = inspector.platform ?? options.provider;
@@ -800,8 +745,14 @@ export async function prepareLocalImport(
   for (const source of [
     ...(inspector ? [inspector] : []),
     ...(dependencies.sourceRepositories ?? []),
-  ])
-    addSource(source);
+  ]) {
+    // A reader's platform must not loosen an operator-supplied Inspector map.
+    if (sources.get(source.url)?.platform !== "github")
+      sources.set(
+        source.url,
+        options.inspectorProjectMap ? { url: source.url } : source,
+      );
+  }
   let hosted: ExternalSourceRepository | undefined;
   const references = [...sources.values()];
   const projectedUrl =
@@ -829,12 +780,16 @@ export async function prepareLocalImport(
           "The normalized repository does not match the hosted scanner project.",
         );
   }
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
   await requireMatchingRepository(
     repository,
     options.provider,
     [...sources.values()],
     hosted,
-    current,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

@@ -38,9 +38,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
-import { wizFindingRepository } from "./wiz-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { githubFindingRepository } from "./github-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryClaims } from "./snyk-findings.js";
 import {
@@ -50,15 +48,17 @@ import {
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
+  checkHostedFindingProvider,
   snapshotExternalFindings,
   snapshotImportOptions,
   type ExternalFindings,
+  type HostedExternalFindings,
+  type NormalizedFindingsFor,
   type ExternalPublicationInput,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
   hostedRepositoryUrlKey,
-  repositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
   validateExternalReport,
@@ -71,6 +71,7 @@ import type {
   FindingImportRequest,
   FindingImportReceipt,
   ImportRepository,
+  Provider,
   SourceReportSummary,
 } from "./external-import-models.js";
 
@@ -375,34 +376,36 @@ export async function prepareExternalPublication(
     () => readExternalFindings(path, settings),
     dependencies.signal,
   );
+  const provider = EXTERNAL_FINDINGS_PROVIDERS[settings.provider];
   return preparePublicationInput(
-    parsed.publication ?? normalizedPublicationInput(parsed.findings),
-    { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
+    parsed.publication ?? normalizedPublicationInput(parsed.findings, provider),
+    { ...settings, provider },
     dependencies,
   );
 }
 
 /** Prepare normalized provider evidence without reading a vendor export. */
-export async function prepareNormalizedExternalPublication(
-  input: ExternalFindings,
-  options: NormalizedExternalPublicationOptions,
+export async function prepareNormalizedExternalPublication<P extends Provider>(
+  input: NormalizedFindingsFor<P>,
+  options: NormalizedExternalPublicationOptions & { provider: P },
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   dependencies.signal?.throwIfAborted();
   const settings = snapshotImportOptions(options);
   return preparePublicationInput(
-    normalizedPublicationInput(input),
+    normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
   );
 }
 
 function normalizedPublicationInput(
-  input: ExternalFindings,
+  input: HostedExternalFindings,
+  provider: Provider,
 ): ExternalPublicationInput {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const current = snapshotExternalFindings(input);
+  const current = snapshotExternalFindings(input, provider);
   validateExternalReport(current.report);
   // structuredClone preserves aliases. Detach every raw record before adding
   // typed defaults, including aliases shared with another finding's evidence.
@@ -477,12 +480,11 @@ async function preparePublicationInput(
     Record<string, unknown>,
     ReturnType<typeof snykRestFindingRepository>
   >();
-  if (options.provider === "snyk") {
-    for (const { evidence } of parsed.findings) {
-      const data = evidence.source_data;
-      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
-        hostedSnyk.set(data, snykRestFindingRepository(data));
-    }
+  for (const { evidence } of parsed.findings) {
+    const data = evidence.source_data;
+    checkHostedFindingProvider(options.provider, data);
+    if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+      hostedSnyk.set(data, snykRestFindingRepository(data));
   }
   const semgrepProject =
     options.provider === "semgrep"
@@ -496,9 +498,11 @@ async function preparePublicationInput(
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
     [...hostedSnyk.values()].some(({ platform }) => platform === "other");
-  const reportKey = bound
-    ? (url: string) => hostedRepositoryUrlKey(url, !strictPath)
+  // The authenticated catalog uses GitHub URL identity even when scanner evidence needs strict path casing.
+  const catalogKey = bound
+    ? (url: string) => hostedRepositoryUrlKey(url, true)
     : cloudRepositoryUrlKey;
+  const reportKey = strictPath ? hostedRepositoryUrlKey : catalogKey;
   const reportSource =
     parsed.sourceRepositoryUrl ||
     hostedSnyk.values().next().value?.url ||
@@ -570,7 +574,7 @@ async function preparePublicationInput(
       ...result.data.filter(
         (item) =>
           item.id === options.repository ||
-          reportKey(item.url) === reportKey(options.repository),
+          catalogKey(item.url) === catalogKey(options.repository),
       ),
     );
     page = result.next;
@@ -605,39 +609,11 @@ async function preparePublicationInput(
     source,
   ];
   // Keep the lookup key stable so a changed declaration cannot stage a second request.
-  const url = parsed.sourceRepositoryUrl;
-  const reportUrl = url && reportKey(url);
-  const digest = (
-    identity: unknown,
-    sourceUrl = reportUrl,
-    strict = strictPath,
-  ) => {
-    const binding = strict ? ["other", sourceUrl ?? null] : sourceUrl;
-    return hash(
-      "sha256",
-      canonicalJson(binding ? [identity, binding] : identity),
-    );
-  };
-  // Older receipts used raw escape spellings, then hosted keys with literal Unicode.
-  // Only Snyk used the strict marker before it applied to every declared report.
-  const previousStrict = options.provider === "snyk" && strictPath;
-  function previousDigestMatches(stored: string, identity: unknown) {
-    const raw =
-      url && (previousStrict ? repositoryUrlKey : cloudRepositoryUrlKey)(url);
-    const previousHosted =
-      options.provider === "snyk" || options.provider === "semgrep";
-    const keys = new Set([
-      raw,
-      previousHosted && url
-        ? hostedRepositoryUrlKey(url, !previousStrict, false)
-        : raw,
-    ]);
-    return [...keys].some(
-      (key) =>
-        (previousStrict !== strictPath || key !== reportUrl) &&
-        digest(identity, key, previousStrict) === stored,
-    );
-  }
+  const reportUrl =
+    parsed.sourceRepositoryUrl && reportKey(parsed.sourceRepositoryUrl);
+  const binding = strictPath ? ["other", reportUrl ?? null] : reportUrl;
+  const digest = (identity: unknown) =>
+    hash("sha256", canonicalJson(binding ? [identity, binding] : identity));
   const inputDigest = digest(currentIdentity);
   const legacyInputDigest = digest(legacyIdentity);
   function validateSaved(
@@ -654,19 +630,28 @@ async function preparePublicationInput(
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
     const savedFindings = submissionFindings(content.requests);
+    for (const { evidence } of savedFindings)
+      checkHostedFindingProvider(options.provider, evidence.source_data);
     const savedEvidence = canonicalJson(savedFindings);
     const expected = legacy ? legacyParsed.findings : parsed.findings;
     const projectionDigest = content.inputProjection?.inputDigest;
     const currentBinding =
       projectionDigest === (legacy ? legacyInputDigest : inputDigest);
+    // Published SDKs hashed only the input evidence; the report binding was outside the checkpoint.
+    const unbound = Boolean(
+      binding &&
+      projectionDigest &&
+      !currentBinding &&
+      projectionDigest ===
+        hash(
+          "sha256",
+          canonicalJson(legacy ? legacyIdentity : currentIdentity),
+        ),
+    );
     const matches =
       content.inputProjection !== undefined
         ? sameFindingSelection(savedFindings, expected) &&
-          (currentBinding ||
-            previousDigestMatches(
-              content.inputProjection.inputDigest,
-              legacy ? legacyIdentity : currentIdentity,
-            )) &&
+          (currentBinding || unbound) &&
           content.inputProjection.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected) &&
@@ -692,13 +677,27 @@ async function preparePublicationInput(
           reportSource,
           "source report repository",
         );
-      if (!currentBinding && strictPath && !previousStrict) {
-        // The previous digest did not verify the case-sensitive destination.
-        if (reportSource) requireRepository(reportSource, destination.url);
-        else {
-          checkRepositories(parsed.findings, destination.url);
-          checkRepositories(savedFindings, destination.url);
+      if (unbound) {
+        // The published SDK checked typed and native hosted URLs against the catalog using GitHub casing.
+        const provenSource =
+          !strictPath &&
+          reportSource &&
+          savedFindings.some(
+            ({ evidence }) =>
+              evidence.details?.repository?.url ||
+              isSemgrepPlatformReport(evidence.source_data) ||
+              evidence.source_data?.["format"] === SNYK_REST_ISSUES_FORMAT,
+          );
+        if (!provenSource) {
+          if (reportSource) requireRepository(reportSource, destination.url);
+          else {
+            checkRepositories(parsed.findings, destination.url);
+            checkRepositories(savedFindings, destination.url);
+          }
         }
+        content.inputProjection!.inputDigest = legacy
+          ? legacyInputDigest
+          : inputDigest;
       }
     }
     return content;
@@ -883,7 +882,6 @@ async function preparePublicationInput(
       findings,
       "cloud",
       inspectorProjectMap,
-      strictPath,
     );
     const check = (url: string | null | undefined, id: string, alias = false) =>
       requireRepository(url, targetUrl, id, alias, description);
@@ -893,9 +891,12 @@ async function preparePublicationInput(
       const data = evidence.source_data;
       if (options.provider === "snyk") {
         const native = data && hostedSnyk.get(data);
-        for (const { url } of native ? [native] : snykRepositoryClaims(data)) {
+        for (const { url, nativeUrl } of native
+          ? [native]
+          : snykRepositoryClaims(data)) {
           const alias = normalizeGitRepositoryUrl(url, targetUrl);
           check(alias, id, alias !== url);
+          if (nativeUrl) check(nativeUrl, id);
         }
       }
       const urls = [
@@ -906,11 +907,7 @@ async function preparePublicationInput(
               (url) => !strictPath && reportKey(url) === reportKey(targetUrl),
             )
           : undefined,
-        options.provider === "wiz"
-          ? declaration
-            ? wizFindingRepository(finding)?.url
-            : wizCsvRepositoryUrl(evidence)
-          : undefined,
+        options.provider === "wiz" ? wizCsvRepositoryUrl(evidence) : undefined,
         ...(options.provider === "semgrep" &&
         bound &&
         !isSemgrepPlatformReport(data)
@@ -919,9 +916,6 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(evidence.source_data)
           : []),
-        options.provider === "github" && declaration
-          ? githubFindingRepository(finding, "cloud")
-          : undefined,
         options.provider === "github"
           ? dependabotRepository(finding)
           : undefined,
@@ -1118,6 +1112,15 @@ async function preparePublicationInput(
           throw new CodexSecurityError(
             "Another publication prepared this input. Run the command again to review and resume that saved request.",
           );
+        const adoptBinding =
+          pending !== undefined &&
+          current.inputProjection &&
+          current.inputProjection.inputDigest !==
+            submission.inputProjection?.inputDigest;
+        if (adoptBinding) {
+          validateSaved(pending!);
+          current.inputProjection = submission.inputProjection;
+        }
         const receipts = (current.receipts ?? []).map(validateImportReceipt);
         if (receipts.length > requests.length)
           throw new CodexSecurityError(
@@ -1127,7 +1130,7 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
-          if (pending === undefined || adoptProjectMap) {
+          if (pending === undefined || adoptProjectMap || adoptBinding) {
             await writeAtomicJson(pendingPath, current);
             persisted = true;
           }

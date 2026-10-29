@@ -1,6 +1,9 @@
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
-import type { ExternalFindingEvidence } from "./external-import-models.js";
+import type {
+  ExternalFindingEvidence,
+  Provider,
+} from "./external-import-models.js";
 
 /** A provider occurrence and its evidence, independent of a Codex assessment. */
 export interface ExternalFinding {
@@ -16,10 +19,6 @@ export interface ExternalSourceRepository {
 
 export interface ExternalFindings {
   read: number;
-  /** Source repository for this report, including empty hosted collections. */
-  sourceRepositoryUrl?: string;
-  /** A verified hosted platform, or "other" to require exact path casing on custom hosts. */
-  sourceRepositoryPlatform?: "github" | "other";
   /** Reader-retained run metadata, including diagnostics for empty reports. */
   report?: Record<string, unknown>;
   findings: ExternalFinding[];
@@ -30,10 +29,46 @@ export interface ExternalFindings {
   }[];
 }
 
+/** A Snyk or Semgrep report bound to one source repository, even when it has no findings. */
+export interface HostedExternalFindings extends ExternalFindings {
+  sourceRepositoryUrl?: string;
+  /** "other" requires exact repository path casing on custom hosts. */
+  sourceRepositoryPlatform?: "github" | "other";
+}
+
+export type NormalizedFindingsFor<P extends Provider> = P extends
+  "snyk" | "semgrep"
+  ? HostedExternalFindings
+  : ExternalFindings;
+
+export const HOSTED_FINDINGS_FORMATS = {
+  snyk: "snyk-rest-issues/v1",
+  semgrep: "semgrep-platform-findings/v1",
+} as const;
+
+/** Retained rows keep their scanner identity even if the report header is projected out. */
+export function checkHostedFindingProvider(
+  provider: Provider,
+  data: ExternalFindingEvidence["source_data"],
+): void {
+  const format = data?.["format"];
+  const native =
+    format === HOSTED_FINDINGS_FORMATS.snyk
+      ? "snyk"
+      : format === HOSTED_FINDINGS_FORMATS.semgrep
+        ? "semgrep"
+        : undefined;
+  if (native && native !== provider)
+    throw new CodexSecurityError(
+      `Retained ${native} evidence requires the ${native} provider.`,
+    );
+}
+
 /** Capture the public SDK fields once, including class accessors, before any asynchronous work. */
 export function snapshotExternalFindings(
-  input: ExternalFindings,
-): ExternalFindings {
+  input: HostedExternalFindings,
+  provider: Provider,
+): HostedExternalFindings {
   const {
     read,
     findings,
@@ -43,7 +78,16 @@ export function snapshotExternalFindings(
     sourceRepositoryPlatform,
     ...rest
   } = input;
-  const current: ExternalFindings = structuredClone({
+  if (
+    (sourceRepositoryUrl !== undefined ||
+      sourceRepositoryPlatform !== undefined) &&
+    provider !== "snyk" &&
+    provider !== "semgrep"
+  )
+    throw new CodexSecurityError(
+      "Normalized report repository declarations require the Snyk or Semgrep provider.",
+    );
+  const current: HostedExternalFindings = structuredClone({
     ...rest,
     read,
     findings,
@@ -58,8 +102,8 @@ export function snapshotExternalFindings(
 
 /** @internal Keep earlier provider projections only for immutable request replay. */
 export interface ExternalPublicationInput {
-  current: ExternalFindings;
-  legacy: ExternalFindings;
+  current: HostedExternalFindings;
+  legacy: HostedExternalFindings;
   currentIdentity: unknown;
   legacyIdentity: unknown;
 }

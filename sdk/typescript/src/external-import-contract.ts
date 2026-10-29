@@ -66,11 +66,7 @@ export function cloudRepositoryUrlKey(value: string): string {
 }
 
 /** Compare hosted HTTP path spellings without changing the retained evidence. */
-export function hostedRepositoryUrlKey(
-  value: string,
-  github = false,
-  wirePath = true,
-): string {
+export function hostedRepositoryUrlKey(value: string, github = false): string {
   const url = value.replace(
     /^(https?:\/\/[^/?#]+\/)([^?#]*)/iu,
     (_, origin: string, path: string) =>
@@ -78,12 +74,9 @@ export function hostedRepositoryUrlKey(
       path
         .split("/")
         .map((segment) => {
-          // HTTP serializes literal non-ASCII characters as UTF-8. Older checkpoints retained them.
-          const spelling = wirePath
-            ? segment.replace(/\P{ASCII}+/gu, (text) =>
-                encodeURIComponent(text.toWellFormed()),
-              )
-            : segment;
+          const spelling = segment.replace(/\P{ASCII}+/gu, (text) =>
+            encodeURIComponent(text.toWellFormed()),
+          );
           const decoded = decodeUnreserved(spelling);
           // Git's HTTP transport removes literal dot segments but sends escaped ones as written.
           return decoded === "." || decoded === ".."

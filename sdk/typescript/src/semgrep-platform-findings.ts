@@ -5,7 +5,10 @@ import {
   isVerifiedGitHubRepository,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  HOSTED_FINDINGS_FORMATS,
+  type HostedExternalFindings,
+} from "./external-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   hostedScannerHttp,
@@ -33,7 +36,7 @@ import {
   text,
 } from "./scanner-import.js";
 
-const format = "semgrep-platform-findings/v1";
+const format = HOSTED_FINDINGS_FORMATS.semgrep;
 export const SEMGREP_PLATFORM_PRODUCTS = ["sast", "sca", "ai_sast"] as const;
 type Product = (typeof SEMGREP_PLATFORM_PRODUCTS)[number];
 
@@ -330,7 +333,7 @@ export function normalizeSemgrepPlatformFindings(
   input: unknown,
   options: string | SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
-): ExternalFindings & { sourceRepositoryUrl: string } {
+): HostedExternalFindings & { sourceRepositoryUrl: string } {
   if (!isSemgrepPlatformReport(input))
     throw new Error("Expected a complete Semgrep Platform export.");
   return normalizePlatformReport(
@@ -346,7 +349,7 @@ export function normalizePlatformReport(
   target: ExternalImportTarget,
   isGitHub: (url: string) => boolean = (url) =>
     isVerifiedGitHubRepository(url, options.sourceRepositories),
-): ExternalFindings & { sourceRepositoryUrl: string } {
+): HostedExternalFindings & { sourceRepositoryUrl: string } {
   const declared = options.sourceRepositoryUrl;
   const deployment = requiredText(input["deployment"], "Semgrep deployment");
   const selected = projectContext(

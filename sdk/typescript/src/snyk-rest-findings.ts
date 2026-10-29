@@ -3,7 +3,10 @@ import {
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  HOSTED_FINDINGS_FORMATS,
+  type HostedExternalFindings,
+} from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -32,7 +35,7 @@ import {
   text,
 } from "./scanner-import.js";
 
-export const SNYK_REST_ISSUES_FORMAT = "snyk-rest-issues/v1";
+export const SNYK_REST_ISSUES_FORMAT = HOSTED_FINDINGS_FORMATS.snyk;
 const apiVersion = "2026-03-25";
 const formatVersion = { format: SNYK_REST_ISSUES_FORMAT, apiVersion } as const;
 const defaultOrigin = "https://api.snyk.io";
@@ -215,17 +218,17 @@ function matchesCliRepository(remote: string, source: string) {
   const path = parts[2]!;
   const publicWebHost =
     isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
-  let sshAlias: string | undefined;
-  if (publicGitSsh443Host(authority)) {
-    // These dedicated SSH endpoints receive Git's URI-decoded upload-pack path.
-    sshAlias = normalizeHostedGitRepositoryUrl(
-      `ssh://git@${authority}${path}`,
-      source,
-      false,
-    );
-  } else if (isPublicGitHost(hostname) && authority === `${hostname}:22`) {
-    sshAlias = `https://${hostname}${path}`;
-  }
+  const sshEndpoint =
+    publicGitSsh443Host(authority) ||
+    (isPublicGitHost(hostname) && authority === `${hostname}:22`);
+  // On an SSH endpoint Git passes the URI-decoded path to upload-pack.
+  const sshAlias = sshEndpoint
+    ? normalizeHostedGitRepositoryUrl(
+        `ssh://git@${authority}${path}`,
+        source,
+        false,
+      )
+    : undefined;
   // A private server may host both literal SCP "my%2Drepo" and HTTP "my-repo".
   if (!publicWebHost && !sshAlias && /%[\da-f]{2}/iu.test(path)) return false;
   return (
@@ -258,7 +261,7 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
-  if (enterprise) return "github" as const;
+  if (enterprise) return normalized;
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -512,25 +515,33 @@ function savedContext(document: Resource) {
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];
-  const platform =
-    checkTarget(target, selected, context) ??
-    (context.scm && !context.origin.startsWith("github")
-      ? ("other" as const)
-      : undefined);
+  const nativeUrl = checkTarget(target, selected, context);
+  const platform: HostedExternalFindings["sourceRepositoryPlatform"] = nativeUrl
+    ? "github"
+    : context.scm && !context.origin.startsWith("github")
+      ? "other"
+      : undefined;
   return {
     source: { ...formatVersion, ...selected, project, target },
     context,
     platform,
+    nativeUrl,
   };
 }
 
 export function snykRestFindingRepository(sourceData: Resource): {
   url: string;
-  platform?: ExternalFindings["sourceRepositoryPlatform"];
+  platform?: HostedExternalFindings["sourceRepositoryPlatform"];
+  nativeUrl?: string;
 } {
-  const { source, platform } = savedContext(sourceData);
+  const { source, platform, nativeUrl } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
-  return { url: source.sourceRepositoryUrl, platform };
+  const url = source.sourceRepositoryUrl;
+  return {
+    url,
+    platform,
+    ...(nativeUrl && nativeUrl !== url && { nativeUrl }),
+  };
 }
 
 function readIssues(document: Resource, selected: Scope) {
@@ -634,7 +645,7 @@ function codeEvidence(coordinates: Resource[], scm: boolean) {
 export function normalizeSnykIssues(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+): HostedExternalFindings {
   const document = record(input, "Snyk REST Issues export");
   const { source, context, platform } = savedContext(document);
   const code = source.product === "code";

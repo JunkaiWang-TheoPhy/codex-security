@@ -5,8 +5,7 @@ import {
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
-import { isGitHubCloudHost } from "./git-remote.js";
-import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
@@ -26,58 +25,6 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
-}
-
-/** Recover the source repository from a retained Wiz row without relying on typed details. */
-export function wizFindingRepository({
-  source_finding_id,
-  evidence,
-}: VendorFinding): ExternalSourceRepository | undefined {
-  const record = evidence.source_data;
-  if (!record) return undefined;
-  // Named GraphQL collections prefix occurrence IDs with the finding family.
-  const id = text(record["id"]);
-  if (
-    id &&
-    (source_finding_id === `sast:${id}` || source_finding_id === `iac:${id}`)
-  ) {
-    const url = text(object(record["repository"])?.["url"]);
-    return url ? { url } : undefined;
-  }
-  if (id && source_finding_id === `secret:${id}`) {
-    const resource = object(record["resource"]);
-    const url =
-      resource?.["type"] === "REPOSITORY_BRANCH" &&
-      text(secretRepository(resource)?.["url"]);
-    return url ? { url } : undefined;
-  }
-  return wizPackageRepository(evidence);
-}
-
-export function wizPackageRepository(
-  evidence: VendorFinding["evidence"],
-): ExternalSourceRepository | undefined {
-  const csv = wizCsvRepositoryUrl(evidence);
-  if (csv) return { url: csv, platform: "github" };
-  const asset = object(evidence.source_data?.["vulnerableAsset"]);
-  if (!asset || typeof asset["cloudProviderURL"] !== "string") return undefined;
-  const url = URL.parse(asset["cloudProviderURL"]);
-  if (!url) return undefined;
-  if (
-    asset["nativeType"] !== "github#repositoryBranch" &&
-    !(asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname))
-  )
-    return asset["type"] === "REPOSITORY_BRANCH"
-      ? { url: asset["cloudProviderURL"] }
-      : undefined;
-  const [, owner, repository] = url.pathname.split("/");
-  return owner && repository
-    ? { url: `${url.origin}/${owner}/${repository}`, platform: "github" }
-    : undefined;
-}
-
-function secretRepository(resource: Record<string, unknown> | undefined) {
-  return object(object(resource?.["typedProperties"])?.["repository"]);
 }
 
 function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
@@ -298,7 +245,7 @@ function repositoryFinding(
     );
   const suppliedRepository =
     kind === "secret"
-      ? secretRepository(resource)
+      ? object(object(resource?.["typedProperties"])?.["repository"])
       : object(record["repository"]);
   const repository = sourceRepository(suppliedRepository, repositories);
   const branch =

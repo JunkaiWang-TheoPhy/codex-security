@@ -234,6 +234,7 @@ export type {
 export type {
   ExternalFinding,
   ExternalFindings,
+  HostedExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 export type {

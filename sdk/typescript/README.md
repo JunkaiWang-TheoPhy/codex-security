@@ -722,10 +722,10 @@ remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
 records remain stored, and unknown evidence fields are not inferred.
 
-On a normalized report, `sourceRepositoryUrl` declares one repository for all
-findings. Local and Cloud imports check that declaration against the repository
-information retained in the findings. Use `sourceRepositoryPlatform: "other"`
-when a custom host requires case-sensitive repository paths.
+Normalized Snyk and Semgrep reports can declare a `sourceRepositoryUrl`, even
+when the report is empty. Local and Cloud imports check it against retained
+repository evidence. Use `sourceRepositoryPlatform: "other"` for case-sensitive
+paths on a custom host.
 
 File imports forward repository references from the reader automatically. Direct
 normalized callers should provide additional known references in the third

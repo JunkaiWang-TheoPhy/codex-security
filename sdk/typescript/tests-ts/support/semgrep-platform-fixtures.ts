@@ -26,13 +26,16 @@ export function platformFinding(id: number) {
   };
 }
 
-export function platformReport(findings: unknown[] = [platformFinding(12)]) {
+export function platformReport(
+  findings: unknown[] = [platformFinding(12)],
+  product: SemgrepPlatformReport["product"] = "sast",
+) {
   return {
     format: "semgrep-platform-findings/v1" as const,
     deployment: "example",
     project: platformProject,
     ref: platformRef,
-    product: "sast" as const,
+    product,
     findingCount: findings.length,
     findings,
   };

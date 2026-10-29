@@ -18,10 +18,7 @@ import { main } from "../src/cli.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
-  prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { DEFAULT_CLOUD_BASE_URL } from "../src/cloud-endpoint.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
 import type {
@@ -756,47 +753,6 @@ test("a wrong source repository stops raw and normalized imports before source l
   expect(
     await readdir(join(f.root, "state")).catch(() => undefined),
   ).toBeUndefined();
-});
-
-test("a declared Wiz source is checked against retained repository findings after projection", async () => {
-  const other = { ...repository, url: "https://github.com/example/other" };
-  const local = await localFindingsFixture({ remote: repositoryUrl });
-  directories.push(local.root);
-  for (const [root, row] of [
-    ["sastFindings", { ...sast, repository: other }],
-    ["iacFindings", { ...iac, repository: other }],
-    [
-      "secretInstances",
-      {
-        ...secret,
-        resource: {
-          ...secret.resource,
-          typedProperties: { repository: other },
-        },
-      },
-    ],
-  ] as const) {
-    const f = await cloudFixture(envelope(root, [row], false));
-    const parsed = await readVendorFindings(f.file);
-    parsed.sourceRepositoryUrl = repositoryUrl;
-    const evidence = parsed.findings[0]!.evidence;
-    // Both the altered typed claim and its omission must preserve the original row binding.
-    evidence.details!.repository!.url = repositoryUrl;
-    for (const keepDetails of [true, false]) {
-      if (!keepDetails) delete evidence.details;
-      await expect(
-        prepareNormalizedLocalImport(
-          parsed,
-          { ...f.options, repository: local.repository },
-          { environment: local.environment },
-        ),
-      ).rejects.toThrow("does not match");
-      await expect(
-        prepareNormalizedExternalPublication(parsed, f.options, f.deps),
-      ).rejects.toThrow("does not match");
-    }
-    expect(f.posts).toHaveLength(0);
-  }
 });
 
 const csvRow: Record<string, string> = {

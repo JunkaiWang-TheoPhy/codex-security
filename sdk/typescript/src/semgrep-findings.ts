@@ -6,6 +6,7 @@ import {
 } from "./external-import-contract.js";
 import type {
   ExternalFindings,
+  HostedExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 import {
@@ -157,7 +158,7 @@ export function normalizeSemgrepFindings(
   input: unknown,
   options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+): HostedExternalFindings {
   return normalizeSemgrepReport(input, options, target);
 }
 
@@ -185,7 +186,7 @@ export function normalizeSemgrepReport(
   options: SemgrepImportOptions,
   target: ExternalImportTarget,
   isGitHub?: (url: string) => boolean,
-): ExternalFindings {
+): HostedExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
     return normalizePlatformReport(document, options, target, isGitHub);
@@ -435,6 +436,6 @@ export async function readSemgrepFindings(
   path: string,
   options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
+): Promise<HostedExternalFindings> {
   return normalizeSemgrepFindings(await readScannerJson(path), options, target);
 }

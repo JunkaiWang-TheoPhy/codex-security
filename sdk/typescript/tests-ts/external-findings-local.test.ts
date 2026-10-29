@@ -16,8 +16,11 @@ import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
-import { normalizeGitHubDependabotAlerts } from "../src/github-dependabot-findings.js";
-import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { platformReport } from "./support/semgrep-platform-fixtures.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const fixtures: Awaited<ReturnType<typeof localFindingsFixture>>[] = [];
@@ -107,68 +110,60 @@ describe("local normalized scanner findings", () => {
       await expect(prepare(url, url)).rejects.toThrow("does not match");
     },
   );
-  test("a declared source must match the original Dependabot alert before checking Git remotes", async () => {
-    const f = await fixture();
-    const report = normalizeGitHubDependabotAlerts([githubDependabotAlert()]);
-    delete report.findings[0]!.evidence.details;
-    const prepare = (sourceRepositoryUrl: string) =>
-      prepareNormalizedLocalImport(
-        { ...report, sourceRepositoryUrl },
-        { ...source, provider: "github", repository: f.repository },
-        { environment: f.environment },
+  test.each(["snyk", "semgrep"] as const)(
+    "retained %s evidence cannot be relabeled as a Wiz finding after dropping the report header",
+    async (provider) => {
+      const f = await fixture({ remote: "https://github.com/example/foreign" });
+      const { findings } =
+        provider === "snyk"
+          ? normalizeSnykIssues(snykRestFixture("open-source"))
+          : normalizeSemgrepPlatformFindings(platformReport());
+      const deps = { environment: f.environment };
+      const options = {
+        ...source,
+        provider: "wiz" as const,
+        repository: f.repository,
+      };
+      const message = `requires the ${provider} provider`;
+      await expect(
+        prepareNormalizedLocalImport(
+          { read: findings.length, findings, excluded: [] },
+          options,
+          deps,
+        ),
+      ).rejects.toThrow(message);
+      const file = join(f.root, "projected.jsonl");
+      await writeFile(
+        file,
+        findings.map((row) => JSON.stringify(row)).join("\n"),
       );
-    await expect(prepare("https://github.com/example/foreign")).rejects.toThrow(
-      "does not match the declared report repository",
-    );
-    expect(
-      (await prepare("https://github.com/example/project")).preview.findings,
-    ).toEqual(report.findings);
-  });
-  test("normalized Wiz reports check their repository URL alongside finding URLs", async () => {
-    const url = "https://git.example.test/owner/selected";
-    const other = "https://git.example.test/owner/other";
-    const f = await fixture({ remote: url });
-    const prepare = (
-      report: ExternalFindings,
-      sourceRepositories?: { url: string }[],
-    ) =>
-      prepareNormalizedLocalImport(
-        report,
-        { ...source, provider: "wiz", repository: f.repository },
-        { environment: f.environment, sourceRepositories },
-      );
-    const report = { ...input(), sourceRepositoryUrl: other };
-    await expect(prepare(report)).rejects.toThrow(
-      "does not match a configured remote",
-    );
-    await expect(
-      prepare({ ...report, read: 0, findings: [], excluded: [] }),
-    ).rejects.toThrow("does not match a configured remote");
-    report.sourceRepositoryUrl = url;
-    report.findings[0]!.evidence.details = {
-      kind: "sast",
-      repository: { url: other },
-    };
-    await expect(prepare(report)).rejects.toThrow(
-      "does not match the declared report repository",
-    );
-    execFileSync("git", [
-      "-C",
-      f.repository,
-      "remote",
-      "add",
-      "upstream",
-      other,
-    ]);
-    await expect(prepare(report)).rejects.toThrow(
-      "does not match the declared report repository",
-    );
-    const { sourceRepositoryUrl, ...unscoped } = report;
-    expect(
-      (await prepare(unscoped, [{ url: sourceRepositoryUrl }])).preview
-        .findings,
-    ).toEqual(report.findings);
-  });
+      await expect(
+        prepareLocalExternalImport(file, options, deps),
+      ).rejects.toThrow(message);
+    },
+  );
+  test.each(["github", "wiz", "endor", "inspector"] as const)(
+    "rejects hosted declarations for %s before accessing the selected checkout",
+    async (provider) => {
+      const f = await fixture();
+      const options = {
+        ...source,
+        provider,
+        repository: join(f.root, "missing"),
+      };
+      for (const declaration of [
+        { sourceRepositoryUrl: "https://github.com/example/project" },
+        { sourceRepositoryPlatform: "other" as const },
+      ]) {
+        const unsupported = { ...input(), ...declaration };
+        await expect(
+          prepareNormalizedLocalImport(unsupported, options, {
+            environment: f.environment,
+          }),
+        ).rejects.toThrow("require the Snyk or Semgrep provider");
+      }
+    },
+  );
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();
     const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };

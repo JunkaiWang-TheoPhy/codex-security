@@ -224,11 +224,7 @@ test("detects removals before the next offset even when no finding ID repeats", 
 test("keeps an operator mapping separate from a URL-less project and its short repository name", async () => {
   const project = { ...platformProject, url: null };
   const finding = { ...platformFinding(1), repository: { name: "project" } };
-  const responses = [{ project }, { findings: [finding] }];
-  const report = await collectSemgrepPlatformFindings(
-    { ...options, sourceRepositoryUrl: platformProject.url },
-    { environment, fetch: async () => Response.json(responses.shift()) },
-  );
+  const report = await collectProject(project, [finding], platformProject.url);
   expect(report).toMatchObject({
     project,
     sourceRepositoryUrl: platformProject.url,
@@ -388,19 +384,12 @@ test("keeps known non-GitHub URLs case-sensitive during collection", async () =>
     "example.visualstudio.com",
   ]) {
     const url = `https://${host}/Team/Repo`;
-    const responses = [
-      { project: { ...platformProject, url } },
-      {
-        findings: [
-          { ...platformFinding(1), repository: { url: url.toLowerCase() } },
-        ],
-      },
-    ];
+    const finding = {
+      ...platformFinding(1),
+      repository: { url: url.toLowerCase() },
+    };
     await expect(
-      collectSemgrepPlatformFindings(options, {
-        environment,
-        fetch: async () => Response.json(responses.shift()),
-      }),
+      collectProject({ ...platformProject, url }, [finding]),
     ).rejects.toThrow("does not match");
   }
 });
@@ -476,6 +465,8 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
 });
 
 test("maps Supply Chain packages, preserves source-only reachability, and keeps AI SAST in its own namespace", () => {
+  const normalizeSupplyChain = (...findings: unknown[]) =>
+    normalizeSemgrepPlatformFindings(platformReport(findings, "sca"));
   const finding = platformFinding(21);
   const sca = {
     ...finding,
@@ -492,11 +483,7 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
     reachability: "reachable",
     location: { file_path: "../outside", line: 1 },
   };
-  const report = platformReport([sca]);
-  const result = normalizeSemgrepPlatformFindings({
-    ...report,
-    product: "sca",
-  });
+  const result = normalizeSupplyChain(sca);
   expect(result.findings[0]?.evidence).toMatchObject({
     packages: [
       {
@@ -520,51 +507,46 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
       ...metadata,
       vulnerability_identifier: "CVE-2025-0001",
     };
-    const result = normalizeSemgrepPlatformFindings({
-      ...platformReport([advisoryOnly]),
-      product: "sca",
-    });
+    const result = normalizeSupplyChain(advisoryOnly);
     expect(result.findings[0]?.evidence).toMatchObject({
       advisory_ids: ["CVE-2025-0001"],
       packages: [],
       source_data: { finding: advisoryOnly },
     });
   }
-  const ruleOnly = normalizeSemgrepPlatformFindings({
-    ...platformReport([finding]),
-    product: "sca",
-  });
+  const ruleOnly = normalizeSupplyChain(finding);
   expect(ruleOnly.findings[0]?.evidence).toMatchObject({
     title: finding.rule.name,
     packages: [],
     advisory_ids: [],
     source_data: { finding },
   });
-  const invalid = normalizeSemgrepPlatformFindings({
-    ...platformReport([
-      {
-        ...finding,
-        rule: {},
-        found_dependency: {},
-        vulnerability_identifier: " ",
-      },
-      { ...sca, id: 22, found_dependency: { package: 42 } },
-      { ...sca, id: 23, found_dependency: [] },
-    ]),
-    product: "sca",
-  });
+  const invalid = normalizeSupplyChain(
+    {
+      ...finding,
+      rule: {},
+      found_dependency: {},
+      vulnerability_identifier: " ",
+    },
+    { ...sca, id: 22, found_dependency: { package: 42 } },
+    { ...sca, id: 23, found_dependency: [] },
+  );
   expect(invalid.excluded).toHaveLength(3);
-  expect(normalizeSemgrepPlatformFindings(report).excluded).toHaveLength(1);
-  const code = platformReport([finding]);
-  const ai = normalizeSemgrepPlatformFindings({ ...code, product: "ai_sast" });
+  expect(
+    normalizeSemgrepPlatformFindings(platformReport([sca])).excluded,
+  ).toHaveLength(1);
+  const code = normalizeSemgrepPlatformFindings(platformReport([finding]));
+  const ai = normalizeSemgrepPlatformFindings(
+    platformReport([finding], "ai_sast"),
+  );
   expect(ai.findings[0]?.evidence.details?.kind).toBe("sast");
   expect(ai.findings[0]?.source_finding_id).not.toBe(
-    normalizeSemgrepPlatformFindings(code).findings[0]?.source_finding_id,
+    code.findings[0]?.source_finding_id,
   );
 });
 
 test("keeps message-only findings and preserves ambiguous hosted paths as native evidence", () => {
-  for (const product of ["sast", "ai_sast", "sca"]) {
+  for (const product of ["sast", "ai_sast", "sca"] as const) {
     const description = "Check the unsafe input.";
     const finding = {
       ...platformFinding(42),
@@ -573,10 +555,9 @@ test("keeps message-only findings and preserves ambiguous hosted paths as native
         : { rule: { message: description } }),
       location: { file_path: "src/rules\\test.py", line: 2, end_line: 4 },
     };
-    const report = normalizeSemgrepPlatformFindings({
-      ...platformReport([finding]),
-      product,
-    });
+    const report = normalizeSemgrepPlatformFindings(
+      platformReport([finding], product),
+    );
     expect(report.excluded).toEqual([]);
     expect(report.findings[0]?.evidence).toMatchObject({
       title: description,

@@ -1,6 +1,9 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  HostedExternalFindings,
+} from "./external-findings.js";
 import { isRecord } from "./record.js";
 import {
   normalizeSnykIssues,
@@ -464,7 +467,7 @@ export function normalizeSnykJson(
 export function normalizeSnykInput(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+): HostedExternalFindings {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
   if (
@@ -482,6 +485,6 @@ export function normalizeSnykInput(
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
+): Promise<HostedExternalFindings> {
   return normalizeSnykInput(await readScannerJson(path), target);
 }

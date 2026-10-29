@@ -18,7 +18,7 @@ import {
 } from "../src/snyk-findings.js";
 
 import type {
-  ExternalFindings,
+  HostedExternalFindings,
   ExternalSourceRepository,
 } from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
@@ -90,7 +90,7 @@ async function snykCheckout(remote: string, sourceKey = projectId) {
     ...fixture,
     selection,
     prepareNormalized(
-      input: ExternalFindings,
+      input: HostedExternalFindings,
       sourceRepositories?: ExternalSourceRepository[],
     ) {
       return prepareNormalizedLocalImport(input, selection, {
@@ -892,7 +892,12 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
       "github.com:22/Example/repository.git",
       "github.com:22/example/repository",
     ],
-    ["gitlab.com:22/Group/project.git", "gitlab.com/Group/project"],
+    ["gitlab.com:22/Group%2Fsub/project.git", "gitlab.com/Group/sub/project"],
+    [
+      "gitlab.com:22/Group%2Fsub/project.git",
+      "gitlab.com:22/Group%2Fsub/project",
+    ],
+    ["github.com:22/example%2Frepository", github],
     [
       "github.com:443/Example/repository.git",
       "github.com:443/example/repository",
@@ -933,7 +938,9 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["gitlab.com/team/project", "gitlab.com/Team/project"],
     ["git.example.test/group/project", "git.example.test/group/project"],
     ["github.com/example%2Frepository", github],
-    ["github.com:22/example%2Frepository", github],
+    ["github.com:22/example%252Frepository", github],
+    ["gitlab.com:22/Group%2Fsub/project", "gitlab.com/Group%2Fsub/project"],
+    ["gitlab.com:22/Group%2Fsub/project", "gitlab.com:22/Group/sub/project"],
     [
       "ssh.github.com:443/example%2Frepository",
       "github.com/example%2Frepository",
@@ -1241,17 +1248,27 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
   const url = "https://scm.example.test/Owner/project";
   const fixture = await snykCheckout(url, "mixed");
   try {
-    const row = (origin: string, source: string) =>
+    const row = (origin: string, source: string, remote = source) =>
       normalizeSnykIssues({
         ...envelope([issue({ key: origin })]),
         sourceRepositoryUrl: source,
-        project: project({ origin, remote: source }),
+        project: project({ origin, remote }),
       }).findings[0]!;
     const github = row("github-enterprise", url);
     const gitlab = row("gitlab", url.toLowerCase());
+    const nativeCase = row("github-enterprise", url, url.toLowerCase());
+    await expect(
+      fixture.prepareNormalized({
+        read: 1,
+        findings: [nativeCase],
+        excluded: [],
+        sourceRepositoryPlatform: "other",
+      }),
+    ).rejects.toThrow("does not match");
     for (const findings of [
       [github, gitlab],
       [gitlab, github],
+      [nativeCase, row("gitlab", url)],
     ]) {
       await expect(
         fixture.prepareNormalized({
