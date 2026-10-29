@@ -454,6 +454,10 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
     { ...finding, id: null, ref: "main" },
     {
       ...finding,
+      repository: { url: "git@[github.com:]:example/project.git" },
+    },
+    {
+      ...finding,
       repository: { url: "https://git.example.test/other/project" },
     },
   ])

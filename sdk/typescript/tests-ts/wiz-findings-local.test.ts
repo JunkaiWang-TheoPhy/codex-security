@@ -135,8 +135,16 @@ test("Wiz CSV imports into SQLite and updates the same source finding", async ()
       execFileSync("git", ["-C", fixture.repository, ...args]);
     git("remote", "set-url", "origin", repositoryUrl);
     git("config", "remote.origin.vcs", "example");
+    const redirected = join(fixture.root, "empty.gitconfig");
+    await writeFile(redirected, "");
     await expect(
-      prepareLocalExternalImport(file, options, dependencies),
+      prepareLocalExternalImport(file, options, {
+        environment: {
+          ...fixture.environment,
+          [process.platform === "win32" ? "Git_Config" : "GIT_CONFIG"]:
+            redirected,
+        },
+      }),
     ).rejects.toThrow("does not match");
     git("remote", "set-url", "origin", `http::${repositoryUrl}`);
     await prepareLocalExternalImport(file, options, dependencies);

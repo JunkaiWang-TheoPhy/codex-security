@@ -27,7 +27,6 @@ export function isWindowsGitDrive(remote: string): boolean {
 function isGitScpRemote(remote: string): boolean {
   return (
     !isLocalGitRemote(remote) &&
-    !isWindowsGitDrive(remote) &&
     !remote.includes("://") &&
     !/^[a-z\d][a-z\d+.-]*::/iu.test(remote)
   );
@@ -38,10 +37,11 @@ function sshAuthority(host: string): URL | null {
   const parsed = URL.parse(`ssh://${host}`);
   if (parsed) return parsed;
   // Git accepts brackets around DNS names, with an SSH port inside or after the brackets.
-  const bracketed = /^\[([^\]]+)\](:\d*)?$/u.exec(host);
-  return bracketed
-    ? URL.parse(`ssh://${bracketed[1]}${bracketed[2] ?? ""}`)
-    : null;
+  const bracketed = /^\[([^\]]+)\](?::(\d*))?$/u.exec(host);
+  // An empty port outside the brackets is ignored, but an inner trailing colon is a hostname byte.
+  if (!bracketed || bracketed[1]!.endsWith(":")) return null;
+  const [, name, port] = bracketed;
+  return URL.parse(`ssh://${name}${port ? `:${port}` : ""}`);
 }
 
 /** Parse transport syntax only; callers decide which hosts and credentials are allowed. */

@@ -184,6 +184,25 @@ test.each(
   },
 );
 
+test("an Inspector literal repository does not identify an opaque helper", async () => {
+  const literal = " ssh://host.test/team/repo";
+  await using f = await checkout(literal);
+  execFileSync("git", [
+    "-C",
+    f.options.repository,
+    "config",
+    "remote.origin.vcs",
+    "example",
+  ]);
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized([typedRow(literal)]),
+      f.options,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match a configured remote");
+});
+
 test("mapped local imports preserve their SQLite history and verify replay provenance", async () => {
   await using f = await checkout();
   const input = inspectorPackageFinding();

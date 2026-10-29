@@ -277,6 +277,7 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
 test.each([
   "ssh://git@github.com/example/project.git?foreign",
   "ftp://github.com/example/project",
+  " ssh://git@github.com/example/project.git",
   "https::https://github.com/example/foreign.git",
   "ext::ssh git@github.com %S example/foreign.git",
   "example::file:///example/foreign.git",
@@ -386,6 +387,46 @@ test.each([
 );
 
 const gitlabUrl = "https://gitlab.com/Group/My-Repo";
+test("undecodable Git names and URLs cannot match a replacement character", async () => {
+  await using f = await platformCheckout(repositoryUrl);
+  const configPath = join(f.options.repository, ".git", "config");
+  const base = await readFile(configPath);
+  const prefix = "https://github.com/example/";
+  const url = prefix + "%EF%BF%BD";
+  const prepare = () =>
+    prepareNormalizedLocalImport(
+      { read: 0, findings: [], excluded: [], sourceRepositoryUrl: url },
+      f.options,
+      f.dependencies,
+    );
+  const section = (name: Buffer, path: Buffer) =>
+    Buffer.concat([
+      Buffer.from('\n[remote "'),
+      name,
+      Buffer.from(`"]\n  url = ${prefix}`),
+      path,
+      Buffer.from("\n"),
+    ]);
+  const invalid = Buffer.from([0xff]);
+  const malformed = Buffer.concat([
+    base,
+    section(Buffer.from("bad-url"), invalid),
+    section(invalid, Buffer.from("�")),
+  ]);
+  await writeFile(configPath, malformed);
+  await expect(prepare()).rejects.toThrow("does not match a configured remote");
+  for (const path of ["�", "%EF%BF%BD"]) {
+    await writeFile(
+      configPath,
+      Buffer.concat([
+        malformed,
+        section(Buffer.from("upstream"), Buffer.from(path)),
+      ]),
+    );
+    expect((await prepare()).preview.findings).toEqual([]);
+  }
+});
+
 const escapedGitlabUrl = "https://gitlab.com/%47roup/My%2dRepo";
 test.each([
   [escapedGitlabUrl, gitlabUrl],

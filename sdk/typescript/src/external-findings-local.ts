@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
@@ -446,26 +447,45 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  const readGit = (args: readonly string[], raw = false) => {
-    const command = [
-      repository,
-      args,
-      signal,
-      { LC_ALL: "C" },
-      undefined,
-    ] as const;
-    return abortable(
-      () =>
-        raw
-          ? gitOutput(
-              ...command,
-              "buffer",
-              gitProtectedRoots,
-              environment,
-            ).then((output) => output.toString("utf8").replace(/\n$/u, ""))
-          : gitOutput(...command, "utf8", gitProtectedRoots, environment),
-      signal,
-    );
+  const readGit = (args: readonly string[]) => {
+    const overrides: NodeJS.ProcessEnv = { LC_ALL: "C" };
+    // GIT_CONFIG redirects only git config; read the same configuration as git remote.
+    if (args[0] === "config")
+      for (const name of Object.keys(environment ?? process.env))
+        if (
+          (process.platform === "win32" ? name.toUpperCase() : name) ===
+          "GIT_CONFIG"
+        )
+          overrides[name] = undefined;
+    return abortable(async () => {
+      try {
+        const output = await gitOutput(
+          repository,
+          args,
+          signal,
+          overrides,
+          undefined,
+          "buffer",
+          gitProtectedRoots,
+          environment,
+        );
+        // Keep a byte per character until Git's record boundaries and config keys have been matched.
+        return output.toString("latin1").replace(/\n$/u, "");
+      } catch (error) {
+        // The SDK exposes Git's original UTF-8 diagnostics on command errors.
+        if (error instanceof Error) {
+          if ("stderr" in error && Buffer.isBuffer(error.stderr))
+            error.stderr = error.stderr.toString("utf8");
+          if ("stdout" in error && Buffer.isBuffer(error.stdout))
+            error.stdout = error.stdout.toString("utf8");
+        }
+        throw error;
+      }
+    }, signal);
+  };
+  const utf8 = (raw: string) => {
+    const bytes = Buffer.from(raw, "latin1");
+    return isUtf8(bytes) ? bytes.toString("utf8") : undefined;
   };
   let remoteNames: string;
   try {
@@ -503,23 +523,36 @@ async function requireMatchingRepository(
   ).split("\0");
   const remotes: string[] = [];
   let hasUnverifiedRemote = false;
-  for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    const vcsKey = `remote.${name}.vcs\n`;
-    const configuredHelper = remoteConfig
-      .findLast((entry) => entry.startsWith(vcsKey))
-      ?.slice(vcsKey.length);
-    const urls = (
-      await readGit(["remote", "get-url", "--all", "--", name], true)
-    ).split("\n");
-    // Git prints rewritten URLs one per line. A newline within a URL cannot establish another remote.
-    const count = remoteConfig.filter((entry) =>
-      entry.startsWith(`remote.${name}.url\n`),
-    ).length;
-    if (urls.length !== (count || 1)) {
+  for (const rawName of remoteNames.split("\n").filter(Boolean)) {
+    const name = utf8(rawName);
+    if (name === undefined) {
       hasUnverifiedRemote = true;
       continue;
     }
-    for (const configured of urls) {
+    const vcsKey = `remote.${rawName}.vcs\n`;
+    const configuredHelper = remoteConfig
+      .findLast((entry) => entry.startsWith(vcsKey))
+      ?.slice(vcsKey.length);
+    const output = await readGit(["remote", "get-url", "--all", "--", name]);
+    // Git's rewrite base cannot contain LF. Only a multiline source URL can introduce
+    // ambiguous records; let Git apply empty-list resets and rewrites itself.
+    const urlKey = `remote.${rawName}.url\n`;
+    if (
+      output.includes("\n") &&
+      remoteConfig.some(
+        (entry) =>
+          entry.startsWith(urlKey) && entry.includes("\n", urlKey.length),
+      )
+    ) {
+      hasUnverifiedRemote = true;
+      continue;
+    }
+    for (const rawUrl of output.split("\n")) {
+      const configured = utf8(rawUrl);
+      if (configured === undefined) {
+        hasUnverifiedRemote = true;
+        continue;
+      }
       // Explicit helper:: takes precedence over remote.<name>.vcs.
       const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(configured);
       const helper = explicit?.[1] ?? configuredHelper;
@@ -530,8 +563,12 @@ async function requireMatchingRepository(
       const recognized =
         helper === undefined
           ? !url.includes("://") ||
-            (transport && Object.hasOwn(gitTransportPorts, transport))
-          : curl && /^(?:https?|ftps?)$/u.test(helper);
+            (transport && Object.hasOwn(gitTransportPorts, transport)) ||
+            // Inspector can retain an unrecognized spelling as a literal repository key.
+            (provider === "inspector" &&
+              remoteRepository(url, provider, true)?.key === url)
+          : /^https?:$/iu.test(transport ?? "") &&
+            /^(?:https?|ftps?)$/u.test(helper);
       // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
       if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
         hasUnverifiedRemote = true;

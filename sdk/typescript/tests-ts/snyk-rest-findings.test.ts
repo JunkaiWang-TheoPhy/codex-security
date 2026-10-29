@@ -898,6 +898,7 @@ test("a wrong project, product or repository fails before listing issues or acce
     project({ origin: "docker-hub" }),
     project({ remote: "https://github.com/example/another" }),
     project({ remote: "ssh://git@github.com/example/repository.git?other" }),
+    project({ remote: "ssh://git@[github.com:]/example/repository.git" }),
   ]) {
     const { collect, requests } = transport(document(source));
     await expect(collect()).rejects.toThrow();
