@@ -2735,55 +2735,83 @@ function failingDashboardOutput(output: string[]) {
   };
 }
 
-test("aligns component columns by terminal width and retains trailing cost", async () => {
-  const stderr = capture(true);
-  const dashboard = createDashboard(
-    { ...stderr.stream, columns: 160, rows: 24 },
-    { presentation: "components", showCost: true },
-  );
-  const receipts: ComponentReceipt[] = [
-    "a".repeat(74),
-    "界".repeat(37),
-    "e\u0301".repeat(37),
-    "unpriced",
-  ].map((name, index) => ({
-    id: String(index),
-    name,
-    paths: ["src"],
-    status: "pending",
-    outputDir: `/synthetic/results/${index}`,
-  }));
-  dashboard.start();
-  dashboard.setComponents(receipts);
-  for (const receipt of receipts.slice(0, -1))
-    dashboard.recordComponentEvent({
-      componentId: receipt.id,
-      type: "cost",
-      value: {
-        model: "synthetic-model",
-        inputTokens: 1,
-        cachedInputTokens: 0,
-        cacheWriteInputTokens: 0,
-        outputTokens: 1,
-        estimatedUsd: 1,
-        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
-      },
-    });
-  await Promise.resolve();
-  const frame = stripVTControlCharacters(
-    stderr.text().split("\u001B[H").at(-1)!,
-  );
-  const lines = frame.split("\n");
-  const header = lines.find((line) => line.includes("Findings"))!;
-  const rows = lines.filter((line) => line.includes("Queued"));
-  expect(rows).toHaveLength(receipts.length);
-  for (const row of rows) {
-    const costStart = row.lastIndexOf(row.includes("unpriced") ? "—" : "$1.00");
-    expect(costStart).toBeGreaterThanOrEqual(0);
-    expect(stringWidth(row.slice(0, costStart))).toBe(header.indexOf("Cost"));
-  }
-  dashboard.stop();
-});
+test.each([80, 160])(
+  "fits component progress at %i columns",
+  async (columns) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns, rows: 24 },
+      { presentation: "components", showCost: true },
+    );
+    const receipts: ComponentReceipt[] = [
+      "a".repeat(74),
+      "界".repeat(37),
+      "e\u0301".repeat(37),
+      "unpriced",
+    ].map((name, index) => ({
+      id: String(index),
+      name,
+      paths: ["src"],
+      status: "pending",
+      outputDir: `/synthetic/results/${index}`,
+    }));
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const [index, receipt] of receipts.slice(0, -1).entries()) {
+      if (index < 2) {
+        dashboard.updateComponent({ ...receipt, status: "started" });
+        dashboard.recordComponentEvent({
+          componentId: receipt.id,
+          type: "progress",
+          value: {
+            phase: "attack_path",
+            filesCompleted: 2,
+            filesTotal: 8,
+            ...(index === 1 && {
+              reviewItems: { completed: 1_234, total: 12_345 },
+            }),
+          },
+        });
+      }
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: {
+          model: "synthetic-model",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1,
+          estimatedUsd: 1,
+          estimatedUsdRange: { min: 1, max: 12.34, context: "unknown" },
+        },
+      });
+    }
+    await Promise.resolve();
+    const frame = stripVTControlCharacters(
+      stderr.text().split("\u001B[H").at(-1)!,
+    );
+    const lines = frame.split("\n");
+    const header = lines.findIndex((line) =>
+      /Status\s+Progress\s+Findings\s+Cost/u.test(line),
+    );
+    expect(header).toBeGreaterThanOrEqual(0);
+    const rows = lines.slice(header + 1, header + 1 + receipts.length);
+    expect(rows).toHaveLength(receipts.length);
+    expect(rows[0]).toContain("2/8 files");
+    expect(rows[1]).toContain("1,234/12,345 reviews");
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00/u);
+    const column = (line: string, value: string) =>
+      stringWidth(line.slice(0, line.lastIndexOf(value)));
+    const costColumn = column(lines[header]!, "Cost");
+    for (const row of rows.slice(0, -1)) {
+      expect(row).toContain("$1.00–$12.34");
+      expect(column(row, "$1.00")).toBe(costColumn);
+    }
+    expect(column(rows.at(-1)!, "—")).toBe(costColumn);
+    dashboard.stop();
+  },
+);
 
 test.each([16, 25, 120])(
   "preserves markup after clipped prefixes at width %i",
