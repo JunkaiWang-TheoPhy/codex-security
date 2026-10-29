@@ -1,14 +1,49 @@
+import { normalizeSnykFindingsExport } from "../src/snyk-findings.js";
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { listLocalExternalFindings } from "../src/external-findings-local.js";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   snykJson,
   snykPluginExport,
   snykSarif,
 } from "./support/snyk-import-fixtures.js";
+
+test("a case-sensitive Snyk plugin report preserves an exact private SSH repository", async () => {
+  const url = "git@scm.example.test:Team/Repo.git";
+  const f = await localFindingsFixture({ remote: url });
+  try {
+    const report = snykPluginExport();
+    report.collection.target.repository = url;
+    const input = {
+      ...normalizeSnykFindingsExport(report),
+      sourceRepositoryPlatform: "other" as const,
+    };
+    const options = {
+      repository: f.repository,
+      provider: "snyk" as const,
+      sourceKey: "ssh",
+    };
+    const dependencies = { environment: f.environment };
+    expect(
+      (await prepareNormalizedLocalImport(input, options, dependencies)).preview
+        .findings,
+    ).toHaveLength(1);
+    await expect(
+      prepareNormalizedLocalImport(input, options, {
+        ...dependencies,
+        sourceRepositories: [{ url: url.toLowerCase() }],
+      }),
+    ).rejects.toThrow("does not match");
+  } finally {
+    await f.dispose();
+  }
+});
 
 test.each(["plugin", "JSON", "SARIF"] as const)(
   "Snyk %s findings persist locally and update without duplicating their identities",

@@ -26,6 +26,7 @@ import {
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
+import { validateHostedRepositoryBytes } from "./hosted-scanner-http.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
@@ -498,6 +499,7 @@ async function preparePublicationInput(
     semgrepProject ||
     hostedSnyk.size,
   );
+  if (bound) validateHostedRepositoryBytes(options.repository);
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
     [...hostedSnyk.values()].some(({ platform }) => platform === "other");
@@ -864,6 +866,7 @@ async function preparePublicationInput(
     gitAlias = false,
     description = "selected Cloud repository",
   ) {
+    if (bound && url) validateHostedRepositoryBytes(url);
     const key =
       gitAlias && !bound
         ? (value: string) => hostedRepositoryUrlKey(value, true)

@@ -9,8 +9,21 @@ export interface HostedScannerHttpOptions {
   signal?: AbortSignal;
 }
 
+/** libcurl requires ASCII space and control bytes in HTTP URLs to be percent-encoded. */
+export function validateHostedRepositoryBytes(value: string): void {
+  if (
+    /[\x00-\x20\x7f]/u.test(value) &&
+    (/^https?:\/\//iu.test(value) ||
+      /^https?:$/u.test(URL.parse(value)?.protocol ?? ""))
+  )
+    throw new CodexSecurityError(
+      "HTTP(S) repository URLs must percent-encode spaces and control characters.",
+    );
+}
+
 export function hostedRepositoryUrl(value: unknown, label: string): string {
   const raw = requiredText(value, label);
+  validateHostedRepositoryBytes(raw);
   const url = URL.parse(raw);
   if (
     !url ||

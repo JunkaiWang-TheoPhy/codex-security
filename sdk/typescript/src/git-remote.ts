@@ -33,7 +33,7 @@ function isGitScpRemote(remote: string): boolean {
 }
 
 function sshAuthority(host: string): URL | null {
-  if (/[\/\\?#@\s]/u.test(host)) return null;
+  if (/[\/\\?#@\s\x00-\x1f\x7f]/u.test(host)) return null;
   const parsed = URL.parse(`ssh://${host}`);
   if (parsed) return parsed;
   // Git accepts brackets around DNS names, with an SSH port inside or after the brackets.

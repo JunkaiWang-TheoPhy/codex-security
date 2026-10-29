@@ -1821,6 +1821,7 @@ describe("local normalized scanner findings", () => {
     ["./synthetic:source", true, []],
     ["/synthetic/repos/source", true, []],
     ["file:///C:/repos/source", true, []],
+    [sourceUrl, true, [`example::foreign\n${sourceUrl}\nforeign`]],
     ["https://github.com/example/old", true, ["", sourceUrl]],
     [
       "https://github.com/example/foreign",

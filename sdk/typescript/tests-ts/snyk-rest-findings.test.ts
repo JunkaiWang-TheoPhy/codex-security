@@ -899,6 +899,7 @@ test("a wrong project, product or repository fails before listing issues or acce
     project({ remote: "https://github.com/example/another" }),
     project({ remote: "ssh://git@github.com/example/repository.git?other" }),
     project({ remote: "ssh://git@[github.com:]/example/repository.git" }),
+    project({ remote: "ssh://git@github.com%01/example/repository.git" }),
   ]) {
     const { collect, requests } = transport(document(source));
     await expect(collect()).rejects.toThrow();
@@ -942,6 +943,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["bitbucket.org/Team/project", "bitbucket.org/Team/project"],
     ["example.ghe.com/Org/repo.git", "example.ghe.com/org/repo"],
     ["dev.azure.com/Org/p/_git/r", "dev.azure.com/Org/p/_git/r"],
+    ["dev.azure.com/Org/p/old/../_git/r", "dev.azure.com/Org/p/_git/r"],
     ["org.visualstudio.com/p/_git/r", "org.visualstudio.com/p/_git/r"],
   ] as const) {
     const source = project({ origin: "cli", remote: "http://" + remote });
@@ -957,6 +959,8 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
   for (const [remote, selected, origin = "cli"] of [
     [github, github, "github"],
     ["github.com/example/other", github],
+    ["github.com/example/old/../repository", github],
+    ["gitlab.com:22/Group/./project", "gitlab.com:22/Group/project"],
     ["github.com:80/example/repository", github],
     ["github.com:443/example/repository", github],
     ["github.com:2222/example/repository", github],
@@ -988,7 +992,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
   }
 });
 
-test("compares unreserved HTTP escapes on public Snyk repository targets", () => {
+test("compares native HTTP repository paths and preserves ambiguous Snyk CLI spellings", () => {
   const plain = "gitlab.com/Group/my-project";
   const escaped = "gitlab.com/Group/my%2Dproject";
   const check = (native: string, declared: string, origin: string) =>
@@ -1010,6 +1014,17 @@ test("compares unreserved HTTP escapes on public Snyk repository targets", () =>
       "http://" + declared,
     );
   }
+  const dotted = "gitlab.com/Group/old/../my-project";
+  expect(check(dotted, plain, "gitlab").sourceRepositoryUrl).toBe(
+    "http://" + plain,
+  );
+  expect(check(plain, dotted, "cli").sourceRepositoryUrl).toBe(
+    "http://" + dotted,
+  );
+  expect(() => check(dotted, dotted, "cli")).toThrow("target URL");
+  expect(() =>
+    check("gitlab.com/Group/old\t/../my-project", plain, "gitlab"),
+  ).toThrow("percent-encode");
 });
 
 test("requires an unambiguous target when Snyk CLI supplies a private repository URL", async () => {

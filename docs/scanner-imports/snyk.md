@@ -50,8 +50,10 @@ provider family, such as GitHub Enterprise and its GitHub Server App.
 
 Snyk CLI records HTTP(S) and SSH origins as HTTP targets and drops the SSH
 login. On a custom Git server, a home-relative SSH path can name a different
-repository from the same HTTP path. To replace an ambiguous custom-host export
-for an Open Source project, provide its HTTPS URL with
+repository from the same HTTP path. On SSH-capable Git services, the importer
+also rejects CLI targets with literal `.` or `..` path components because HTTP
+resolves them while SSH sends them to the server. To replace an ambiguous
+Open Source export, provide the repository's HTTPS URL with
 [`snyk monitor --remote-repo-url=https://git.example.test/team/repo.git`](https://docs.snyk.io/developer-tools/snyk-cli/commands/monitor#--remote-repo-urlurl)
 and collect from the resulting Snyk project. When Snyk supplies no target URL,
 the collector uses the repository selected with `--source-repository-url`.

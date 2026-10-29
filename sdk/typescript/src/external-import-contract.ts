@@ -73,27 +73,32 @@ function hostedHttpAuthority(authority: string): string {
   return hostname ? hostname + port : authority;
 }
 
+function hostedHttpPath(path: string): string {
+  const segments: string[] = [];
+  for (const segment of path.split("/")) {
+    // Git's HTTP transport resolves literal dot segments before sending the path.
+    if (segment === "..") {
+      segments.pop();
+    } else if (segment !== ".") {
+      const spelling = segment.replace(/\P{ASCII}+/gu, (text) =>
+        encodeURIComponent(text.toWellFormed()),
+      );
+      const decoded = decodeUnreserved(spelling);
+      segments.push(
+        decoded === "." || decoded === ".." ? segment.toUpperCase() : decoded,
+      );
+    }
+  }
+  if (/(?:^|\/)\.{1,2}$/u.test(path)) segments.push("");
+  return segments.join("/");
+}
+
 /** Compare hosted HTTP repository spellings without changing the retained evidence. */
 export function hostedRepositoryUrlKey(value: string, github = false): string {
   const url = value.replace(
     /^(https?:\/\/)([^/?#]+)\/([^?#]*)/iu,
     (_, scheme: string, authority: string, path: string) =>
-      scheme +
-      hostedHttpAuthority(authority) +
-      "/" +
-      path
-        .split("/")
-        .map((segment) => {
-          const spelling = segment.replace(/\P{ASCII}+/gu, (text) =>
-            encodeURIComponent(text.toWellFormed()),
-          );
-          const decoded = decodeUnreserved(spelling);
-          // Git's HTTP transport removes literal dot segments but sends escaped ones as written.
-          return decoded === "." || decoded === ".."
-            ? segment.toUpperCase()
-            : decoded;
-        })
-        .join("/"),
+      scheme + hostedHttpAuthority(authority) + "/" + hostedHttpPath(path),
   );
   return github ? cloudRepositoryUrlKey(url) : repositoryUrlKey(url);
 }

@@ -20,6 +20,7 @@ import {
   hostedScannerHttp,
   hostedEnvironmentToken,
   hostedRepositoryUrl,
+  validateHostedRepositoryBytes,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
@@ -218,11 +219,15 @@ function matchesCliRepository(remote: string, source: string) {
   const path = parts[2]!;
   const publicWebHost =
     isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
+  const publicSshHost = isPublicGitHost(hostname);
   const sshEndpoint =
     publicGitSsh443Host(authority) ||
-    (isPublicGitHost(hostname) && authority === `${hostname}:22`);
+    (publicSshHost && authority === `${hostname}:22`);
   // The CLI drops the SSH login, so a private user's home-relative path can look like an HTTP URL.
   if (!publicWebHost && !sshEndpoint) return false;
+  // HTTP resolves literal dot segments, while SSH sends them to the repository service.
+  if ((publicSshHost || sshEndpoint) && /\/\.{1,2}(?:\/|$)/u.test(path))
+    return false;
   // On an SSH endpoint Git passes the URI-decoded path to upload-pack.
   const sshAlias = sshEndpoint
     ? normalizeHostedGitRepositoryUrl(
@@ -242,6 +247,7 @@ function matchesCliRepository(remote: string, source: string) {
 function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
+  validateHostedRepositoryBytes(url);
   const normalized = normalizeHostedGitRepositoryUrl(
     url,
     selected.sourceRepositoryUrl,

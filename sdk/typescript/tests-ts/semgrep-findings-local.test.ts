@@ -387,6 +387,64 @@ test.each([
 );
 
 const gitlabUrl = "https://gitlab.com/Group/My-Repo";
+test("hosted HTTP sources reject raw control bytes and preserve percent escapes", async () => {
+  const url = repositoryUrl + "\x01";
+  await using f = await platformCheckout(repositoryUrl);
+  const raw = platformReport([]);
+  await writeFile(
+    f.file,
+    JSON.stringify({ ...raw, project: { ...raw.project, url } }),
+  );
+  await expect(
+    prepareLocalExternalImport(f.file, f.options, f.dependencies),
+  ).rejects.toThrow("percent-encode");
+  const input = normalizeSemgrepPlatformFindings(raw);
+  await expect(
+    prepareNormalizedLocalImport(
+      { ...input, sourceRepositoryUrl: url },
+      f.options,
+      f.dependencies,
+    ),
+  ).rejects.toThrow("percent-encode");
+  const encoded = repositoryUrl + "%01";
+  expect(
+    normalizeSemgrepPlatformFindings({
+      ...raw,
+      project: { ...raw.project, url: encoded },
+    }).sourceRepositoryUrl,
+  ).toBe(encoded);
+});
+
+test("a local Git path may contain non-UTF-8 bytes unless it is a helper argument", async () => {
+  await using f = await platformCheckout("/synthetic/mirror");
+  const path = join(f.options.repository, ".git", "config");
+  const base = await readFile(path);
+  const input = normalizeSemgrepPlatformFindings(platformReport([]));
+  for (const forced of [false, true]) {
+    await writeFile(
+      path,
+      Buffer.concat([
+        base,
+        Buffer.from(
+          `\n[remote "mirror"]\n${forced ? " vcs = example\n" : ""} url = /data/`,
+        ),
+        Buffer.from([0xff]),
+        Buffer.from("mirror\n"),
+      ]),
+    );
+    const prepared = prepareNormalizedLocalImport(
+      input,
+      f.options,
+      f.dependencies,
+    );
+    if (forced)
+      await expect(prepared).rejects.toThrow(
+        "does not match a configured remote",
+      );
+    else expect((await prepared).preview.findings).toEqual([]);
+  }
+});
+
 test("undecodable Git names and URLs cannot match a replacement character", async () => {
   await using f = await platformCheckout(repositoryUrl);
   const configPath = join(f.options.repository, ".git", "config");

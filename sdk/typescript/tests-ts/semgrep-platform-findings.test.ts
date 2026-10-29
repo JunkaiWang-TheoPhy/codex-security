@@ -310,6 +310,8 @@ test("replays only the repository names observed for each collected split projec
 });
 
 test.each([
+  ["github.com/example/tmp/../repo", "github.com/example/./repo", true],
+  ["github.com/example/%2e/repo", "github.com/example/./repo", false],
   ["github.com/example/my-repo", "github.com/example/my%2Drepo", true],
   ["github.com/example/my%2Drepo", "github.com/example/my-repo", true],
   ["github.com/example/nested/repo", "github.com/example/nested%2Frepo", false],
@@ -455,6 +457,10 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
     {
       ...finding,
       repository: { url: "git@[github.com:]:example/project.git" },
+    },
+    {
+      ...finding,
+      repository: { url: "git@github.com\x01:example/project.git" },
     },
     {
       ...finding,

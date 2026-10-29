@@ -1681,7 +1681,7 @@ test.each(["semgrep", "snyk"] as const)(
   async (provider) => {
     const sourceRepositoryUrl = "https://scm.example.test/Team/repo";
     const cloud = await fixture([], sourceRepositoryUrl);
-    const prepare = (url: string) =>
+    const prepare = (url: string, repository = options.repository) =>
       prepareNormalizedExternalPublication(
         {
           read: 1,
@@ -1699,12 +1699,21 @@ test.each(["semgrep", "snyk"] as const)(
             },
           ],
         },
-        { ...options, provider },
+        { ...options, provider, repository },
         cloud.deps,
       );
     expect((await prepare(sourceRepositoryUrl)).preview.findings).toHaveLength(
       1,
     );
+    expect(
+      (await prepare(sourceRepositoryUrl + "/%09/..")).preview.findings,
+    ).toHaveLength(1);
+    await expect(prepare(sourceRepositoryUrl + "/raw\t/..")).rejects.toThrow(
+      "percent-encode",
+    );
+    await expect(
+      prepare(sourceRepositoryUrl, sourceRepositoryUrl + "/raw\t/.."),
+    ).rejects.toThrow("percent-encode");
     await expect(prepare(sourceRepositoryUrl.toLowerCase())).rejects.toThrow(
       "does not match",
     );
@@ -1779,6 +1788,7 @@ test("platform-only Semgrep declarations check retained SARIF provenance before 
   const prepare = (
     sourceRepositoryUrl?: string,
     sourceRepositoryPlatform?: "github",
+    repositoryUri = foreign,
   ) =>
     prepareNormalizedExternalPublication(
       {
@@ -1794,7 +1804,7 @@ test("platform-only Semgrep declarations check retained SARIF provenance before 
               severity: "low",
               source_data: {
                 runContext: {
-                  versionControlProvenance: [{ repositoryUri: foreign }],
+                  versionControlProvenance: [{ repositoryUri }],
                 },
               },
             },
@@ -1812,7 +1822,14 @@ test("platform-only Semgrep declarations check retained SARIF provenance before 
   await expect(prepare(undefined, "github")).rejects.toThrow("does not match");
   cloud.state.repositoryUrl = foreign;
   expect((await prepare(undefined, "github")).preview.resumed).toBe(true);
-  expect(cloud.posts).toHaveLength(1);
+  const invalid = foreign + "/raw\x7f/..";
+  const pending = await prepare(undefined, undefined, invalid);
+  cloud.state.loseResponse = true;
+  await expect(pending.publish()).rejects.toThrow("resume the saved request");
+  await expect(prepare(undefined, "github", invalid)).rejects.toThrow(
+    "percent-encode",
+  );
+  expect(cloud.posts).toHaveLength(2);
 });
 
 test("Semgrep keeps retained row casing bound to the declared platform on Cloud", async () => {

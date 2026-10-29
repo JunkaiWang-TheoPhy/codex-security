@@ -11,7 +11,10 @@ import {
   semgrepPlatformFindingRepository,
 } from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
-import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
+import {
+  hostedRepositoryUrl,
+  validateHostedRepositoryBytes,
+} from "./hosted-scanner-http.js";
 import {
   forwardExternalImportSetting,
   requireExternalImports,
@@ -422,6 +425,8 @@ function hostedRepositoryMatches(
   value: string,
   expectedKey?: string,
 ): boolean {
+  validateHostedRepositoryBytes(value);
+  if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
   const github = source.platform === "github";
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
   return (
@@ -534,30 +539,31 @@ async function requireMatchingRepository(
       .findLast((entry) => entry.startsWith(vcsKey))
       ?.slice(vcsKey.length);
     const output = await readGit(["remote", "get-url", "--all", "--", name]);
-    // Git's rewrite base cannot contain LF. Only a multiline source URL can introduce
-    // ambiguous records; let Git apply empty-list resets and rewrites itself.
+    const lines = output.split("\n");
     const urlKey = `remote.${rawName}.url\n`;
-    if (
-      output.includes("\n") &&
-      remoteConfig.some(
-        (entry) =>
-          entry.startsWith(urlKey) && entry.includes("\n", urlKey.length),
-      )
-    ) {
-      hasUnverifiedRemote = true;
-      continue;
-    }
-    for (const rawUrl of output.split("\n")) {
-      const configured = utf8(rawUrl);
-      if (configured === undefined) {
+    // Effective URLs form a suffix after a Git list reset. Each contributes at least one output line.
+    const ambiguous =
+      lines.length > 1 &&
+      remoteConfig
+        .filter((entry) => entry.startsWith(urlKey))
+        .slice(-lines.length)
+        .some((entry) => entry.includes("\n", urlKey.length));
+    // With no LF boundary guarantee, Git's singular query identifies the primary as one record.
+    if (ambiguous) hasUnverifiedRemote = true;
+    const urls = ambiguous
+      ? [await readGit(["remote", "get-url", "--", name])]
+      : lines;
+    for (const rawUrl of urls) {
+      // Explicit helper:: takes precedence over remote.<name>.vcs.
+      const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
+      const helper = explicit?.[1] ?? configuredHelper;
+      const address = explicit ? rawUrl.slice(explicit[0].length) : rawUrl;
+      if (helper === undefined && isLocalGitRemote(address)) continue;
+      const url = utf8(address);
+      if (url === undefined) {
         hasUnverifiedRemote = true;
         continue;
       }
-      // Explicit helper:: takes precedence over remote.<name>.vcs.
-      const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(configured);
-      const helper = explicit?.[1] ?? configuredHelper;
-      const url = explicit ? configured.slice(explicit[0].length) : configured;
-      if (helper === undefined && isLocalGitRemote(url)) continue;
       const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1];
       const curl = /^(?:https?|ftps?):$/iu.test(transport ?? "");
       const recognized =
@@ -802,6 +808,19 @@ export async function prepareLocalImport(
           sources.set(source.nativeUrl, { url: source.nativeUrl });
         if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
           hostedUrl ??= source.url;
+        else if (
+          !hostedUrl &&
+          reportPlatform === "other" &&
+          /^(?:ssh|git\+ssh|ssh\+git):$/u.test(
+            parseGitRemote(source.url)?.url.protocol ?? "",
+          )
+        )
+          // A private SSH selector retained by Snyk can match the same transport literally.
+          hostedUrl = normalizeHostedGitRepositoryUrl(
+            source.url,
+            undefined,
+            false,
+          );
         // Only retained or independent evidence can establish GitHub on a populated report.
         if (source.platform !== undefined)
           hostedGitHub = (hostedGitHub ?? true) && source.platform === "github";
