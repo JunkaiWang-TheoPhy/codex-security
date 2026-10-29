@@ -111,6 +111,7 @@ test("Wiz requires the installed HTTPS helper when a Git alias can handle the re
     "-C",
     fixture.repository,
     "config",
+    "--file=.git/config",
     "alias.remote-https",
     "!f() { git remote-ext origin 'git-upload-pack ../other.git'; }; f",
   ]);
