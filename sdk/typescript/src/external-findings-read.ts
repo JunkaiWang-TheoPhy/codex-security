@@ -9,7 +9,6 @@ import {
   hostedRepositoryUrlKey,
   isVerifiedGitHubRepository,
 } from "./external-import-contract.js";
-import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings } from "./snyk-findings.js";
 import {
   normalizeSemgrepReport,
@@ -20,9 +19,10 @@ import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
-import { isGitHubCloudHost } from "./git-remote.js";
-import { isRecord } from "./record.js";
-import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import {
+  readVendorFindingsForPublication,
+  wizPackageRepository,
+} from "./wiz-findings.js";
 
 /** File reader names mapped to their stored and Cloud source provider. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
@@ -138,41 +138,14 @@ export async function readExternalFindings(
     };
   }
   const publication = await readVendorFindingsForPublication(path, target);
-  // Raw package exports keep repository-branch URLs in retained source data.
-  const sourceRepositories = publication.current.findings.flatMap(
-    ({ evidence }) => {
-      const csvUrl = wizCsvRepositoryUrl(evidence);
-      if (csvUrl) return [{ url: csvUrl, platform: "github" as const }];
-      const asset = evidence.source_data?.["vulnerableAsset"];
-      if (!isRecord(asset) || typeof asset["cloudProviderURL"] !== "string")
-        return [];
-      const url = URL.parse(asset["cloudProviderURL"]);
-      if (!url) return [];
-      const github =
-        asset["nativeType"] === "github#repositoryBranch" ||
-        (asset["type"] === "REPOSITORY_BRANCH" &&
-          isGitHubCloudHost(url.hostname));
-      if (!github)
-        return asset["type"] === "REPOSITORY_BRANCH"
-          ? [{ url: asset["cloudProviderURL"] }]
-          : [];
-      const [, owner, repository] = url.pathname.split("/");
-      return owner && repository
-        ? [
-            {
-              url: `${url.origin}/${owner}/${repository}`,
-              platform: "github" as const,
-            },
-          ]
-        : [];
-    },
-  );
   return {
     findings: publication.current,
     publication,
     sourceRepositories: [
       ...publication.sourceRepositories,
-      ...sourceRepositories,
+      ...publication.current.findings.flatMap(
+        ({ evidence }) => wizPackageRepository(evidence) ?? [],
+      ),
     ],
   };
 }

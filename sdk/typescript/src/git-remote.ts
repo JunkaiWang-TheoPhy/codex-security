@@ -46,11 +46,6 @@ export function decodeUnreserved(value: string): string {
   });
 }
 
-/** Git decodes the port separator before checking the port number. */
-function decodeGitSshAuthority(value: string): string {
-  return decodeUnreserved(value).replace(/%3A(?=\d+$)/u, ":");
-}
-
 /** Represent upload-pack path bytes relative to an HTTP repository origin. */
 export function gitPathToHttpPath(bytes: string): string {
   return bytes
@@ -144,25 +139,23 @@ function normalizeGitSshAlias(
   const scp = scpRemote.exec(repository);
   if (scp?.[1] && isGitSshUser(scp[1], scp[2]!.toLowerCase()))
     return httpsAlias(scp[2]!, scp[3]!, true);
-  // Git decodes the authority and passes '?' and '#' to SSH as hostname bytes.
-  const ssh =
-    /^(?:ssh|git\+ssh|ssh\+git):\/\/([^/@?#]+)@([^/@?#]+)(\/.*)$/u.exec(
-      repository,
-    );
+  const ssh = /^(?:ssh|git\+ssh|ssh\+git):\/\/([^/]+)(\/.*)$/u.exec(repository);
   if (ssh && !/[\t\r\n]/u.test(repository)) {
-    const user = decodeUnreserved(ssh[1]!);
-    const authority = decodeGitSshAuthority(ssh[2]!);
-    // Other reserved escapes can change where Git separates the host, port and path.
-    if (authority.includes("%")) return repository;
+    // Git decodes the authority before splitting login, host and port. Accept only
+    // a single SSH login and keep decoded path or URL delimiters out of the host.
+    const authority = gitTransportBytes(ssh[1]!, false);
+    if (!/^[^@:]+@[^@]+$/u.test(authority) || /[/\\%?#\s]/u.test(authority))
+      return repository;
     const url = URL.parse(`ssh://${authority}/`);
     if (!url) return repository;
+    const user = url.username;
     const hostname = url.hostname.toLowerCase();
     const standardSsh =
       isGitSshUser(user, hostname) && (url.port === "" || url.port === "22");
     const alternate =
       user === "git" && publicGitSsh443Host(url.host.toLowerCase());
     if (alternate || standardSsh)
-      return httpsAlias(alternate || hostname, ssh[3]!, false);
+      return httpsAlias(alternate || hostname, ssh[2]!, false);
   }
   return repository;
 }

@@ -215,18 +215,24 @@ function matchesCliRepository(remote: string, source: string) {
   const path = parts[2]!;
   const publicWebHost =
     isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
-  const sshHost =
-    isPublicGitHost(hostname) && authority === `${hostname}:22`
-      ? hostname
-      : publicGitSsh443Host(authority);
+  let sshAlias: string | undefined;
+  if (publicGitSsh443Host(authority)) {
+    // These dedicated SSH endpoints receive Git's URI-decoded upload-pack path.
+    sshAlias = normalizeHostedGitRepositoryUrl(
+      `ssh://git@${authority}${path}`,
+      source,
+      false,
+    );
+  } else if (isPublicGitHost(hostname) && authority === `${hostname}:22`) {
+    sshAlias = `https://${hostname}${path}`;
+  }
   // A private server may host both literal SCP "my%2Drepo" and HTTP "my-repo".
-  if (!publicWebHost && !sshHost && /%[\da-f]{2}/iu.test(path)) return false;
+  if (!publicWebHost && !sshAlias && /%[\da-f]{2}/iu.test(path)) return false;
   return (
     hostedRepositoryUrlKey(remote) === source ||
     (publicWebHost &&
       hostedRepositoryUrlKey(`https://${authority}${path}`) === source) ||
-    (sshHost !== undefined &&
-      hostedRepositoryUrlKey(`https://${sshHost}${path}`) === source)
+    (sshAlias !== undefined && hostedRepositoryUrlKey(sshAlias) === source)
   );
 }
 

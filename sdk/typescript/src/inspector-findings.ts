@@ -152,7 +152,8 @@ function checkRepositoryMapping(
   source: string,
   provider: string | undefined,
   target: ExternalImportTarget,
-  projectMap?: ReadonlyMap<string, string>,
+  projectMap: ReadonlyMap<string, string> | undefined,
+  strictPath: boolean,
 ) {
   const hostname = new URL(source).hostname;
   const knownGitHub = isGitHubCloudHost(hostname);
@@ -173,11 +174,13 @@ function checkRepositoryMapping(
   const urls = [nativeId, name].filter(
     (url): url is string => !!url && absoluteUrl.test(url),
   );
-  const key = github && !projectMap ? cloudRepositoryUrlKey : repositoryUrlKey;
+  const githubPath = knownGitHub || (github && !strictPath);
+  const key =
+    githubPath && !projectMap ? cloudRepositoryUrlKey : repositoryUrlKey;
   const path = new URL(
-    (github ? cloudRepositoryUrlKey : repositoryUrlKey)(source),
+    (githubPath ? cloudRepositoryUrlKey : repositoryUrlKey)(source),
   ).pathname.slice(1);
-  const slug = github ? name?.toLowerCase() : name;
+  const slug = githubPath ? name?.toLowerCase() : name;
   const matchesSlug =
     !slug ||
     absoluteUrl.test(slug) ||
@@ -233,6 +236,7 @@ function checkReportScope<
   exclude: (row: T, error: unknown) => void = (_, error) => {
     throw error;
   },
+  strictPath = false,
 ): string | undefined {
   const claims = rows.flatMap((row) => row.claims);
   function shared(field: "project" | "integration" | "provider") {
@@ -270,6 +274,7 @@ function checkReportScope<
           providerFor(claim),
           target,
           projectMap,
+          strictPath,
         );
         if (claim.integration) return [proven];
         if (!proven) throw missingHost();
@@ -384,6 +389,7 @@ export function inspectorReportRepository(
   findings: readonly ExternalFinding[],
   target: ExternalImportTarget,
   projectMap?: ReadonlyMap<string, string>,
+  strictPath = false,
 ): (ExternalSourceRepository & { findingId: string }) | undefined {
   if (provider !== "inspector") {
     if (
@@ -423,9 +429,14 @@ export function inspectorReportRepository(
   if (!first) return undefined;
   // A supplied map owns the path casing on custom hosts.
   const github =
-    checkReportScope(retained, target, projectMap) === "GITHUB" && !projectMap;
+    checkReportScope(retained, target, projectMap, undefined, strictPath) ===
+      "GITHUB" &&
+    !projectMap &&
+    !strictPath;
   const key =
-    github || target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    github || (target === "cloud" && !strictPath)
+      ? cloudRepositoryUrlKey
+      : repositoryUrlKey;
   const repository = key(first.source);
   for (const { source, declared } of retained) {
     if (key(source) !== repository)

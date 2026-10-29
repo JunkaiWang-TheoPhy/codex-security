@@ -100,6 +100,8 @@ test.each([
   ["ssh", "github.com", "my-repo", "my%2Drepo", true],
   ["ssh", "github.com", "my%2Drepo", "my-repo", true],
   ["scp", "github.com", "my%2Drepo", "my%2Drepo", false],
+  ["scp", "gitlab.com", "Café", "Café", true],
+  ["scp", "gitlab.com", "Caf%C3%A9", "Café", false],
   ["scp", "gitlab.com", "my%2frepo", "my%252Frepo", false],
   ["scp", "gitlab.com", "my%2Frepo", "my%252Frepo", true],
   ["ssh", "github.com", "my%252Drepo", "my%2Drepo", false],
@@ -122,6 +124,16 @@ test.each([
 
 test.each([
   ["ssh://g%69t@%67ithub.com", true],
+  ["ssh://git%40github.com", true],
+  ["ssh://g%69t%40%67ithub.com%3A22", true],
+  ["ssh://git%40ssh.github.com%3A443", true],
+  ["ssh://git%40github.com%3A2222", false],
+  ["ssh://git%40other%40github.com", false],
+  ["ssh://git%3A%40github.com", false],
+  ["ssh://git%2540github.com", false],
+  ["ssh://git%40github.com%2Fother", false],
+  ["ssh://git%40github.com%3Fquery", false],
+  ["ssh://git%40github%09.com", false],
   ["ssh://git@github%2Ecom:2%32", true],
   ["ssh://%67it@ssh.github.com:443", true],
   ["ssh://git@github.com%3A22", true],
@@ -144,6 +156,8 @@ test.each([
 
 test.each([
   ["/org/my%2Drepo", "/org/my-repo", true],
+  ["/org/😀", "/org/%F0%9F%98%80", true],
+  ["/org/\ud800", "/org/%EF%BF%BD", true],
   ["/org/%252Drepo", "/org/%2Drepo", false],
   ["/org/my%2Frepo", "/org/my/repo", false],
   ["/org/my%2frepo", "/org/my%2Frepo", true],

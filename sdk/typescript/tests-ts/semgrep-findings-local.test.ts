@@ -224,6 +224,10 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
     (await prepare({ url: url.toLowerCase(), platform: "github" })).preview
       .findings,
   ).toEqual([]);
+  input.sourceRepositoryPlatform = "other";
+  await expect(
+    prepare({ url: url.toLowerCase(), platform: "github" }),
+  ).rejects.toThrow("does not match");
 
   const row = {
     ...platformFinding(7),

@@ -2,7 +2,14 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { listLocalExternalFindings } from "../src/external-findings-local.js";
+import {
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
+} from "../src/github-findings.js";
+import {
+  listLocalExternalFindings,
+  prepareNormalizedLocalImport,
+} from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   importedAlert,
@@ -21,6 +28,34 @@ function githubSource(source: Source) {
     ? importedAlert()
     : importedAdvisory(source === "global-advisory" ? "global" : "repository");
 }
+
+test("a declared repository checks retained GitHub code-scanning and repository-advisory records", async () => {
+  const fixture = await localFindingsFixture();
+  fixtures.push(fixture);
+  const options = {
+    repository: fixture.repository,
+    provider: "github" as const,
+    sourceKey: "project",
+  };
+  const deps = { environment: fixture.environment };
+  for (const kind of [
+    "code-scanning",
+    "repository-advisory",
+    "global-advisory",
+  ] as const) {
+    const record = githubSource(kind);
+    const report =
+      record.source === "github-code-scanning"
+        ? normalizeGitHubCodeScanningAlerts([record])
+        : normalizeGitHubAdvisories([record]);
+    delete report.findings[0]!.evidence.details;
+    report.sourceRepositoryUrl = "https://github.com/example/foreign";
+    const preview = prepareNormalizedLocalImport(report, options, deps);
+    if (kind === "global-advisory")
+      expect((await preview).preview.findings).toHaveLength(1);
+    else await expect(preview).rejects.toThrow("does not match");
+  }
+});
 
 test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
   "GitHub %s imports into local storage and updates source evidence without assessing it",

@@ -27,12 +27,13 @@ For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
 separate source key. The default API origin is `https://api.snyk.io`. Use
 `--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
 Before sending `SNYK_TOKEN`, the collector checks the selected region against
-the first nonempty endpoint in [Snyk's REST configuration order](https://github.com/snyk/cli/blob/5f54805f14097c22cb13f11e064247c3c522dcda/src/lib/config/index.ts#L45-L60).
+the first enabled endpoint in [Snyk's REST configuration order](https://github.com/snyk/cli/blob/5f54805f14097c22cb13f11e064247c3c522dcda/src/lib/config/index.ts#L45-L60).
 From highest to lowest priority, the settings are
 `API_V3_URL`, `SNYK_API_V3_URL`, `API_REST_URL`, `SNYK_API_REST_URL`,
 `SNYK_API`, then `SNYK_CFG_ENDPOINT`. Snyk requires the exact uppercase names
-`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. Both expand
-`${NAME}` references once from the caller's environment. For example,
+`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. A literal
+`false` or `FALSE` disables either override. Other values expand `${NAME}`
+references once from the caller's environment. For example,
 when a REST override points to Europe and the general endpoint points to the US, select
 `--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
 the Snyk CLI configuration file, select it explicitly here as well.

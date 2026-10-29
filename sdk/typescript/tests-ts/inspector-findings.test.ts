@@ -553,6 +553,30 @@ function projectRow(id: string, projectName?: string, providerType?: string) {
   return row;
 }
 
+test.each(["local", "cloud"] as const)(
+  "strict %s replay preserves custom-host path casing across native claims and rows",
+  (target) => {
+    const source = "https://scm.example.test/Team/Project";
+    const rows = (id: string, name: string, mapping = source) =>
+      normalize([projectRow(id, name, "GITHUB")], mapping, target).findings;
+    const replay = (findings: ReturnType<typeof rows>) =>
+      inspectorReportRepository("inspector", findings, target, undefined, true);
+    const matching = rows("a", source);
+    expect(replay(matching)?.url).toBe(source);
+    const conflicting = rows("b", source.toLowerCase());
+    expect(
+      inspectorReportRepository("inspector", conflicting, target)?.url,
+    ).toBe(source);
+    expect(() => replay(conflicting)).toThrow("native repository");
+    expect(() =>
+      replay([
+        ...matching,
+        ...rows("b", source.toLowerCase(), source.toLowerCase()),
+      ]),
+    ).toThrow("more than one source");
+  },
+);
+
 test.each([
   ["project slug without a host", "example/project", "GITHUB"],
   ["native URL without a provider", enterprise, undefined],

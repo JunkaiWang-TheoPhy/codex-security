@@ -25,22 +25,21 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
 
 function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
   if (name === "SNYK_API_V3_URL" || name === "SNYK_API_REST_URL") {
-    // snyk-config preserves key case and expands each placeholder once.
+    // snyk-config preserves key case and converts boolean literals before interpolation.
     for (const key in environment) {
       if (key !== name) continue;
-      return environment[key]?.replace(
-        /\$\{(.*?)\}/gu,
-        (_, reference: string) => {
-          const requested =
-            process.platform === "win32" ? reference.toUpperCase() : reference;
-          const value = importEnvironmentSetting(environment, requested)?.value;
-          if (value === undefined)
-            throw new Error(
-              `${name} references missing environment variable ${reference}.`,
-            );
-          return value;
-        },
-      );
+      const raw = environment[key];
+      if (raw === "false" || raw === "FALSE") return undefined;
+      return raw?.replace(/\$\{(.*?)\}/gu, (_, reference: string) => {
+        const requested =
+          process.platform === "win32" ? reference.toUpperCase() : reference;
+        const value = importEnvironmentSetting(environment, requested)?.value;
+        if (value === undefined)
+          throw new Error(
+            `${name} references missing environment variable ${reference}.`,
+          );
+        return value;
+      });
     }
     return undefined;
   }

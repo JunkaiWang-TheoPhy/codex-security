@@ -16,6 +16,8 @@ import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
+import { normalizeGitHubDependabotAlerts } from "../src/github-dependabot-findings.js";
+import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const fixtures: Awaited<ReturnType<typeof localFindingsFixture>>[] = [];
@@ -105,15 +107,35 @@ describe("local normalized scanner findings", () => {
       await expect(prepare(url, url)).rejects.toThrow("does not match");
     },
   );
+  test("a declared source must match the original Dependabot alert before checking Git remotes", async () => {
+    const f = await fixture();
+    const report = normalizeGitHubDependabotAlerts([githubDependabotAlert()]);
+    delete report.findings[0]!.evidence.details;
+    const prepare = (sourceRepositoryUrl: string) =>
+      prepareNormalizedLocalImport(
+        { ...report, sourceRepositoryUrl },
+        { ...source, provider: "github", repository: f.repository },
+        { environment: f.environment },
+      );
+    await expect(prepare("https://github.com/example/foreign")).rejects.toThrow(
+      "does not match the declared report repository",
+    );
+    expect(
+      (await prepare("https://github.com/example/project")).preview.findings,
+    ).toEqual(report.findings);
+  });
   test("normalized Wiz reports check their repository URL alongside finding URLs", async () => {
     const url = "https://git.example.test/owner/selected";
     const other = "https://git.example.test/owner/other";
     const f = await fixture({ remote: url });
-    const prepare = (report: ExternalFindings) =>
+    const prepare = (
+      report: ExternalFindings,
+      sourceRepositories?: { url: string }[],
+    ) =>
       prepareNormalizedLocalImport(
         report,
         { ...source, provider: "wiz", repository: f.repository },
-        { environment: f.environment },
+        { environment: f.environment, sourceRepositories },
       );
     const report = { ...input(), sourceRepositoryUrl: other };
     await expect(prepare(report)).rejects.toThrow(
@@ -128,7 +150,7 @@ describe("local normalized scanner findings", () => {
       repository: { url: other },
     };
     await expect(prepare(report)).rejects.toThrow(
-      "does not match a configured remote",
+      "does not match the declared report repository",
     );
     execFileSync("git", [
       "-C",
@@ -138,7 +160,14 @@ describe("local normalized scanner findings", () => {
       "upstream",
       other,
     ]);
-    expect((await prepare(report)).preview.findings).toEqual(report.findings);
+    await expect(prepare(report)).rejects.toThrow(
+      "does not match the declared report repository",
+    );
+    const { sourceRepositoryUrl, ...unscoped } = report;
+    expect(
+      (await prepare(unscoped, [{ url: sourceRepositoryUrl }])).preview
+        .findings,
+    ).toEqual(report.findings);
   });
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {
     const { root, stateDirectory, environment } = await fixture();

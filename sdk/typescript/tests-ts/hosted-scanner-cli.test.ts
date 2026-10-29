@@ -149,6 +149,8 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
   const region =
     process.platform === "win32" ? "Scanner_Region" : "scanner_region";
   settings[region] = "eu";
+  settings["SNYK_API_V3_URL"] = "false";
+  settings["SNYK_API_REST_URL"] = "FALSE";
   // Set each higher-priority setting without removing the shadowed endpoint.
   for (const [name, endpoint, origin] of [
     ["SNYK_CFG_ENDPOINT", "https://app.eu.snyk.io/api/v1", eu],
@@ -163,7 +165,12 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
     await expect(collect(origin)).rejects.toThrow("requested project");
     expect(requests.splice(0)).toEqual([`${origin} token synthetic`]);
   }
+  settings["API_V3_URL"] = "false";
+  await expect(collect(us)).rejects.toThrow(/^API_V3_URL does not match/u);
   delete settings["API_V3_URL"];
+  settings["SNYK_API_V3_URL"] = "${scanner_region}";
+  settings[region] = "false";
+  await expect(collect(us)).rejects.toThrow("SNYK_API_V3_URL");
   delete settings[region];
   await expect(collect(eu)).rejects.toThrow(
     "missing environment variable scanner_region",

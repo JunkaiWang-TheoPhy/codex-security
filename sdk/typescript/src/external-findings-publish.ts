@@ -38,7 +38,9 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
+import { wizFindingRepository } from "./wiz-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { githubFindingRepository } from "./github-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryClaims } from "./snyk-findings.js";
 import {
@@ -470,6 +472,45 @@ async function preparePublicationInput(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
+  // Hosted rows establish platform from their original project and target, independently of the current destination.
+  const hostedSnyk = new Map<
+    Record<string, unknown>,
+    ReturnType<typeof snykRestFindingRepository>
+  >();
+  if (options.provider === "snyk") {
+    for (const { evidence } of parsed.findings) {
+      const data = evidence.source_data;
+      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+        hostedSnyk.set(data, snykRestFindingRepository(data));
+    }
+  }
+  const semgrepProject =
+    options.provider === "semgrep"
+      ? parsed.findings.find(({ evidence }) =>
+          isSemgrepPlatformReport(evidence.source_data),
+        )?.evidence.source_data
+      : undefined;
+  const declaration =
+    parsed.sourceRepositoryUrl || parsed.sourceRepositoryPlatform === "other";
+  const bound = Boolean(declaration || semgrepProject || hostedSnyk.size);
+  const strictPath =
+    parsed.sourceRepositoryPlatform === "other" ||
+    [...hostedSnyk.values()].some(({ platform }) => platform === "other");
+  const reportKey = bound
+    ? (url: string) => hostedRepositoryUrlKey(url, !strictPath)
+    : cloudRepositoryUrlKey;
+  const reportSource =
+    parsed.sourceRepositoryUrl ||
+    hostedSnyk.values().next().value?.url ||
+    (semgrepProject &&
+      semgrepPlatformFindingRepository(semgrepProject, () => !strictPath));
+  // A report's own claims must agree even if its approved repository was renamed.
+  if (reportSource)
+    checkRepositories(
+      parsed.findings,
+      reportSource,
+      "source report repository",
+    );
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
   requireExternalImports(environment);
@@ -516,33 +557,6 @@ async function preparePublicationInput(
     }
     return response.json();
   }
-  // Hosted rows establish platform from their original project and target, independently of the current destination.
-  const hostedSnyk = new Map<
-    string,
-    ReturnType<typeof snykRestFindingRepository>
-  >();
-  if (options.provider === "snyk") {
-    for (const { source_finding_id, evidence } of parsed.findings) {
-      const data = evidence.source_data;
-      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
-        hostedSnyk.set(source_finding_id, snykRestFindingRepository(data));
-    }
-  }
-  const hostedSemgrep =
-    options.provider === "semgrep" &&
-    (parsed.sourceRepositoryUrl ||
-      parsed.findings.some(({ evidence }) =>
-        isSemgrepPlatformReport(evidence.source_data),
-      ));
-  const hostedReport =
-    hostedSemgrep ||
-    (options.provider === "snyk" &&
-      (hostedSnyk.size > 0 ||
-        parsed.sourceRepositoryUrl ||
-        parsed.sourceRepositoryPlatform));
-  const catalogKey = hostedReport
-    ? (url: string) => hostedRepositoryUrlKey(url, true)
-    : cloudRepositoryUrlKey;
   const destinations: ImportRepository[] = [];
   let page: string | null = null;
   const seenPages = new Set<string>();
@@ -556,7 +570,7 @@ async function preparePublicationInput(
       ...result.data.filter(
         (item) =>
           item.id === options.repository ||
-          catalogKey(item.url) === catalogKey(options.repository),
+          reportKey(item.url) === reportKey(options.repository),
       ),
     );
     page = result.next;
@@ -591,24 +605,39 @@ async function preparePublicationInput(
     source,
   ];
   // Keep the lookup key stable so a changed declaration cannot stage a second request.
-  const strictSnyk =
-    options.provider === "snyk" &&
-    (parsed.sourceRepositoryPlatform === "other" ||
-      [...hostedSnyk.values()].some(({ platform }) => platform === "other"));
-  const reportKey = strictSnyk ? repositoryUrlKey : cloudRepositoryUrlKey;
-  const previousUrl =
-    parsed.sourceRepositoryUrl && reportKey(parsed.sourceRepositoryUrl);
-  const reportUrl =
-    hostedReport && parsed.sourceRepositoryUrl
-      ? hostedRepositoryUrlKey(parsed.sourceRepositoryUrl, !strictSnyk)
-      : previousUrl;
-  const digest = (identity: unknown, url = reportUrl) => {
-    const binding = strictSnyk ? ["other", url ?? null] : url;
+  const url = parsed.sourceRepositoryUrl;
+  const reportUrl = url && reportKey(url);
+  const digest = (
+    identity: unknown,
+    sourceUrl = reportUrl,
+    strict = strictPath,
+  ) => {
+    const binding = strict ? ["other", sourceUrl ?? null] : sourceUrl;
     return hash(
       "sha256",
       canonicalJson(binding ? [identity, binding] : identity),
     );
   };
+  // Older receipts used raw escape spellings, then hosted keys with literal Unicode.
+  // Only Snyk used the strict marker before it applied to every declared report.
+  const previousStrict = options.provider === "snyk" && strictPath;
+  function previousDigestMatches(stored: string, identity: unknown) {
+    const raw =
+      url && (previousStrict ? repositoryUrlKey : cloudRepositoryUrlKey)(url);
+    const previousHosted =
+      options.provider === "snyk" || options.provider === "semgrep";
+    const keys = new Set([
+      raw,
+      previousHosted && url
+        ? hostedRepositoryUrlKey(url, !previousStrict, false)
+        : raw,
+    ]);
+    return [...keys].some(
+      (key) =>
+        (previousStrict !== strictPath || key !== reportUrl) &&
+        digest(identity, key, previousStrict) === stored,
+    );
+  }
   const inputDigest = digest(currentIdentity);
   const legacyInputDigest = digest(legacyIdentity);
   function validateSaved(
@@ -627,23 +656,22 @@ async function preparePublicationInput(
     const savedFindings = submissionFindings(content.requests);
     const savedEvidence = canonicalJson(savedFindings);
     const expected = legacy ? legacyParsed.findings : parsed.findings;
+    const projectionDigest = content.inputProjection?.inputDigest;
+    const currentBinding =
+      projectionDigest === (legacy ? legacyInputDigest : inputDigest);
     const matches =
       content.inputProjection !== undefined
         ? sameFindingSelection(savedFindings, expected) &&
-          (content.inputProjection.inputDigest ===
-            (legacy ? legacyInputDigest : inputDigest) ||
-            // Older checkpoints hashed the selected URL's original escape spelling.
-            (previousUrl !== reportUrl &&
-              content.inputProjection.inputDigest ===
-                digest(
-                  legacy ? legacyIdentity : currentIdentity,
-                  previousUrl,
-                ))) &&
-          content.inputProjection?.savedEvidenceDigest ===
+          (currentBinding ||
+            previousDigestMatches(
+              content.inputProjection.inputDigest,
+              legacy ? legacyIdentity : currentIdentity,
+            )) &&
+          content.inputProjection.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
         : savedEvidence === canonicalJson(expected) &&
           // Unknown legacy filenames must still block a duplicate. They may never be replayed here.
-          ((!strictSnyk && !reportUrl) || projection === "unidentified");
+          ((!strictPath && !reportUrl) || projection === "unidentified");
     if (!matches)
       throw new Error(
         "Saved import evidence does not match the selected input.",
@@ -656,6 +684,22 @@ async function preparePublicationInput(
         canonicalJson(submission.source) !== canonicalJson(source)
       )
         throw new Error("Saved import destination does not match.");
+    }
+    if (projection !== "unidentified") {
+      if (reportSource)
+        checkRepositories(
+          savedFindings,
+          reportSource,
+          "source report repository",
+        );
+      if (!currentBinding && strictPath && !previousStrict) {
+        // The previous digest did not verify the case-sensitive destination.
+        if (reportSource) requireRepository(reportSource, destination.url);
+        else {
+          checkRepositories(parsed.findings, destination.url);
+          checkRepositories(savedFindings, destination.url);
+        }
+      }
     }
     return content;
   }
@@ -809,42 +853,49 @@ async function preparePublicationInput(
       "Supply the verified Inspector project binding again to resume.",
     );
 
-  function checkRepositories(findings: ExternalFindings["findings"]) {
-    // Validated non-Inspector checkpoints retain their original provider and repository ID.
-    if (saved && options.provider !== "inspector") return;
+  function requireRepository(
+    url: string | null | undefined,
+    targetUrl: string,
+    id?: string,
+    gitAlias = false,
+    description = "selected Cloud repository",
+  ) {
+    const key =
+      gitAlias && !bound
+        ? (value: string) => hostedRepositoryUrlKey(value, true)
+        : reportKey;
+    if (url && key(url) !== key(targetUrl)) {
+      const label =
+        id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
+      throw new CodexSecurityError(
+        `${label} belongs to ${JSON.stringify(url)}, which does not match the ${description} ${JSON.stringify(targetUrl)}. Verify the source repository mapping before publishing.`,
+      );
+    }
+  }
+
+  function checkRepositories(
+    findings: ExternalFindings["findings"],
+    targetUrl: string,
+    description = "selected Cloud repository",
+  ) {
     const binding = inspectorReportRepository(
       options.provider,
       findings,
       "cloud",
       inspectorProjectMap,
+      strictPath,
     );
-    function requireDestination(
-      url: string | null | undefined,
-      id?: string,
-      gitAlias = false,
-    ) {
-      const key =
-        hostedReport || gitAlias
-          ? (value: string) => hostedRepositoryUrlKey(value, !strictSnyk)
-          : reportKey;
-      if (url && key(url) !== key(destination.url)) {
-        const label =
-          id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
-        throw new CodexSecurityError(
-          `${label} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-        );
-      }
-    }
-    if (!saved) requireDestination(parsed.sourceRepositoryUrl);
-    if (binding) requireDestination(binding.url, binding.findingId);
-    for (const [id, source] of hostedSnyk) requireDestination(source.url, id);
+    const check = (url: string | null | undefined, id: string, alias = false) =>
+      requireRepository(url, targetUrl, id, alias, description);
+    if (binding) check(binding.url, binding.findingId);
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const data = evidence.source_data;
-      if (options.provider === "snyk" && !hostedSnyk.has(id)) {
-        for (const { url } of snykRepositoryClaims(data)) {
-          const alias = normalizeGitRepositoryUrl(url, destination.url);
-          requireDestination(alias, id, alias !== url);
+      if (options.provider === "snyk") {
+        const native = data && hostedSnyk.get(data);
+        for (const { url } of native ? [native] : snykRepositoryClaims(data)) {
+          const alias = normalizeGitRepositoryUrl(url, targetUrl);
+          check(alias, id, alias !== url);
         }
       }
       const urls = [
@@ -852,26 +903,39 @@ async function preparePublicationInput(
         options.provider === "semgrep"
           ? semgrepPlatformFindingRepository(
               data,
-              (url) => catalogKey(url) === catalogKey(destination.url),
+              (url) => !strictPath && reportKey(url) === reportKey(targetUrl),
             )
           : undefined,
-        ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
-        ...(hostedSemgrep && !isSemgrepPlatformReport(data)
+        options.provider === "wiz"
+          ? declaration
+            ? wizFindingRepository(finding)?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
+        ...(options.provider === "semgrep" &&
+        bound &&
+        !isSemgrepPlatformReport(data)
           ? semgrepSarifSourceRepositories(data).map(({ url }) => url)
           : []),
         ...(options.provider === "endor"
           ? endorRepositoryUrls(evidence.source_data)
           : []),
+        options.provider === "github" && declaration
+          ? githubFindingRepository(finding, "cloud")
+          : undefined,
         options.provider === "github"
           ? dependabotRepository(finding)
           : undefined,
       ];
-      for (const url of urls) requireDestination(url, id);
+      for (const url of urls) check(url, id);
     }
   }
-  checkRepositories(parsed.findings);
-  // A retry sends its saved projection, which may differ from today's reader.
-  if (saved) checkRepositories(submissionFindings(saved.requests));
+  if (!saved) {
+    if (reportSource) requireRepository(reportSource, destination.url);
+    else checkRepositories(parsed.findings, destination.url);
+  } else if (options.provider === "inspector") {
+    checkRepositories(parsed.findings, destination.url);
+    checkRepositories(submissionFindings(saved.requests), destination.url);
+  }
 
   let requests = saved?.requests;
   if (!requests) {

@@ -264,6 +264,29 @@ function advisoryFinding(
   };
 }
 
+function githubFinding(
+  record: Record<string, unknown>,
+  target: ExternalImportTarget,
+) {
+  if (record["source"] === "github-code-scanning")
+    return codeScanningFinding(record, target);
+  if (record["source"] === "github-security-advisory")
+    return advisoryFinding(record, target);
+}
+
+/** Repository bound by an original scanner or advisory export, including when typed details are omitted. */
+export function githubFindingRepository(
+  { evidence }: ExternalFinding,
+  target: ExternalImportTarget,
+): string | undefined {
+  const data = evidence.source_data;
+  if (data)
+    return (
+      githubFinding(data, target)?.evidence.details?.repository?.url ??
+      undefined
+    );
+}
+
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
@@ -278,12 +301,8 @@ function normalizeRecords(
     const record = object(value);
     try {
       if (!record) throw new Error("GitHub finding must be an object.");
-      let finding: ExternalFinding;
-      if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record, target);
-      else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record, target);
-      else
+      const finding = githubFinding(record, target);
+      if (!finding)
         throw new Error(
           "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
         );

@@ -18,7 +18,7 @@ export interface ExternalFindings {
   read: number;
   /** Source repository for this report, including empty hosted collections. */
   sourceRepositoryUrl?: string;
-  /** Platform established by a hosted project's verified native target. */
+  /** A verified hosted platform, or "other" to require exact path casing on custom hosts. */
   sourceRepositoryPlatform?: "github" | "other";
   /** Reader-retained run metadata, including diagnostics for empty reports. */
   report?: Record<string, unknown>;

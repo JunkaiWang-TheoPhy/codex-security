@@ -594,26 +594,34 @@ test.each([
   },
 );
 
-test("Snyk compares encoded repository bytes without folding Azure project names", () => {
-  const url = "https://dev.azure.com/example/Jalape%c3%b1o/_git/project";
-  const remote = url.replace("%c3%b1", "%C3%B1");
-  const report = {
-    ...envelope(),
-    sourceRepositoryUrl: url,
-    project: project({ origin: "azure-repos", remote }),
-  };
-  const saved = normalizeSnykIssues(report);
-  expect(saved.sourceRepositoryUrl).toBe(url);
-  expect(saved.findings[0]!.evidence.source_data).toMatchObject({
-    project: report.project,
-  });
-  expect(() =>
-    normalizeSnykIssues({
-      ...report,
-      sourceRepositoryUrl: url.replace("J", "j"),
-    }),
-  ).toThrow("target URL");
-});
+test.each([
+  ["Jalape%c3%b1o", "Jalape%C3%B1o"],
+  ["Jalapeño", "Jalape%C3%B1o"],
+  ["Jalape%c3%b1o", "Jalapeño"],
+])(
+  "Snyk compares Azure project names %s and %s by their HTTP spelling",
+  (declared, native) => {
+    const repository = (name: string) =>
+      `https://dev.azure.com/example/${name}/_git/project`;
+    const report = {
+      ...envelope(),
+      sourceRepositoryUrl: repository(declared),
+      project: project({ origin: "azure-repos", remote: repository(native) }),
+    };
+    const saved = normalizeSnykIssues(report);
+    expect(saved.sourceRepositoryUrl).toBe(report.sourceRepositoryUrl);
+    expect(saved.findings[0]!.evidence.source_data).toMatchObject({
+      project: report.project,
+    });
+    for (const name of ["jalapeño", "Jalapen\u0303o"])
+      expect(() =>
+        normalizeSnykIssues({
+          ...report,
+          sourceRepositoryUrl: repository(name),
+        }),
+      ).toThrow("target URL");
+  },
+);
 
 test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
   const source = "https://scm.example.test/Org/project";
@@ -891,12 +899,9 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ],
     ["ssh.github.com:443/Example/repository.git", github],
     ["ssh.github.com:443/example/%72epository", github],
-    [
-      "ssh.github.com:443/example%2Frepository.git",
-      "github.com/example%2Frepository",
-    ],
-    ["altssh.gitlab.com:443/Group/repo.git", "gitlab.com/Group/repo"],
-    ["altssh.bitbucket.org:443/Group/repo.git", "bitbucket.org/Group/repo"],
+    ["ssh.github.com:443/example%2Frepository.git", github],
+    ["altssh.gitlab.com:443/Group%2Frepo.git", "gitlab.com/Group/repo"],
+    ["altssh.bitbucket.org:443/Group%2Frepo.git", "bitbucket.org/Group/repo"],
     ["gitlab.com:8443/Group/repo.git", "gitlab.com:8443/Group/repo"],
     ["gitlab.com/Team/project.git", "gitlab.com/Team/project"],
     ["bitbucket.org/Team/project", "bitbucket.org/Team/project"],
@@ -929,6 +934,11 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["git.example.test/group/project", "git.example.test/group/project"],
     ["github.com/example%2Frepository", github],
     ["github.com:22/example%2Frepository", github],
+    [
+      "ssh.github.com:443/example%2Frepository",
+      "github.com/example%2Frepository",
+    ],
+    ["ssh.github.com:443/example%252Frepository", github],
     ["github.com/example%252Frepository", "github.com/example%2Frepository"],
   ] as const) {
     const { collect, requests } = transport(
