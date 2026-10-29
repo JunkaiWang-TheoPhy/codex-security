@@ -515,6 +515,35 @@ test.each([
   },
 );
 
+test("checks scanner repository links independently of Git checkout URLs", async () => {
+  const canonical = "https://scm.example.test/Team/repo";
+  const ambiguous = "https://scm.example.test/Team/%2e%2e/../repo";
+  await using checkout = await platformCheckout(canonical);
+  const empty = { read: 0, findings: [], excluded: [] };
+  const projected = normalizeSemgrepFindings(semgrepJson(), {
+    sourceRepositoryUrl: ambiguous,
+  });
+  for (const report of [
+    { ...empty, sourceRepositoryUrl: ambiguous },
+    { ...projected, sourceRepositoryPlatform: "other" as const },
+  ])
+    await expect(
+      prepareNormalizedLocalImport(
+        report,
+        checkout.options,
+        checkout.dependencies,
+      ),
+    ).rejects.toThrow(/repository/i);
+
+  await using transport = await platformCheckout(ambiguous);
+  const prepared = await prepareNormalizedLocalImport(
+    { ...empty, sourceRepositoryUrl: canonical },
+    transport.options,
+    transport.dependencies,
+  );
+  expect(prepared.preview.findings).toEqual([]);
+});
+
 const gitlabUrl = "https://gitlab.com/Group/My-Repo";
 test.each([
   ["{1}", "%7B1%7D"],

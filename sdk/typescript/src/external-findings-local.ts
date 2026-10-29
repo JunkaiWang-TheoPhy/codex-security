@@ -3,7 +3,6 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
 import { snykRepositoryScope } from "./snyk-findings.js";
 import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
 import {
@@ -13,7 +12,7 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import {
   hostedRepositoryUrl,
-  validateHostedRepositoryBytes,
+  validateHostedRepositoryUrl,
 } from "./hosted-scanner-http.js";
 import {
   forwardExternalImportSetting,
@@ -441,7 +440,7 @@ function hostedRepositoryMatches(
   expectedKey?: string,
   gitlab = source.gitlab,
 ): boolean {
-  validateHostedRepositoryBytes(value);
+  validateHostedRepositoryUrl(value);
   if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
   const github = source.platform === "github";
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
@@ -857,7 +856,7 @@ export async function prepareLocalImport(
   const snykProject = snyk?.project;
   for (const url of [snykProject?.url, snykProject?.nativeUrl])
     if (url) sources.set(url, { url });
-  let hostedUrl = reportUrl ?? snykProject?.url;
+  let hostedUrl = reportUrl ?? snyk?.sourceUrl;
   const reportPlatform = current.sourceRepositoryPlatform;
   const singleProject = Boolean(
     hostedUrl ||
@@ -887,9 +886,7 @@ export async function prepareLocalImport(
         sources.set(source.url, { url: source.url });
         if (source.nativeUrl)
           sources.set(source.nativeUrl, { url: source.nativeUrl });
-        if (data?.["format"] === SNYK_REST_ISSUES_FORMAT) {
-          hostedUrl ??= source.url;
-        } else if (
+        if (
           !hostedUrl &&
           reportPlatform === "other" &&
           isGitSshRemote(source.url)
@@ -974,7 +971,7 @@ export async function prepareLocalImport(
     hosted = {
       url,
       platform: github ? "github" : undefined,
-      gitlab: snyk?.allowsSuffix(),
+      gitlab: snyk?.destinationSuffix,
     };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())

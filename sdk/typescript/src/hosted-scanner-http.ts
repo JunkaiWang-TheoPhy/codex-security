@@ -1,5 +1,5 @@
 import { CodexSecurityError } from "./errors.js";
-import { hostedRepositoryUrlKey } from "./external-import-contract.js";
+import { ambiguousHostedHttpPath } from "./external-import-contract.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
@@ -14,8 +14,7 @@ export interface HostedScannerHttpOptions {
   signal?: AbortSignal;
 }
 
-/** libcurl requires ASCII space and control bytes in HTTP URLs to be percent-encoded. */
-export function validateHostedRepositoryBytes(value: string): void {
+export function validateHostedRepositoryUrl(value: string): void {
   if (
     /[\x00-\x20\x7f]/u.test(value) &&
     (/^https?:\/\//iu.test(value) ||
@@ -24,11 +23,15 @@ export function validateHostedRepositoryBytes(value: string): void {
     throw new CodexSecurityError(
       "HTTP(S) repository URLs must percent-encode spaces and control characters.",
     );
+  if (ambiguousHostedHttpPath(value))
+    throw new CodexSecurityError(
+      "The repository URL has an HTTP path that does not match its Git path.",
+    );
 }
 
 export function hostedRepositoryUrl(value: unknown, label: string): string {
   const raw = requiredText(value, label);
-  validateHostedRepositoryBytes(raw);
+  validateHostedRepositoryUrl(raw);
   const url = URL.parse(raw);
   if (
     !url ||
@@ -39,21 +42,6 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
       "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
     );
   return raw;
-}
-
-/** Native scanner URLs must identify the same repository both as Git remotes and as web links. */
-export function sameHostedScannerRepository(
-  url: string,
-  expected: string,
-  github = false,
-  knownGitSuffix = false,
-): boolean {
-  const key = (value: string) =>
-    hostedRepositoryUrlKey(value, github, knownGitSuffix);
-  return (
-    key(url) === key(expected) &&
-    key(new URL(url).href) === key(new URL(expected).href)
-  );
 }
 
 function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {

@@ -1018,10 +1018,8 @@ test("compares Snyk native HTTP repository URLs without changing their scheme", 
 test("checks native Snyk HTTP paths before removing dot segments", async () => {
   const source = "https://scm.example.test/Team/repo";
   for (const path of [String.raw`foreign\sub/../repo`, "%2e%2e/../repo"]) {
-    const native = project({
-      origin: "gitlab",
-      remote: "https://scm.example.test/Team/" + path,
-    });
+    const remote = "https://scm.example.test/Team/" + path;
+    const native = project({ origin: "gitlab", remote });
     const { requests, collect } = transport(
       document(native),
       document([issue()]),
@@ -1030,24 +1028,29 @@ test("checks native Snyk HTTP paths before removing dot segments", async () => {
       collect({ ...options, sourceRepositoryUrl: source }),
     ).rejects.toThrow("repository URL");
     expect(requests).toHaveLength(1);
-    expect(() =>
-      normalizeSnykIssues({
-        ...envelope(),
-        project: native,
-        sourceRepositoryUrl: source,
-      }),
-    ).toThrow("repository URL");
+    for (const sourceRepositoryUrl of [source, remote])
+      expect(() =>
+        normalizeSnykIssues({
+          ...envelope(),
+          project: native,
+          sourceRepositoryUrl,
+        }),
+      ).toThrow("repository URL");
   }
-  const native = project({
-    origin: "gitlab",
-    remote: "https://scm.example.test/Team/foreign%5Csub/../repo",
-  });
-  const report = normalizeSnykIssues({
-    ...envelope(),
-    project: native,
-    sourceRepositoryUrl: source,
-  });
-  expect(report.findings[0]!.evidence.source_data?.["project"]).toEqual(native);
+  for (const path of ["Team/foreign%5Csub/../repo", "%2e/../Team/repo"]) {
+    const native = project({
+      origin: "gitlab",
+      remote: "https://scm.example.test/" + path,
+    });
+    const report = normalizeSnykIssues({
+      ...envelope(),
+      project: native,
+      sourceRepositoryUrl: source,
+    });
+    expect(report.findings[0]!.evidence.source_data?.["project"]).toEqual(
+      native,
+    );
+  }
 });
 
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {
@@ -1395,6 +1398,19 @@ test("typed and opaque siblings preserve a verified GitLab project's own clone a
   await expect(alternate.prepareNormalized(mixed(sibling))).rejects.toThrow(
     "does not match",
   );
+  const second = normalizeSnykIssues({
+    ...envelope([issue({ key: "second" })]),
+    sourceRepositoryUrl: clone,
+    project: project({ origin: "gitlab", remote: url }),
+  });
+  const rows = [...hosted.findings, sibling, ...second.findings];
+  for (const findings of [rows, rows.toReversed()]) {
+    const projected = { read: 3, excluded: [], findings };
+    for (const checkout of [selected, alternate])
+      expect(
+        (await checkout.prepareNormalized(projected)).preview.findings,
+      ).toHaveLength(3);
+  }
 });
 
 test("mixing Snyk project origins keeps case-sensitive native repository claims", async () => {
@@ -1406,6 +1422,21 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
       sourceRepositoryUrl: source,
       project: project({ origin, remote }),
     }).findings[0]!;
+  const literal = row("api", url);
+  const clone = row("gitlab", url + ".git", url);
+  await using wrong = await snykCheckout(url + ".git");
+  for (const findings of [
+    [clone, literal],
+    [literal, clone],
+  ]) {
+    const input = { read: 2, findings, excluded: [] };
+    expect(
+      (await fixture.prepareNormalized(input)).preview.findings,
+    ).toHaveLength(2);
+    await expect(wrong.prepareNormalized(input)).rejects.toThrow(
+      "does not match",
+    );
+  }
   const github = row("github-enterprise", url);
   const gitlab = row("gitlab", url.toLowerCase());
   const nativeCase = row("github-enterprise", url, url.toLowerCase());

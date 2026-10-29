@@ -238,9 +238,10 @@ test("checks the web and Git destinations of native Semgrep repository URLs", as
   const foreign = "https://scm.example.test/Team/%2e%2e/../repo";
   const project = { ...platformProject, url: source };
   const finding = { ...platformFinding(12), repository: { url: foreign } };
-  await expect(
-    collectProject({ ...project, url: foreign }, [], source),
-  ).rejects.toThrow("does not match");
+  for (const sourceRepositoryUrl of [source, foreign])
+    await expect(
+      collectProject({ ...project, url: foreign }, [], sourceRepositoryUrl),
+    ).rejects.toThrow("does not match");
   await expect(collectProject(project, [finding])).rejects.toThrow(
     "does not match",
   );

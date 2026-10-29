@@ -1,5 +1,6 @@
-import { validateHostedRepositoryBytes } from "./hosted-scanner-http.js";
+import { validateHostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { CodexSecurityError } from "./errors.js";
+import { isRecord } from "./record.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import type {
   ExternalFindingEvidence,
@@ -95,7 +96,7 @@ export function snapshotExternalFindings(
       "Normalized report repository declarations require the Snyk or Semgrep provider.",
     );
   if (typeof sourceRepositoryUrl === "string")
-    validateHostedRepositoryBytes(sourceRepositoryUrl);
+    validateHostedRepositoryUrl(sourceRepositoryUrl);
   const current: HostedExternalFindings = structuredClone({
     ...rest,
     read,
@@ -108,6 +109,9 @@ export function snapshotExternalFindings(
   });
   // Report metadata may alias evidence that receives Cloud defaults.
   if (report !== undefined) current.report = structuredClone(report);
+  const context = current.report?.["snyk_rest_context"];
+  if (isRecord(context) && context["format"] === HOSTED_FINDINGS_FORMATS.snyk)
+    checkHostedFindingProvider(provider, context);
   return current;
 }
 

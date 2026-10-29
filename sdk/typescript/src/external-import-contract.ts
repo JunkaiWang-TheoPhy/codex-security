@@ -99,6 +99,18 @@ function hostedHttpPath(path: string): string {
   return segments.join("/");
 }
 
+/** HTTP links resolve backslashes and encoded dot segments before selecting a path. */
+export function ambiguousHostedHttpPath(value: string): boolean {
+  const path = /^https?:\/\/[^/?#]+\/([^?#]*)/iu.exec(value)?.[1];
+  if (!path) return false;
+  const web = path
+    .replaceAll("\\", "/")
+    .replace(/(?:^|\/)(?:\.|%2e){1,2}(?=\/|$)/giu, (segment) =>
+      segment.replace(/%2e/giu, "."),
+    );
+  return path !== web && hostedHttpPath(path) !== hostedHttpPath(web);
+}
+
 /** Compare hosted HTTP repository spellings without changing the retained evidence. */
 export function hostedRepositoryUrlKey(
   value: string,

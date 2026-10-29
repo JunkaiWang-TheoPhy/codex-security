@@ -26,7 +26,7 @@ import {
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
-import { validateHostedRepositoryBytes } from "./hosted-scanner-http.js";
+import { validateHostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
@@ -488,7 +488,7 @@ async function preparePublicationInput(
     semgrepProject ||
     snyk?.projects.length,
   );
-  if (bound) validateHostedRepositoryBytes(options.repository);
+  if (bound) validateHostedRepositoryUrl(options.repository);
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
     snyk?.projects.some(({ platform }) => platform === "other");
@@ -501,7 +501,7 @@ async function preparePublicationInput(
     : catalogKey;
   const reportSource =
     parsed.sourceRepositoryUrl ||
-    snyk?.projects[0]?.url ||
+    snyk?.sourceUrl ||
     (semgrepProject &&
       semgrepPlatformFindingRepository(semgrepProject, () => !strictPath)) ||
     (bound &&
@@ -593,6 +593,7 @@ async function preparePublicationInput(
         : "The destination repository is not available to this Cloud account. Copy its repository URL or ID from Codex Security Cloud and check that you are signed into the intended account.",
     );
   const destination = destinations[0]!;
+  if (bound) validateHostedRepositoryUrl(destination.url);
   const source = { provider: options.provider, source_key: options.sourceKey };
   const state = join(
     codexSecurityStateDirectory(environment),
@@ -616,6 +617,11 @@ async function preparePublicationInput(
     hash("sha256", canonicalJson(binding ? [identity, binding] : identity));
   const inputDigest = digest(currentIdentity);
   const legacyInputDigest = digest(legacyIdentity);
+  function wasReset(content: SavedSubmission): boolean {
+    return content.requests.some(
+      ({ repository }) => repository.reset_marker !== destination.reset_marker,
+    );
+  }
   function validateSaved(
     serialized: string,
     projection: "current" | "legacy" | "unidentified" = "current",
@@ -676,7 +682,7 @@ async function preparePublicationInput(
           reportSource,
           "source report repository",
         );
-      if (unbound) {
+      if (unbound && !wasReset(content)) {
         // Older writers checked typed URLs but folded literal Unicode (including K to k).
         // Raw hosted metadata, non-ASCII witnesses, and strict paths need a live catalog match.
         const provenSource =
@@ -786,12 +792,7 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
             );
-          if (
-            content.requests.some(
-              (submission) =>
-                submission.repository.reset_marker !== destination.reset_marker,
-            )
-          ) {
+          if (wasReset(content)) {
             if (serialized !== undefined) await rm(legacyPath);
             throw new CloudImportError(
               409,
@@ -824,26 +825,21 @@ async function preparePublicationInput(
   const saved =
     serialized === undefined ? recovered : validateSaved(serialized);
   if (!saved) await rejectUnidentifiedLegacyCheckpoint();
-  if (saved) {
-    const content = saved;
-    for (const submission of content.requests) {
-      if (submission.repository.reset_marker !== destination.reset_marker) {
-        // The old request is never sent after reset. A subsequent explicit
-        // invocation prepares a fresh submission and asks for approval again.
-        await withImportLock(state, key, dependencies.signal, async () => {
-          const current = await readOptionalFile(pendingPath);
-          if (
-            current !== undefined &&
-            sameSubmission(JSON.parse(current) as SavedSubmission, content)
-          )
-            await rm(pendingPath);
-        });
-        throw new CloudImportError(
-          409,
-          "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
-        );
-      }
-    }
+  if (saved && wasReset(saved)) {
+    // The old request is never sent after reset. A subsequent explicit
+    // invocation prepares a fresh submission and asks for approval again.
+    await withImportLock(state, key, dependencies.signal, async () => {
+      const current = await readOptionalFile(pendingPath);
+      if (
+        current !== undefined &&
+        sameSubmission(JSON.parse(current) as SavedSubmission, saved)
+      )
+        await rm(pendingPath);
+    });
+    throw new CloudImportError(
+      409,
+      "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
+    );
   }
   if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
     throw new CodexSecurityError(
@@ -858,14 +854,13 @@ async function preparePublicationInput(
     description = "selected Cloud repository",
     claim = false,
   ) {
-    if (bound && url) validateHostedRepositoryBytes(url);
-    const key =
-      gitAlias && !bound
+    if (bound && url) validateHostedRepositoryUrl(url);
+    const suffix = claim ? snyk?.allowsSuffix(url) : snyk?.destinationSuffix;
+    const key = strictPath
+      ? (value: string) => hostedRepositoryUrlKey(value, false, suffix)
+      : gitAlias && !bound
         ? (value: string) => hostedRepositoryUrlKey(value, true)
-        : claim && strictPath
-          ? (value: string) =>
-              hostedRepositoryUrlKey(value, false, snyk?.allowsSuffix(url))
-          : reportKey;
+        : catalogKey;
     if (url && key(url) !== key(targetUrl)) {
       const label =
         id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;

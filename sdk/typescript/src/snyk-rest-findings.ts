@@ -1,4 +1,5 @@
 import {
+  hostedRepositoryUrlKey,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -14,8 +15,7 @@ import {
   hostedScannerHttp,
   hostedEnvironmentToken,
   hostedRepositoryUrl,
-  sameHostedScannerRepository,
-  validateHostedRepositoryBytes,
+  validateHostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
@@ -208,7 +208,7 @@ function checkOrganization(
 function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
-  validateHostedRepositoryBytes(url);
+  validateHostedRepositoryUrl(url);
   // Snyk monitor can render a local path and a Git server as the same HTTP target.
   if (
     origin === "cli" &&
@@ -228,14 +228,11 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
   const gitlab = origin === "gitlab";
+  const key = (value: string) =>
+    hostedRepositoryUrlKey(value, enterprise, gitlab);
   if (
     /[?#]/u.test(url) ||
-    !sameHostedScannerRepository(
-      normalized,
-      selected.sourceRepositoryUrl,
-      enterprise,
-      gitlab,
-    )
+    key(normalized) !== key(selected.sourceRepositoryUrl)
   )
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",

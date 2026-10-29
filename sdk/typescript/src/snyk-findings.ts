@@ -1,5 +1,8 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  hostedRepositoryUrlKey,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type {
   ExternalFindings,
   HostedExternalFindings,
@@ -219,12 +222,27 @@ export function snykRepositoryScope(input: HostedExternalFindings) {
     }
   }
   const gitlab = projects.some((source) => source.gitlab);
+  // A literal project admits only its selected spelling, while a verified GitLab
+  // project can also match the same repository with the optional clone suffix.
+  const sourceUrl = (projects.find((source) => !source.gitlab) ?? projects[0])
+    ?.url;
+  // With no header, an unbound sibling can use either spelling if both were
+  // explicitly selected by GitLab projects that match the same repository.
+  const destinationSuffix =
+    gitlab &&
+    !literalUrls.size &&
+    (!unbound ||
+      (!input.sourceRepositoryUrl &&
+        new Set(projects.map(({ url }) => hostedRepositoryUrlKey(url))).size >
+          1));
   // Unbound siblings keep the destination literal. They do not invalidate a verified
   // project's own clone alias or another finding's independently checkable URL.
   return {
     project,
     projects,
     claims,
+    sourceUrl,
+    destinationSuffix,
     allowsSuffix: (url?: string | null) =>
       gitlab &&
       (url == null

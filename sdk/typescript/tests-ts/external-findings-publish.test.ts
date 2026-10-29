@@ -1448,12 +1448,15 @@ test.each(["cloud", "local"] as const)(
     const cloud = await fixture([], url);
     const local = await localFindingsFixture({ remote: url });
     cleanups.push(local.dispose);
-    const settings = { ...options, provider: "snyk" as const };
     const typed = normalizeSnykIssues(
       snykRestFixture("code", { sourceRepositoryUrl: url }),
     );
     delete typed.findings[0]!.evidence.source_data;
-    const prepare = (sourceRepositoryUrl: string) => {
+    const prepare = (
+      sourceRepositoryUrl: string,
+      provider: "snyk" | "semgrep" | "wiz" = "snyk",
+    ) => {
+      const settings = { ...options, provider };
       const empty = normalizeSnykIssues({
         ...snykRestFixture("open-source", { sourceRepositoryUrl, issues: [] }),
         project: snykRestProject({
@@ -1462,6 +1465,10 @@ test.each(["cloud", "local"] as const)(
         }),
       });
       const input = { ...empty, ...typed };
+      if (provider !== "snyk") {
+        delete input.sourceRepositoryUrl;
+        delete input.sourceRepositoryPlatform;
+      }
       return target === "cloud"
         ? prepareNormalizedExternalPublication(input, settings, cloud.deps)
         : prepareNormalizedLocalImport(
@@ -1472,6 +1479,10 @@ test.each(["cloud", "local"] as const)(
     };
     await expect(prepare(url + "-other")).rejects.toThrow("does not match");
     expect((await prepare(url)).preview.findings).toHaveLength(1);
+    for (const provider of ["wiz", "semgrep"] as const)
+      await expect(prepare(url + "-other", provider)).rejects.toThrow(
+        "requires the snyk provider",
+      );
   },
 );
 
@@ -1618,6 +1629,34 @@ test("a bound retry accepts equivalent HTTP path bytes after a catalog rename", 
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);
   expect(cloud.posts[1]).toBe(cloud.posts[0]);
+});
+
+test("a repository reset retires an unbound Semgrep request after a rename", async () => {
+  const { findings, sourceRepositoryUrl } =
+    normalizeSemgrepPlatformFindings(platformReport());
+  delete findings[0]!.evidence.source_data;
+  delete findings[0]!.evidence.details;
+  const cloud = await fixture([], sourceRepositoryUrl);
+  const prepare = (sourceRepositoryUrl?: string) =>
+    prepareNormalizedExternalPublication(
+      { read: 1, findings, excluded: [], sourceRepositoryUrl },
+      { ...options, provider: "semgrep" },
+      cloud.deps,
+    );
+  const first = await prepare();
+  cloud.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+
+  cloud.state.repositoryUrl += "-renamed";
+  await expect(prepare(sourceRepositoryUrl)).rejects.toThrow("does not match");
+  cloud.state.marker = "generation-2";
+  await expect(prepare(sourceRepositoryUrl)).rejects.toThrow(
+    "retired without uploading",
+  );
+  await expect(prepare(sourceRepositoryUrl)).rejects.toThrow("does not match");
+  const fresh = await prepare(cloud.state.repositoryUrl);
+  expect(fresh.preview.resumed).toBe(false);
+  expect(cloud.posts).toHaveLength(1);
 });
 
 test.each([
@@ -1900,6 +1939,28 @@ test("Semgrep keeps retained row casing bound to the declared platform on Cloud"
   ).rejects.toThrow("repository");
   expect(cloud.posts).toHaveLength(0);
 });
+
+test.each(["report", "row", "selector", "catalog"] as const)(
+  "checks the web destination of a projected Cloud report's %s URL",
+  async (field) => {
+    const source = "https://scm.example.test/Team/repo";
+    const ambiguous = "https://scm.example.test/Team/%2e%2e/../repo";
+    const cloud = await fixture([], field === "catalog" ? ambiguous : source);
+    const input = normalizeSemgrepPlatformFindings(platformReport());
+    input.sourceRepositoryUrl = field === "report" ? ambiguous : source;
+    const evidence = input.findings[0]!.evidence;
+    delete evidence.source_data;
+    evidence.details!.repository!.url = field === "row" ? ambiguous : source;
+    const repository = field === "selector" ? ambiguous : options.repository;
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider: "semgrep", repository },
+        cloud.deps,
+      ),
+    ).rejects.toThrow(/repositor/iu);
+  },
+);
 
 test("hosted Semgrep binds retained SARIF provenance after typed evidence is projected out", async () => {
   const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
