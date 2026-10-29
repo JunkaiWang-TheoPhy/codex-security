@@ -17,6 +17,19 @@ const { recordCodexSecurityWorkerScanDraft } = await importSource(
 );
 after(() => temporaryDirectories.cleanup());
 const base = standardScanDraft("fixture", "one", "worker").findings[0]!;
+const lookup = {
+  ...base,
+  codeEvidence: [
+    {
+      id: "lookup",
+      label: "Lookup",
+      explanation: "Lookup site",
+      path: "fixture.py",
+      startLine: 1,
+      code: "lookup(id)",
+    },
+  ],
+};
 type Report = {
   id: number;
   title: string;
@@ -31,6 +44,20 @@ type PairCheck = {
     attached: { title: string }[];
   }[];
 };
+
+function samePair(pair: number) {
+  return {
+    pair,
+    decision: "same",
+    reason: "One fix",
+    leftEvidence: 0,
+    rightEvidence: 0,
+  };
+}
+
+function approvePairs({ pairs }: PairCheck) {
+  return { reviews: pairs.map(({ id }) => samePair(id)) };
+}
 
 async function scanLoop(
   observations: ScanDraftInput["findings"][],
@@ -191,16 +218,7 @@ test("one scan's distinct rule and anchor survive a cross-scan alias", async () 
     maxDiscoveryRuns: 2,
     stopAfterNoNew: 1,
     comparisons: [[[0, 1]], [[0, 2], [1]]],
-    sameFix: () => ({
-      reviews: [
-        {
-          pair: 0,
-          decision: "same",
-          leftEvidence: 0,
-          rightEvidence: 0,
-        },
-      ],
-    }),
+    sameFix: () => ({ reviews: [samePair(0)] }),
   });
   assert.deepEqual(
     draft.findings.map((f) => f.provenance.sourceFindings?.length),
@@ -552,12 +570,7 @@ test("one code-supported edit merges a disputed pair and keeps the broader repor
       return {
         reviews: pairs
           .filter(({ left, right }) => left === 0 && right === 2)
-          .map(({ id: pair }) => ({
-            pair,
-            decision: "same",
-            leftEvidence: 0,
-            rightEvidence: 0,
-          })),
+          .map(({ id }) => samePair(id)),
       };
     },
   });
@@ -571,19 +584,7 @@ test("one code-supported edit merges a disputed pair and keeps the broader repor
 });
 
 test("missing assignments can merge on cited code, without chaining through a discarded report", async () => {
-  const code = {
-    id: "lookup",
-    label: "Lookup",
-    explanation: "Lookup site",
-    path: "fixture.py",
-    startLine: 1,
-    code: "lookup(id)",
-  };
-  const records = ["A", "B", "C"].map((title) => ({
-    ...base,
-    title,
-    codeEvidence: [code],
-  }));
+  const records = ["A", "B", "C"].map((title) => ({ ...lookup, title }));
   const { draft } = await scanLoop([records], {
     maxDiscoveryRuns: 1,
     stopAfterNoNew: 1,
@@ -598,11 +599,9 @@ test("missing assignments can merge on cited code, without chaining through a di
         ],
       );
       return {
-        reviews: pairs.map(({ id: pair }) => ({
-          pair,
-          decision: "same",
-          leftEvidence: pair === 1 ? 99 : 0,
-          rightEvidence: 0,
+        reviews: pairs.map(({ id }) => ({
+          ...samePair(id),
+          leftEvidence: id === 1 ? 99 : 0,
         })),
       };
     },
@@ -616,19 +615,11 @@ test("missing assignments can merge on cited code, without chaining through a di
 });
 
 test("a surviving path in an attached original vetoes a proposed match", async () => {
-  const code = {
-    id: "lookup",
-    label: "Lookup",
-    explanation: "Lookup site",
-    path: "fixture.py",
-    startLine: 1,
-    code: "lookup(id)",
-  };
   const [read, detail, both] = [
     "Read lacks an owner check",
     "Read leaks an attachment",
     "Read and delete lack owner checks",
-  ].map((title) => ({ ...base, title, codeEvidence: [code] }));
+  ].map((title) => ({ ...lookup, title }));
   let checked = false;
   const { draft } = await scanLoop([[read, detail, both]], {
     maxDiscoveryRuns: 1,
@@ -639,17 +630,7 @@ test("a surviving path in an attached original vetoes a proposed match", async (
         reports.find((r) => r.id === 0)?.attached.map((s) => s.title),
         [detail.title],
       );
-      return {
-        reviews: [
-          {
-            pair: pairs[0].id,
-            decision: "same",
-            reason: "Both use the same lookup.",
-            leftEvidence: 0,
-            rightEvidence: 0,
-          },
-        ],
-      };
+      return { reviews: [samePair(pairs[0].id)] };
     },
     sameSource(a, b) {
       if ([a, b].includes(detail.title)) {
@@ -695,14 +676,7 @@ test("a source listing additional affected handlers stays separate even when the
     maxDiscoveryRuns: 1,
     stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2], [2]]],
-    sameFix: ({ pairs }) => ({
-      reviews: pairs.map(({ id: pair }) => ({
-        pair,
-        decision: "same",
-        leftEvidence: 0,
-        rightEvidence: 0,
-      })),
-    }),
+    sameFix: approvePairs,
   });
   assert.deepEqual(
     draft.findings.map((f) => f.provenance.sourceFindingIds?.length),
@@ -740,14 +714,7 @@ test("fixing login cannot hide a separately cited permissive action policy", asy
     maxDiscoveryRuns: 1,
     stopAfterNoNew: 1,
     comparisons: [[[0, 1], [1]]],
-    sameFix: ({ pairs }) => ({
-      reviews: pairs.map(({ id: pair }) => ({
-        pair,
-        decision: "same",
-        leftEvidence: 0,
-        rightEvidence: 0,
-      })),
-    }),
+    sameFix: approvePairs,
   });
   assert.deepEqual(
     draft.findings.map((f) => f.title),
@@ -756,21 +723,11 @@ test("fixing login cannot hide a separately cited permissive action policy", asy
 });
 
 test("a later source with a surviving path reopens the merge and counts as new", async () => {
-  const codeEvidence = [
-    {
-      id: "read",
-      label: "Read",
-      explanation: "Lookup site",
-      path: "fixture.py",
-      startLine: 1,
-      code: "lookup(id)",
-    },
-  ];
   const [left, alias, broad] = [
     "Unchecked lookup",
     "Another lookup caller",
     "Lookup also lacks a deadline",
-  ].map((title) => ({ ...base, title, codeEvidence }));
+  ].map((title) => ({ ...lookup, title }));
   const { draft, terminal } = await scanLoop([[left, alias], [broad]], {
     workers: 1,
     maxDiscoveryRuns: 2,
@@ -779,14 +736,7 @@ test("a later source with a surviving path reopens the merge and counts as new",
       [[0, 1], [1]],
       [[0, 2], [1]],
     ],
-    sameFix: ({ pairs }) => ({
-      reviews: pairs.map(({ id: pair }) => ({
-        pair,
-        decision: "same",
-        leftEvidence: 0,
-        rightEvidence: 0,
-      })),
-    }),
+    sameFix: approvePairs,
     sameSource: (a, b) => ![a, b].includes(broad.title),
   });
   assert.equal(terminal.terminalReason, "capped");
@@ -806,19 +756,11 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
     await importSource(
       join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
     );
-  const code = {
-    id: "read",
-    label: "Read",
-    explanation: "Lookup site",
-    path: "fixture.py",
-    startLine: 1,
-    code: "lookup(id)",
-  };
   const [left, alias, unrelated] = [
     "Unchecked lookup",
     "Same lookup through a caller",
     "Different operation",
-  ].map((title) => ({ ...base, title, codeEvidence: [code] }));
+  ].map((title) => ({ ...lookup, title }));
   const worker = (id: string, findings: ScanDraftInput["findings"]) => ({
     id,
     resultPath: join("/tmp", id, "result.json"),
@@ -851,17 +793,7 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
           sources: [{ id: 0, same: true, survivingPaths: [] }],
         });
       if ("reviews" in schema.properties)
-        return JSON.stringify({
-          reviews: [
-            {
-              pair: 0,
-              decision: "same",
-              leftEvidence: 0,
-              rightEvidence: 0,
-              reason: "One lookup",
-            },
-          ],
-        });
+        return JSON.stringify({ reviews: [samePair(0)] });
       return defects([[0, 1], [1]]);
     },
     fail,

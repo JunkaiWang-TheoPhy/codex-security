@@ -1,13 +1,9 @@
-import { dirname, posix, relative, sep } from "node:path";
 import {
   scanDraftInputSchema,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import { asRecord } from "../record.js";
-import {
-  projectDiscoveryCoverage,
-  type ScanUnion,
-} from "./artifact-validation.js";
+import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { errorMessage } from "./errors.js";
 import { checkSameFix } from "./same-fix.js";
@@ -19,7 +15,7 @@ export type CompareReports = (
   schema: Record<string, unknown>,
 ) => Promise<string>;
 
-export const duplicateResponseSchema = {
+const duplicateResponseSchema = {
   type: "object",
   additionalProperties: false,
   required: ["defects", "uncertain"],
@@ -300,20 +296,25 @@ export async function mergeBatch(
   compare: CompareReports,
   onError: (error: unknown) => void,
 ): Promise<number[]> {
-  const priorGroups = restoreRepairGroups(aggregate.findings);
-  const previous = priorGroups.length;
+  const retained = restoreRepairGroups(aggregate.findings).map((group, id) => ({
+    ...group,
+    id,
+    worker: -1,
+  }));
+  const priorTargets = retained.map(({ target }) => target);
+  const previous = retained.length;
   const originals = [
-    ...priorGroups.map(({ finding }) => finding),
+    ...retained.map(({ finding }) => finding),
     ...workers.flatMap((worker) => worker.result.findings),
   ];
   const content = (finding: object) =>
     JSON.stringify({ ...finding, provenance: undefined });
   const exact = originals.map(content);
-  const copies = new Map<string, Finding>();
-  for (const { finding } of priorGroups) {
-    copies.set(content(finding), finding);
-    for (const source of finding.provenance.sourceFindings ?? [])
-      copies.set(content(source.finding), finding);
+  const copies = new Map<string, (typeof retained)[number]>();
+  for (const group of retained) {
+    copies.set(exact[group.id]!, group);
+    for (const source of group.finding.provenance.sourceFindings ?? [])
+      copies.set(content(source.finding), group);
   }
   let repairs: Map<number, number[] | undefined> | undefined;
   let records: ComparisonReport[] = [];
@@ -340,21 +341,15 @@ export async function mergeBatch(
       limitation = `Deep Scan could not compare this batch for duplicates: ${errorMessage(error)}`;
     }
   }
-  const retained = priorGroups.map((group, id) => ({
-    ...group,
-    id,
-    worker: -1,
-  }));
-  const newCounts: number[] = [];
-  const newSources = new Map<string, number>();
+  const changed = new Map<number, number>();
   let id = previous;
-  for (const worker of workers) {
-    const before = retained.length;
+  for (const [workerIndex, worker] of workers.entries()) {
     for (const [index, source] of worker.result.findings.entries()) {
-      let finding =
-        copies.get(exact[id]!) ??
+      const copy = copies.get(exact[id]!);
+      const key = repairs?.get(id);
+      let group =
+        copy ??
         retained.find((prior) => {
-          const key = repairs?.get(id);
           const other = repairs?.get(prior.id);
           if (
             !key ||
@@ -383,19 +378,22 @@ export async function mergeBatch(
                 ),
             )
           );
-        })?.finding;
-      if (!finding) {
-        finding = structuredClone(source);
+        });
+      if (!group) {
+        const finding = structuredClone(source);
         finding.provenance.sourceFindingIds = [];
         finding.provenance.sourceFindings = [];
         delete finding.provenance.deepScanRepairGroups;
-        retained.push({ id, finding, worker: newCounts.length, target: id });
+        group = { id, finding, worker: workerIndex, target: id };
+        retained.push(group);
       } else {
-        addLocations(finding, source);
+        addLocations(group.finding, source);
+        if (!copy && group.id < previous && !changed.has(group.target))
+          changed.set(group.target, workerIndex);
       }
       const sourceId = `${worker.id}:${index}`;
-      if (!copies.has(exact[id]!)) newSources.set(sourceId, newCounts.length);
-      copies.set(exact[id]!, finding);
+      copies.set(exact[id]!, group);
+      const { finding } = group;
       (finding.provenance.sourceFindingIds ??= []).push(sourceId);
       (finding.provenance.sourceFindings ??= []).push({
         id: sourceId,
@@ -403,29 +401,16 @@ export async function mergeBatch(
       });
       id++;
     }
-    newCounts.push(retained.length - before);
     addScanCoverage(aggregate, worker, scanDir);
     aggregate.scope ??= worker.result.scope;
     aggregate.threatModel ??= worker.result.threatModel;
   }
   // A later worker can add a separately fixable path to a previously merged group.
-  const changed = new Map<number, number>();
-  for (const group of retained.slice(0, previous)) {
-    for (const id of group.finding.provenance.sourceFindingIds ?? []) {
-      const worker = newSources.get(id);
-      if (worker !== undefined)
-        changed.set(
-          group.target,
-          Math.min(changed.get(group.target) ?? worker, worker),
-        );
-    }
-  }
   for (const group of retained.slice(0, previous)) {
     const worker = changed.get(group.target);
     if (worker === undefined || group.target === group.id) continue;
     group.target = group.id;
     group.worker = worker;
-    newCounts[worker]!++;
   }
   if (
     repairs &&
@@ -448,7 +433,7 @@ export async function mergeBatch(
       }
       matches = await checkSameFix(
         retained.filter((group) => group.target === group.id),
-        priorGroups.map(({ target }) => target),
+        priorTargets,
         records,
         repairs,
         sources,
@@ -478,7 +463,6 @@ export async function mergeBatch(
               )
             ) {
               group.target = id;
-              newCounts[group.worker]!--;
               break;
             }
           }
@@ -523,56 +507,8 @@ export async function mergeBatch(
       ],
     };
   }
+  const newCounts = workers.map(() => 0);
+  for (const { id, target, worker } of retained)
+    if (worker >= 0 && id === target) newCounts[worker]!++;
   return newCounts;
-}
-
-export function scanCoverage(
-  worker: AcceptedDiscovery,
-  scanDir: string,
-): ScanDraftInput["reviewState"] {
-  const scan = worker.result;
-  const sharedReceipts = new Map<number, Set<string>>();
-  for (const [index, surface] of scan.reviewState.surfaces.entries()) {
-    const refs = (
-      surface.provenance as { scanReceiptRefs?: string[] } | undefined
-    )?.scanReceiptRefs;
-    if (refs)
-      sharedReceipts.set(
-        index,
-        new Set(refs.map((ref) => posix.normalize(ref))),
-      );
-  }
-  return projectDiscoveryCoverage(
-    scan.reviewState,
-    worker,
-    relative(scanDir, dirname(worker.resultPath)).split(sep).join("/"),
-    sharedReceipts,
-  );
-}
-
-export function addScanCoverage(
-  aggregate: ScanUnion,
-  worker: AcceptedDiscovery,
-  scanDir: string,
-): void {
-  const coverage = scanCoverage(worker, scanDir);
-  const previous = aggregate.sourceCoverage;
-  if (!previous) {
-    aggregate.sourceCoverage = coverage;
-    return;
-  }
-  for (const field of [
-    "surfaces",
-    "explicitExclusions",
-    "deferred",
-    "reviews",
-    "resolvedDeferred",
-    "openQuestions",
-  ] as const) {
-    const rows = coverage[field];
-    if (!Array.isArray(rows)) continue;
-    const retained = previous[field];
-    if (Array.isArray(retained)) retained.push(...rows);
-    else Object.assign(previous, { [field]: rows });
-  }
 }

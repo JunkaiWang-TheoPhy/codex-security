@@ -18,13 +18,10 @@ import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
 import type { ScanUnion } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
-const { scanCoverage, addScanCoverage } = await importSource(
-  path.join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-);
-
-const { validateDiscoveryArtifacts } = await importSource(
-  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-);
+const { addScanCoverage, scanCoverage, validateDiscoveryArtifacts } =
+  await importSource(
+    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+  );
 
 const {
   recordCodexSecurityWorkerScanDraft,

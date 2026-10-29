@@ -22,9 +22,12 @@ import {
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const { scanCoverage } = await importSource("../src/deep-scan/iteration.ts", {
-  absWorkingDir: import.meta.dirname,
-});
+const { scanCoverage } = await importSource(
+  "../src/deep-scan/artifact-validation.ts",
+  {
+    absWorkingDir: import.meta.dirname,
+  },
+);
 const { parsePersistedScanDraft, retainRecordedReceiptOwnership } =
   await importSource("../src/artifact-scan-draft.ts", {
     absWorkingDir: import.meta.dirname,

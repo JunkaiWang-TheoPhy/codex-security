@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
-import { mergeBatch, addScanCoverage } from "./iteration.js";
+import { mergeBatch } from "./iteration.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
@@ -14,6 +14,7 @@ import {
 import {
   persistedScanUnion,
   parseScanUnion,
+  addScanCoverage,
   parseStoredScanDraft,
   scanUnionToDraft,
   validateDiscoveryArtifacts,

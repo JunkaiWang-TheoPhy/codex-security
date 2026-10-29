@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { dirname, posix } from "node:path";
+import { dirname, posix, relative, sep } from "node:path";
+import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
@@ -16,6 +17,8 @@ import {
 } from "../artifact-scan-draft.js";
 import { readJsonObject, requireRegularFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
+import { errorMessage } from "./errors.js";
+import type { AcceptedDiscovery } from "./worker-runner.js";
 
 export type ScanUnion = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
@@ -27,7 +30,14 @@ export function scanUnionToDraft(result: ScanUnion): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
   for (const finding of draft.findings)
     delete finding.provenance.deepScanRepairGroups;
-  return { ...draft, reviewState: sourceCoverage ?? unknownSourceCoverage() };
+  return {
+    ...draft,
+    reviewState: sourceCoverage ?? {
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  };
 }
 
 /** Keep v1 checkpoints readable by older binaries. */
@@ -103,43 +113,24 @@ export async function validateDiscoveryArtifacts(
   return result;
 }
 
-function unknownSourceCoverage(): ScanDraftInput["reviewState"] {
-  return {
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  };
-}
-
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
-export function projectDiscoveryCoverage(
-  coverage: ScanDraftInput["reviewState"],
-  worker: { id: string; attempt?: number },
-  artifactPrefix: string,
-  scanReceiptRefs: ReadonlyMap<number, ReadonlySet<string>> = new Map(),
+export function scanCoverage(
+  worker: AcceptedDiscovery,
+  scanDir: string,
 ): ScanDraftInput["reviewState"] {
+  const coverage = worker.result.reviewState;
+  const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
+    .split(sep)
+    .join("/");
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const surfaces = coverage.surfaces;
-  const surfaceIds = new Map<unknown, string>();
-  for (const [index, surface] of surfaces.entries()) {
-    if (!surfaceIds.has(surface.id)) {
-      surfaceIds.set(surface.id, `${prefix}-surface-${index + 1}`);
-    }
-  }
   const project = <T extends Record<string, unknown>>(item: T): T => {
     const result = structuredClone(item);
-    const descriptions = result.provenance;
-    const projected =
-      typeof descriptions === "object" &&
-      descriptions !== null &&
-      !Array.isArray(descriptions)
-        ? (descriptions as Record<string, unknown>)
-        : {};
+    const projected = asRecord(result.provenance) ?? {};
     for (const key of [
       "workerId",
       "attempt",
@@ -148,7 +139,8 @@ export function projectDiscoveryCoverage(
       "scanReceiptRefs",
     ])
       delete projected[key];
-    Object.assign(result, {
+    return {
+      ...result,
       provenance: {
         ...projected,
         ...provenance,
@@ -157,29 +149,36 @@ export function projectDiscoveryCoverage(
           ? {}
           : { candidateId: item.candidateId }),
       },
-    });
-    if (typeof item.candidateId === "string") {
-      Object.assign(result, {
+      ...(typeof item.candidateId === "string" && {
         candidateId: `${prefix}-candidate-${createHash("sha256").update(item.candidateId).digest("hex")}`,
-      });
-    }
-    return result;
+      }),
+    };
   };
+  const surfaceIds = new Map<unknown, string>();
+  const surfaces = coverage.surfaces.map((surface, index) => {
+    const id = `${prefix}-surface-${index + 1}`;
+    if (!surfaceIds.has(surface.id)) surfaceIds.set(surface.id, id);
+    const shared = asRecord(surface.provenance)?.scanReceiptRefs as
+      string[] | undefined;
+    const scanRefs = new Set(shared?.map((ref) => posix.normalize(ref)));
+    return {
+      ...project(surface),
+      id,
+      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
+        (receipt) => {
+          const ref = posix.normalize(receipt);
+          return ref.startsWith(archivePrefix) ||
+            ref.startsWith(`${artifactPrefix}/`) ||
+            scanRefs.has(ref)
+            ? ref
+            : `${artifactPrefix}/${ref}`;
+        },
+      ),
+    };
+  });
   return {
     reviews: [provenance],
-    surfaces: surfaces.map((surface, index) => ({
-      ...project(surface),
-      id: `${prefix}-surface-${index + 1}`,
-      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? [])
-        .map((ref) => posix.normalize(ref))
-        .map((ref) =>
-          ref.startsWith(archivePrefix) ||
-          ref.startsWith(`${artifactPrefix}/`) ||
-          scanReceiptRefs.get(index)?.has(ref)
-            ? ref
-            : `${artifactPrefix}/${ref}`,
-        ),
-    })),
+    surfaces,
     explicitExclusions: coverage.explicitExclusions.map(project),
     deferred: coverage.deferred.map((item, index) => ({
       ...project(item),
@@ -210,25 +209,52 @@ export function projectDiscoveryCoverage(
   };
 }
 
+export function addScanCoverage(
+  aggregate: ScanUnion,
+  worker: AcceptedDiscovery,
+  scanDir: string,
+): void {
+  const coverage = scanCoverage(worker, scanDir);
+  const previous = aggregate.sourceCoverage;
+  if (!previous) {
+    aggregate.sourceCoverage = coverage;
+    return;
+  }
+  for (const field of [
+    "surfaces",
+    "explicitExclusions",
+    "deferred",
+    "reviews",
+    "resolvedDeferred",
+    "openQuestions",
+  ] as const) {
+    const rows = coverage[field];
+    if (!Array.isArray(rows)) continue;
+    const retained = previous[field];
+    if (Array.isArray(retained)) retained.push(...rows);
+    else Object.assign(previous, { [field]: rows });
+  }
+}
+
 export function parseStoredScanDraft<Result extends ScanUnion>(
   value: Record<string, unknown>,
   label: string,
-  expectedScanId: string | undefined,
+  expectedScanId: string,
   parse: (input: Record<string, unknown>) => Result,
-  invalidResultMessage = " returned an invalid Standard scan result: ",
-  differentScanMessage = " returned a result for a different scan.",
 ): Result {
   let parsed: Result;
   try {
     parsed = parse(value);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(label + invalidResultMessage + detail, {
-      cause: error,
-    });
+    throw new Error(
+      `${label} returned an invalid Standard scan result: ${errorMessage(error)}`,
+      {
+        cause: error,
+      },
+    );
   }
-  if (expectedScanId !== undefined && parsed.scanId !== expectedScanId) {
-    throw new Error(label + differentScanMessage);
+  if (parsed.scanId !== expectedScanId) {
+    throw new Error(`${label} returned a result for a different scan.`);
   }
   return parsed;
 }

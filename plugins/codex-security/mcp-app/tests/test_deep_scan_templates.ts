@@ -8,15 +8,12 @@ const { renderDiscoveryPrompt } = await importSource(
   { loader: { ".md": "text" } },
 );
 
-for (const name of ["discovery"]) {
-  const template = await readFile(
-    new URL(`../templates/deep-scan/${name}.md`, import.meta.url),
-    "utf8",
-  );
-  for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? []) {
-    assert.equal(key, `{{${name.toUpperCase()}_CONTEXT_JSON}}`);
-  }
-}
+const template = await readFile(
+  new URL("../templates/deep-scan/discovery.md", import.meta.url),
+  "utf8",
+);
+for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? [])
+  assert.equal(key, "{{DISCOVERY_CONTEXT_JSON}}");
 
 const discoveryInput = {
   scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
