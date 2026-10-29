@@ -11,8 +11,11 @@ import {
   repositoryUrlKey,
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { normalizeSemgrepReport } from "./semgrep-findings.js";
+import { readSnykFindings } from "./snyk-findings.js";
+import {
+  normalizeSemgrepReport,
+  semgrepSarifSourceRepositories,
+} from "./semgrep-findings.js";
 import { readScannerJson } from "./scanner-import.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
@@ -92,16 +95,8 @@ export async function readExternalFindings(
         throw new Error(
           "Snyk REST source repository does not match the declared source repository URL.",
         );
-      return { findings };
     }
-    return {
-      findings,
-      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
-        snykRepositoryUrls(evidence.source_data, {
-          normalizeGitRemote: false,
-        }).map((url) => ({ url })),
-      ),
-    };
+    return { findings };
   }
   if (options.provider === "semgrep") {
     // Cloud checks retained URLs against its connected destination before publication.
@@ -113,21 +108,9 @@ export async function readExternalFindings(
         target === "cloud" || isVerifiedGitHubRepository(url, references),
     );
     if (findings.sourceRepositoryUrl) return { findings };
-    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
-      const context = evidence.source_data?.["runContext"];
-      const references = isRecord(context)
-        ? context["versionControlProvenance"]
-        : undefined;
-      return Array.isArray(references)
-        ? references.flatMap((reference) =>
-            isRecord(reference) &&
-            typeof reference["repositoryUri"] === "string" &&
-            reference["repositoryUri"].trim()
-              ? [{ url: reference["repositoryUri"] }]
-              : [],
-          )
-        : [];
-    });
+    const sourceRepositories = findings.findings.flatMap(({ evidence }) =>
+      semgrepSarifSourceRepositories(evidence.source_data),
+    );
     return { findings, sourceRepositories };
   }
   if (options.provider === "endor") {

@@ -36,7 +36,12 @@ function collectPages(...pages: unknown[]) {
 
 test("collects consecutive authenticated pages for exactly one project, ref and product", async () => {
   const pages: string[] = [];
-  const selection = { ...options, sourceRepositoryUrl: platformProject.url };
+  const name = "https://example.test/monorepo/.";
+  const selection = {
+    ...options,
+    project: name,
+    sourceRepositoryUrl: platformProject.url,
+  };
   const report = await collectSemgrepPlatformFindings(selection, {
     environment,
     fetch: async (url, init) => {
@@ -46,11 +51,11 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
       );
       expect(init.redirect).toBe("error");
       if (url.pathname.includes("/projects/")) {
-        expect(decodeURIComponent(url.pathname)).toBe(
-          "/api/v1/deployments/example/projects/example/project",
+        expect(url.pathname).toBe(
+          `/api/v1/deployments/example/projects/${encodeURIComponent(name)}`,
         );
         selection.sourceRepositoryUrl = "https://github.com/other/project";
-        return Response.json({ project: platformProject });
+        return Response.json({ project: { ...platformProject, name } });
       }
       const query = Object.fromEntries(url.searchParams);
       expect(query).toMatchObject({
@@ -101,6 +106,44 @@ test("collects consecutive authenticated pages for exactly one project, ref and 
   });
 });
 
+test("uses the requested scope for missing row fields and preserves the original evidence", async () => {
+  const { repository, ref, ...base } = platformFinding(1);
+  const rows = [
+    base,
+    { ...base, id: 2, repository: {} },
+    { ...base, id: 3, ref },
+    { ...base, id: 4, repository },
+    { ...base, id: 5, repository: { name: "project", url: null } },
+  ];
+  const report = await collectPages({ findings: rows });
+  const parsed = normalizeSemgrepPlatformFindings(
+    JSON.parse(JSON.stringify(report)),
+  );
+  expect(
+    parsed.findings.map(({ evidence }) => evidence.source_data?.["finding"]),
+  ).toEqual(rows);
+  expect(
+    parsed.findings.every(
+      ({ evidence }) =>
+        evidence.branch === platformRef &&
+        evidence.details?.repository?.url === platformProject.url,
+    ),
+  ).toBe(true);
+  for (const scope of [
+    { repository: null },
+    { repository: { url: 42, name: "project" } },
+    { repository: { url: null } },
+    { repository: { name: 42, url: platformProject.url } },
+    { ref: null },
+    { ref: "" },
+    { ref: "refs/heads/foreign" },
+  ]) {
+    expect(() =>
+      normalizeSemgrepPlatformFindings(platformReport([{ ...base, ...scope }])),
+    ).toThrow();
+  }
+});
+
 test("fails before acquisition without opt-in, honors cancellation, and never returns a partial page set", async () => {
   const never = () => {
     throw new Error("unexpected request");
@@ -108,6 +151,13 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
   await expect(
     collectSemgrepPlatformFindings(options, { environment: {}, fetch: never }),
   ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS");
+  for (const project of [".", ".."])
+    await expect(
+      collectSemgrepPlatformFindings(
+        { ...options, project },
+        { environment, fetch: never },
+      ),
+    ).rejects.toThrow("Invalid Semgrep");
   const stopped = AbortSignal.abort(new Error("stopped"));
   for (const [signal, dependencySignal] of [
     [stopped],

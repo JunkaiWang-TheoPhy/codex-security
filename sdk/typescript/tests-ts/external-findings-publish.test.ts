@@ -25,7 +25,7 @@ import {
   type ExternalPublicationProgress,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
-import { snykRepositoryUrls } from "../src/snyk-findings.js";
+import { snykRepositoryClaims } from "../src/snyk-findings.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
@@ -1318,6 +1318,101 @@ test("hosted Snyk resolves an unverified Enterprise mapping against the connecte
   report.project = snykRestProject({ origin: "gitlab", remote: url });
   await writeFile(cloud.file, JSON.stringify(report));
   await expect(prepare()).rejects.toThrow("does not match the declared");
+});
+
+test("verified Snyk repositories retain case-sensitive identity when optional raw evidence is projected out", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const report = {
+    ...snykRestFixture("open-source", { sourceRepositoryUrl: url }),
+    project: snykRestProject({ origin: "gitlab", remote: url }),
+  };
+  const cloud = await fixture(report, url.toLowerCase());
+  const local = await localFindingsFixture({ remote: url.toLowerCase() });
+  cleanups.push(local.dispose);
+  const settings = { ...options, provider: "snyk" as const };
+  const file = () =>
+    prepareExternalPublication(cloud.file, settings, cloud.deps);
+  await expect(file()).rejects.toThrow("does not match");
+  const normalized = normalizeSnykIssues(report);
+  const sdk = () =>
+    prepareNormalizedExternalPublication(normalized, settings, cloud.deps);
+  // Either the verified native row or the report binding can establish the restriction.
+  delete normalized.sourceRepositoryPlatform;
+  await expect(sdk()).rejects.toThrow("does not match");
+  cloud.state.repositoryUrl = url;
+  normalized.sourceRepositoryUrl = url.toLowerCase();
+  await expect(sdk()).rejects.toThrow("does not match");
+  normalized.sourceRepositoryUrl = url;
+  const sibling = normalizeSnykIssues(
+    snykRestFixture("code", { sourceRepositoryUrl: url }),
+  ).findings[0]!;
+  delete sibling.evidence.source_data;
+  sibling.evidence.details!.repository!.url = url.toLowerCase();
+  normalized.findings.push(sibling);
+  await expect(sdk()).rejects.toThrow("does not match");
+  normalized.findings.pop();
+  cloud.state.repositoryUrl = url.toLowerCase();
+  normalized.sourceRepositoryPlatform = "other";
+  for (const finding of normalized.findings)
+    delete finding.evidence.source_data;
+  await expect(sdk()).rejects.toThrow("does not match");
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized,
+      { ...settings, repository: local.repository },
+      { environment: local.environment },
+    ),
+  ).rejects.toThrow("does not match");
+  const unverified = normalizeSnykIssues({
+    ...report,
+    project: snykRestProject({ origin: "github-enterprise", remote: null }),
+  });
+  unverified.sourceRepositoryPlatform = "github";
+  const unverifiedLocal = () =>
+    prepareNormalizedLocalImport(
+      unverified,
+      { ...settings, repository: local.repository },
+      { environment: local.environment },
+    );
+  await expect(unverifiedLocal()).rejects.toThrow("does not match");
+  for (const finding of unverified.findings)
+    delete finding.evidence.source_data;
+  await expect(unverifiedLocal()).rejects.toThrow("does not match");
+  cloud.state.repositoryUrl = url;
+  expect((await sdk()).preview.findings).toHaveLength(1);
+  expect((await file()).preview.findings).toHaveLength(1);
+});
+
+test("a pending Snyk publication binds the projected report's repository and comparison policy", async () => {
+  const url = "https://scm.example.test/team/project";
+  const normalized = normalizeSnykIssues({
+    ...snykRestFixture("open-source", { sourceRepositoryUrl: url }),
+    project: snykRestProject({ origin: "gitlab", remote: url }),
+  });
+  for (const finding of normalized.findings)
+    delete finding.evidence.source_data;
+  const cloud = await fixture([], url);
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      normalized,
+      { ...options, provider: "snyk" },
+      cloud.deps,
+    );
+  cloud.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  normalized.sourceRepositoryUrl = "https://scm.example.test/Team/Project";
+  await expect(prepare()).rejects.toThrow("does not match");
+  normalized.sourceRepositoryUrl = url;
+  delete normalized.sourceRepositoryPlatform;
+  await expect(prepare()).rejects.toThrow("does not match");
+  normalized.sourceRepositoryPlatform = "other";
+  cloud.state.repositoryUrl = "https://scm.example.test/renamed/project";
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(cloud.posts[1]).toBe(cloud.posts[0]);
 });
 
 test("hosted Semgrep accepts Enterprise casing against the connected Cloud repository", async () => {
@@ -4140,12 +4235,12 @@ for (const [cases, matches] of [
           repository,
         );
         const source = normalized.findings[0]!.evidence.source_data;
-        const urls = snykRepositoryUrls(source, {
+        const claims = snykRepositoryClaims(source, {
           cloudRepositoryUrl: destination,
         });
-        expect(urls, format).toHaveLength(1);
+        expect(claims, format).toHaveLength(1);
         expect(
-          cloudRepositoryUrlKey(urls[0]!) ===
+          cloudRepositoryUrlKey(claims[0]!.url) ===
             cloudRepositoryUrlKey(destination),
           format,
         ).toBe(matches);

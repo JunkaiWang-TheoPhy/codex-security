@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
@@ -153,6 +154,24 @@ export function normalizeSemgrepFindings(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   return normalizeSemgrepReport(input, options, target);
+}
+
+export function semgrepSarifSourceRepositories(
+  data?: Record<string, unknown> | null,
+) {
+  const context = data?.["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [{ url: reference["repositoryUri"] }]
+          : [],
+      )
+    : [];
 }
 
 /** @internal The file importer supplies its destination-specific repository comparison. */

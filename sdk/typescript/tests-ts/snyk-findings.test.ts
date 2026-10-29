@@ -8,7 +8,7 @@ import {
   normalizeSnykJson,
   normalizeSnykSarif,
   readSnykFindings,
-  snykRepositoryUrls,
+  snykRepositoryClaims,
 } from "../src/snyk-findings.js";
 import {
   snykJson,
@@ -809,14 +809,14 @@ test.each(["\t", "\r", "\n"])(
     const source =
       normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
     expect(
-      snykRepositoryUrls(source, {
+      snykRepositoryClaims(source, {
         cloudRepositoryUrl: "https://github.com/example/project",
       }),
-    ).toEqual([repository]);
-    expect(snykRepositoryUrls(source)).toEqual([repository]);
-    expect(snykRepositoryUrls(source, { normalizeGitRemote: false })).toEqual([
-      repository,
-    ]);
+    ).toEqual([{ url: repository }]);
+    expect(snykRepositoryClaims(source)).toEqual([{ url: repository }]);
+    expect(snykRepositoryClaims(source, { normalizeGitRemote: false })).toEqual(
+      [{ url: repository }],
+    );
     expect(source).toMatchObject({ collection: input.collection });
   },
 );
@@ -828,13 +828,13 @@ test.each(snykRepositoryContexts)(
     input.collection.target.repository = repository;
     const source =
       normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
-    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(snykRepositoryClaims(source)).toEqual([{ url: repository }]);
     expect(
-      snykRepositoryUrls(source, {
+      snykRepositoryClaims(source, {
         normalizeGitRemote: false,
         cloudRepositoryUrl,
       }),
-    ).toEqual([repository]);
+    ).toEqual([{ url: repository }]);
     expect(source).toMatchObject({ collection: input.collection });
   },
 );
@@ -852,13 +852,13 @@ test.each(snykRepositoryContexts)(
       })),
     };
     const source = normalizeSnykSarif(input).findings[0]!.evidence.source_data;
-    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(snykRepositoryClaims(source)).toEqual([{ url: repository }]);
     expect(
-      snykRepositoryUrls(source, {
+      snykRepositoryClaims(source, {
         normalizeGitRemote: false,
         cloudRepositoryUrl,
       }),
-    ).toEqual([repository]);
+    ).toEqual([{ url: repository }]);
     expect(source).toMatchObject({
       run: { versionControlProvenance: provenance },
     });

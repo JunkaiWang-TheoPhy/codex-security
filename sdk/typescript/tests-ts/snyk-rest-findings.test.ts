@@ -14,7 +14,7 @@ import {
 import {
   normalizeSnykInput,
   readSnykFindings,
-  snykRepositoryUrls,
+  snykRepositoryClaims,
 } from "../src/snyk-findings.js";
 
 import type {
@@ -100,6 +100,37 @@ async function snykCheckout(remote: string, sourceKey = projectId) {
     },
   };
 }
+
+test("retains large JSON integers in Snyk target metadata through collection and replay", async () => {
+  const source = project();
+  Object.assign(source.relationships.target.data, {
+    meta: {
+      integration_data: {
+        build: "integer-placeholder",
+        capacity: "exponent-placeholder",
+      },
+    },
+  });
+  const body = JSON.stringify(document(source))
+    .replace('"integer-placeholder"', "9007199254740993")
+    .replace('"exponent-placeholder"', "1e400");
+  const report = await transport(
+    new Response(body),
+    document([issue()]),
+  ).collect();
+  const replay = normalizeSnykIssues(JSON.parse(JSON.stringify(report)));
+  expect(replay.findings[0]?.evidence.source_data?.["project"]).toMatchObject({
+    relationships: {
+      target: {
+        data: {
+          meta: {
+            integration_data: { build: "9007199254740993", capacity: "1e400" },
+          },
+        },
+      },
+    },
+  });
+});
 
 test("collects only one region, org, project and Open Source issue type across JSON:API pages", async () => {
   const primary = issue({
@@ -392,9 +423,11 @@ test.each(["open-source", "code"] as const)(
       { normalizeGitRemote: false },
       { cloudRepositoryUrl: sourceRepositoryUrl },
     ]) {
-      expect(snykRepositoryUrls(scoped, mode)).toEqual([sourceRepositoryUrl]);
-      expect(() => snykRepositoryUrls(swapped, mode)).toThrow("target URL");
-      expect(() => snykRepositoryUrls(caseSensitive, mode)).toThrow(
+      expect(snykRepositoryClaims(scoped, mode)).toEqual([
+        { url: sourceRepositoryUrl, platform: undefined },
+      ]);
+      expect(() => snykRepositoryClaims(swapped, mode)).toThrow("target URL");
+      expect(() => snykRepositoryClaims(caseSensitive, mode)).toThrow(
         "target URL",
       );
     }
@@ -531,7 +564,9 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
     });
   for (const remote of [
     "git@scm.example.test:org/PROJECT.git",
+    "git@scm.example.test:/org/PROJECT.git",
     "ssh://git@scm.example.test/ORG/project",
+    "ssh://git@scm.example.test/Org/%70roject%2Egit",
   ]) {
     expect(check(remote).read).toBe(0);
     expect(check(remote, "github-enterprise", false).read).toBe(0);
@@ -543,6 +578,12 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
     "ssh://git@scm.example.test:2222/Org/project",
     "ssh://git@scm.example.test/elsewhere/%2e%2e/Org/project",
     "ssh://git@scm.example.test/elsewhere/../Org/project",
+    "ssh://git@scm.example.test/elsewhere%2F%2E%2E/Org/project",
+    "ssh://git@scm.example.test/Org/project%3Fquery",
+    "ssh://git@scm.example.test/Org/project%23fragment",
+    "ssh://git@scm.example.test/Org/%2570roject.git",
+    "git@scm.example.test:/Org/%70roject.git",
+    "git@scm.example.test://Org/project.git",
     "git@foreign.example.test:Org/project",
     "git@scm.example.test:Org/other",
   ])
@@ -768,6 +809,15 @@ test("a wrong project, product or repository fails before listing issues or acce
 test("matches the HTTP target spelling emitted by Snyk CLI for public Git remotes", async () => {
   for (const [remote, selected] of [
     ["http://github.com/Example/repository.git", sourceRepositoryUrl],
+    ["http://github.com:22/Example/repository.git", sourceRepositoryUrl],
+    [
+      "http://github.com:22/Example/repository.git",
+      "https://github.com:22/example/repository",
+    ],
+    [
+      "http://gitlab.com:22/Group/project.git",
+      "https://gitlab.com/Group/project",
+    ],
     [
       "http://github.com:443/Example/repository.git",
       "https://github.com:443/example/repository",
@@ -809,6 +859,12 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["cli", "http://github.com/example/other", sourceRepositoryUrl],
     ["cli", "http://github.com:80/example/repository", sourceRepositoryUrl],
     ["cli", "http://github.com:443/example/repository", sourceRepositoryUrl],
+    ["cli", "http://github.com:2222/example/repository", sourceRepositoryUrl],
+    [
+      "cli",
+      "http://git.example.test:22/team/repo",
+      "https://git.example.test/team/repo",
+    ],
     [
       "cli",
       "http://github.com:8443/example/repository",

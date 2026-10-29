@@ -31,7 +31,8 @@ the first nonempty endpoint in [Snyk's REST configuration order](https://github.
 From highest to lowest priority, the settings are
 `API_V3_URL`, `SNYK_API_V3_URL`, `API_REST_URL`, `SNYK_API_REST_URL`,
 `SNYK_API`, then `SNYK_CFG_ENDPOINT`. Snyk requires the exact uppercase names
-`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. For example,
+`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. Both expand
+`${NAME}` references once from the caller's environment. For example,
 when a REST override points to Europe and the general endpoint points to the US, select
 `--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
 the Snyk CLI configuration file, select it explicitly here as well.
@@ -45,7 +46,8 @@ provenance from the Snyk project.
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.
 The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
-can replay it offline. Keep the same source key across exports. The importer
+can replay it offline. The export stores integers outside JavaScript’s safe
+range as their original numeric text. Keep the same source key across exports. The importer
 uses Snyk's issue key within the API origin, organization, project and product
 to identify updates. Duplicate keys in one export are excluded.
 

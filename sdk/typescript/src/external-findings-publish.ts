@@ -35,7 +35,11 @@ import {
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
+import { snykRepositoryClaims } from "./snyk-findings.js";
+import {
+  SNYK_REST_ISSUES_FORMAT,
+  snykRestFindingRepository,
+} from "./snyk-rest-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
@@ -45,6 +49,7 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  repositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
   validateExternalReport,
@@ -557,9 +562,26 @@ async function preparePublicationInput(
     source,
   ];
   // Keep the lookup key stable so a changed declaration cannot stage a second request.
-  const repositoryKey =
-    parsed.sourceRepositoryUrl &&
-    cloudRepositoryUrlKey(parsed.sourceRepositoryUrl);
+  // Hosted rows establish platform from their original project and target, independently of the current destination.
+  const hostedSnyk = new Map<
+    string,
+    ReturnType<typeof snykRestFindingRepository>
+  >();
+  if (options.provider === "snyk") {
+    for (const { source_finding_id, evidence } of parsed.findings) {
+      const data = evidence.source_data;
+      if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+        hostedSnyk.set(source_finding_id, snykRestFindingRepository(data));
+    }
+  }
+  const strictSnyk =
+    options.provider === "snyk" &&
+    (parsed.sourceRepositoryPlatform === "other" ||
+      [...hostedSnyk.values()].some(({ platform }) => platform === "other"));
+  const reportKey = strictSnyk ? repositoryUrlKey : cloudRepositoryUrlKey;
+  const reportUrl =
+    parsed.sourceRepositoryUrl && reportKey(parsed.sourceRepositoryUrl);
+  const repositoryKey = strictSnyk ? ["other", reportUrl ?? null] : reportUrl;
   const digest = (identity: unknown) =>
     hash(
       "sha256",
@@ -768,10 +790,7 @@ async function preparePublicationInput(
       inspectorProjectMap,
     );
     function requireDestination(url: string | null | undefined, id?: string) {
-      if (
-        url &&
-        cloudRepositoryUrlKey(url) !== cloudRepositoryUrlKey(destination.url)
-      ) {
+      if (url && reportKey(url) !== reportKey(destination.url)) {
         const label =
           id === undefined ? "Source report" : `Finding ${JSON.stringify(id)}`;
         throw new CodexSecurityError(
@@ -781,6 +800,7 @@ async function preparePublicationInput(
     }
     if (!saved) requireDestination(parsed.sourceRepositoryUrl);
     if (binding) requireDestination(binding.url, binding.findingId);
+    for (const [id, source] of hostedSnyk) requireDestination(source.url, id);
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const urls = [
@@ -794,10 +814,10 @@ async function preparePublicationInput(
             )
           : undefined,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
-        ...(options.provider === "snyk"
-          ? snykRepositoryUrls(evidence.source_data, {
+        ...(options.provider === "snyk" && !hostedSnyk.has(id)
+          ? snykRepositoryClaims(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
-            })
+            }).map(({ url }) => url)
           : []),
         ...(options.provider === "endor"
           ? endorRepositoryUrls(evidence.source_data)

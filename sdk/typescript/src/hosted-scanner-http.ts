@@ -24,9 +24,22 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
 
 function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
   if (name === "SNYK_API_V3_URL" || name === "SNYK_API_REST_URL") {
-    // snyk-config enumerates environment names and preserves their case, even on Windows.
+    // snyk-config preserves key case and expands each placeholder once.
     for (const key in environment) {
-      if (key === name) return environment[key];
+      if (key !== name) continue;
+      return environment[key]?.replace(
+        /\$\{(.*?)\}/gu,
+        (_, reference: string) => {
+          const requested =
+            process.platform === "win32" ? reference.toUpperCase() : reference;
+          const value = importEnvironmentSetting(environment, requested)?.value;
+          if (value === undefined)
+            throw new Error(
+              `${name} references missing environment variable ${reference}.`,
+            );
+          return value;
+        },
+      );
     }
     return undefined;
   }
@@ -63,6 +76,20 @@ export function hostedEnvironmentToken(
   return token;
 }
 
+function preserveLargeNumbers(
+  _key: string,
+  value: unknown,
+  context?: { source?: string },
+): unknown {
+  if (
+    typeof value === "number" &&
+    (!Number.isFinite(value) ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value)))
+  )
+    return requiredText(context?.source, "Exact scanner numeric value");
+  return value;
+}
+
 export function hostedScannerHttp(
   dependencies: HostedScannerHttpOptions,
   callerSignal?: AbortSignal,
@@ -74,11 +101,7 @@ export function hostedScannerHttp(
       : (callerSignal ?? transportSignal);
   signal?.throwIfAborted();
   const request = dependencies.fetch?.bind(dependencies) ?? fetch;
-  async function getJson(
-    url: URL,
-    authorization: string,
-    parse: (body: string) => unknown = JSON.parse,
-  ): Promise<unknown> {
+  async function getJson(url: URL, authorization: string): Promise<unknown> {
     signal?.throwIfAborted();
     const response = await request(url, {
       method: "GET",
@@ -96,7 +119,10 @@ export function hostedScannerHttp(
         `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
       );
     }
-    return parse(decodeScannerJson(await response.arrayBuffer()));
+    return JSON.parse(
+      decodeScannerJson(await response.arrayBuffer()),
+      preserveLargeNumbers,
+    );
   }
   return { signal, getJson };
 }

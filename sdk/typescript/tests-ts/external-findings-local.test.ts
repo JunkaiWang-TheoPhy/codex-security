@@ -71,20 +71,38 @@ const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
   test.each(["snyk", "semgrep"] as const)(
-    "populated %s imports require hosted rows before using hosted report metadata",
+    "populated %s reports check the report URL and caller's source independently",
     async (provider) => {
       const url = "https://github.com/example/project";
+      const foreign = "https://github.com/other/project";
       const f = await fixture({ remote: url });
-      const report = {
-        ...input(),
-        sourceRepositoryUrl: "https://github.com/other/project",
-      };
-      const prepared = await prepareNormalizedLocalImport(
-        report,
-        { ...source, provider, repository: f.repository },
-        { environment: f.environment, sourceRepositories: [{ url }] },
+      const legacy = input();
+      const prepare = (sourceRepositoryUrl: string, declared: string) =>
+        prepareNormalizedLocalImport(
+          { ...legacy, sourceRepositoryUrl },
+          { ...source, provider, repository: f.repository },
+          {
+            environment: f.environment,
+            sourceRepositories: [{ url: declared }],
+          },
+        );
+      await expect(prepare(foreign, url)).rejects.toThrow("does not match");
+      await expect(prepare(url, foreign)).rejects.toThrow("does not match");
+      expect((await prepare(url, url)).preview.findings).toEqual(
+        legacy.findings,
       );
-      expect(prepared.preview.findings).toEqual(report.findings);
+      legacy.findings[0]!.evidence.source_data =
+        provider === "snyk"
+          ? {
+              format: "snyk-findings-export/v1",
+              collection: { target: { repository: foreign } },
+            }
+          : {
+              runContext: {
+                versionControlProvenance: [{ repositoryUri: foreign }],
+              },
+            };
+      await expect(prepare(url, url)).rejects.toThrow("does not match");
     },
   );
   test("requires opt-in before resolving repositories or accessing the workbench", async () => {

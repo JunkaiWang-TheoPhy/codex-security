@@ -119,7 +119,10 @@ test(transportTest, async () => {
 test("Snyk checks the effective REST endpoint before sending an environment token", async () => {
   const eu = "https://api.eu.snyk.io";
   const us = "https://api.us.snyk.io";
-  const settings: NodeJS.ProcessEnv = { ...environment };
+  const settings: NodeJS.ProcessEnv = {
+    ...environment,
+    [process.platform === "win32" ? "Scanner_Region" : "scanner_region"]: "eu",
+  };
   const requests: string[] = [];
   const collect = (apiOrigin: string, token?: string) =>
     collectSnykIssues(
@@ -145,9 +148,9 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
   for (const [name, endpoint, origin] of [
     ["SNYK_CFG_ENDPOINT", "https://app.eu.snyk.io/api/v1", eu],
     ["SNYK_API", "https://us.snyk.io/", us],
-    ["SNYK_API_REST_URL", eu + "/rest", eu],
+    ["SNYK_API_REST_URL", "https://api.${scanner_region}.snyk.io/rest", eu],
     ["API_REST_URL", us + "/rest", us],
-    ["SNYK_API_V3_URL", eu + "/rest", eu],
+    ["SNYK_API_V3_URL", "https://api.${scanner_region}.snyk.io/rest", eu],
     ["API_V3_URL", us + "/rest", us],
   ] as const) {
     settings[name] = endpoint;
@@ -155,6 +158,13 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
     await expect(collect(origin)).rejects.toThrow("requested project");
     expect(requests.splice(0)).toEqual([`${origin} token synthetic`]);
   }
+  delete settings["API_V3_URL"];
+  delete settings[
+    process.platform === "win32" ? "Scanner_Region" : "scanner_region"
+  ];
+  await expect(collect(eu)).rejects.toThrow(
+    "missing environment variable scanner_region",
+  );
   await expect(collect(eu, "explicit")).rejects.toThrow("requested project");
   expect(requests).toEqual([`${eu} token explicit`]);
 });

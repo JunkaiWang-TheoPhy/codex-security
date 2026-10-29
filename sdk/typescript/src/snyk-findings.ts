@@ -149,7 +149,7 @@ export function normalizeSnykFindingsExport(
 }
 
 /** @internal Repository claims retained in original Snyk evidence. */
-export function snykRepositoryUrls(
+export function snykRepositoryClaims(
   source: unknown,
   {
     normalizeGitRemote = true,
@@ -159,20 +159,21 @@ export function snykRepositoryUrls(
     /** The selected destination from the authenticated Cloud repository catalog. */
     cloudRepositoryUrl?: string;
   } = {},
-): string[] {
+): ReturnType<typeof snykRestFindingRepository>[] {
   if (!isRecord(source)) return [];
   if (source["format"] === SNYK_REST_ISSUES_FORMAT)
-    return [snykRestFindingRepository(source).url];
+    return [snykRestFindingRepository(source)];
+  const repositoryClaim = (value: string) => ({
+    url: normalizeGitRemote
+      ? normalizeGitRepositoryUrl(value, cloudRepositoryUrl)
+      : value,
+  });
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
     const repository = text(target["repository"]);
     if (repository === null || repository === "unknown") return [];
-    return [
-      normalizeGitRemote
-        ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
-        : repository,
-    ];
+    return [repositoryClaim(repository)];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -194,9 +195,7 @@ export function snykRepositoryUrls(
       record(entry, "Snyk repository provenance")["repositoryUri"],
       "Snyk repository URI",
     );
-    return normalizeGitRemote
-      ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
-      : repository;
+    return repositoryClaim(repository);
   });
 }
 

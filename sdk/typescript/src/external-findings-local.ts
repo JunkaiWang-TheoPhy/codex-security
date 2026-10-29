@@ -2,10 +2,9 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import {
-  SNYK_REST_ISSUES_FORMAT,
-  snykRestFindingRepository,
-} from "./snyk-rest-findings.js";
+import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
+import { snykRepositoryClaims } from "./snyk-findings.js";
+import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
 import { semgrepPlatformFindingRepository } from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -28,6 +27,8 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import {
+  gitPathToHttpPath,
+  gitTransportBytes,
   isGitHubCloudHost,
   normalizeHostedGitRepositoryUrl,
   parseGitRemote,
@@ -193,16 +194,8 @@ function remoteRepository(
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
-  const literal = (raw: string) => {
-    const bytes = Buffer.from(raw).toString("latin1");
-    return scpStyle
-      ? bytes
-      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
-          String.fromCharCode(parseInt(hex, 16)),
-        );
-  };
   if (!scpStyle && !transport) return { key: value };
-  const gitPath = literal(transport?.[2] ?? path);
+  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^(.*)@/u.exec(authority ?? "")?.[1];
@@ -210,14 +203,7 @@ function remoteRepository(
     /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
   // Express upload-pack bytes as a URL path for comparison with the HTTP source.
-  const name = gitPath
-    .slice(0, suffix?.index)
-    .replace(/^\//u, "")
-    .replace(
-      /[%\x00-\x20\x7f-\xff]/gu,
-      (byte) =>
-        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
-    );
+  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
@@ -225,7 +211,7 @@ function remoteRepository(
     : key(origin + name);
   return {
     key: repository,
-    account: ssh && login ? literal(login) : undefined,
+    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
       ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
@@ -670,45 +656,48 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  const emptyHostedReport =
-    !current.findings.length &&
-    (options.provider === "snyk" || options.provider === "semgrep");
-  let hostedUrl = emptyHostedReport ? current.sourceRepositoryUrl : undefined;
-  let snykGitHub =
-    emptyHostedReport &&
-    options.provider === "snyk" &&
-    current.sourceRepositoryPlatform
-      ? current.sourceRepositoryPlatform === "github"
+  let hostedUrl =
+    options.provider === "snyk" || options.provider === "semgrep"
+      ? current.sourceRepositoryUrl
       : undefined;
+  if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
+  const reportPlatform =
+    options.provider === "snyk" && hostedUrl
+      ? current.sourceRepositoryPlatform
+      : undefined;
+  let snykGitHub: boolean | undefined =
+    reportPlatform === "other" ? false : undefined;
+  if (!current.findings.length && reportPlatform === "github")
+    snykGitHub = true;
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
     const data = evidence.source_data;
-    let native: string | undefined;
-    if (
-      options.provider === "snyk" &&
-      data?.["format"] === SNYK_REST_ISSUES_FORMAT
-    ) {
-      const source = snykRestFindingRepository(data);
-      native = source.url;
-      // A verified non-GitHub target keeps its case-sensitive identity. A
-      // target without a platform can use an independently supplied binding.
-      if (source.platform !== undefined)
-        snykGitHub = (snykGitHub ?? true) && source.platform === "github";
+    if (options.provider === "snyk") {
+      for (const source of snykRepositoryClaims(data, {
+        normalizeGitRemote: false,
+      })) {
+        sources.set(source.url, { url: source.url });
+        if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
+          hostedUrl ??= source.url;
+        // Only retained or independent evidence can establish GitHub on a populated report.
+        if (source.platform !== undefined)
+          snykGitHub = (snykGitHub ?? true) && source.platform === "github";
+      }
     }
-    if (options.provider === "semgrep")
-      native = semgrepPlatformFindingRepository(data, (url) =>
+    if (options.provider === "semgrep") {
+      const native = semgrepPlatformFindingRepository(data, (url) =>
         isVerifiedGitHubRepository(url, dependencies.sourceRepositories),
       );
-    if (native) {
-      hostedUrl ??= native;
-      sources.set(native, { url: native });
+      if (native) {
+        hostedUrl ??= native;
+        sources.set(native, { url: native });
+      } else if (current.sourceRepositoryUrl) {
+        for (const source of semgrepSarifSourceRepositories(data))
+          sources.set(source.url, source);
+      }
     }
   }
-  if (hostedUrl && current.sourceRepositoryUrl)
-    sources.set(current.sourceRepositoryUrl, {
-      url: current.sourceRepositoryUrl,
-    });
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,

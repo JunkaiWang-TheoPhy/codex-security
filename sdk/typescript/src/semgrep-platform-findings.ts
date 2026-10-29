@@ -84,21 +84,6 @@ function requiredId(value: unknown, label: string): number | string {
   return id;
 }
 
-function parsePlatformJson(body: string): unknown {
-  return JSON.parse(
-    body,
-    (_key: string, value: unknown, context?: { source?: string }) => {
-      if (
-        typeof value === "number" &&
-        Number.isInteger(value) &&
-        !Number.isSafeInteger(value)
-      )
-        return requiredText(context?.source, "Exact Semgrep numeric value");
-      return value;
-    },
-  );
-}
-
 function matchingRepositoryUrl(
   value: unknown,
   expected: string,
@@ -166,9 +151,18 @@ function scopedFinding(
 ) {
   const finding = record(value, "Semgrep Platform finding");
   const { url, name } = record(
-    finding["repository"],
+    finding["repository"] === undefined ? {} : finding["repository"],
     "Semgrep finding repository",
   );
+  if (name !== undefined && typeof name !== "string")
+    throw new Error("Semgrep finding repository name must be text.");
+  // Older named rows use a null URL for repositories without a native link.
+  if (
+    url !== undefined &&
+    typeof url !== "string" &&
+    !(url === null && text(name))
+  )
+    throw new Error("Semgrep finding repository URL must be text.");
   let alias: string | undefined;
   if (typeof url === "string" && url) {
     matchingRepositoryUrl(
@@ -176,7 +170,7 @@ function scopedFinding(
       selected.url,
       selected.key,
     );
-  } else {
+  } else if (name !== undefined) {
     const label = requiredText(name, "Semgrep finding repository name");
     if (!selected.names.includes(label)) {
       alias = label;
@@ -187,7 +181,7 @@ function scopedFinding(
         );
     }
   }
-  if (finding["ref"] !== ref)
+  if (finding["ref"] !== undefined && finding["ref"] !== ref)
     throw new Error(
       "Semgrep Platform finding does not match the selected ref.",
     );
@@ -216,19 +210,14 @@ export async function collectSemgrepPlatformFindings(
   const name = requiredText(options.project, "Semgrep project name");
   if (
     deployment.includes("/") ||
-    [deployment, ...name.split("/")].some(
-      (part) => !part || part === "." || part === "..",
-    )
+    [deployment, name].some((part) => part === "." || part === "..")
   )
     throw new Error("Invalid Semgrep deployment slug or project name.");
   const ref = requiredText(options.ref, "Semgrep ref");
   const product = productType(options.product ?? "sast");
   const base = `https://semgrep.dev/api/v1/deployments/${encodeURIComponent(deployment)}`;
   const get = async (url: URL) =>
-    record(
-      await getJson(url, `Bearer ${token}`, parsePlatformJson),
-      "Semgrep API response",
-    );
+    record(await getJson(url, `Bearer ${token}`), "Semgrep API response");
   const { sourceRepositoryUrl } = options;
   const lookup = await get(
     new URL(`${base}/projects/${encodeURIComponent(name)}`),
