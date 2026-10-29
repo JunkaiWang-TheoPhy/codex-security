@@ -37,6 +37,18 @@ export function isPublicGitHost(host: string): boolean {
   );
 }
 
+/** Public SSH-over-443 authorities and their HTTPS repository hosts. */
+export function publicGitSsh443Host(authority: string): string | undefined {
+  switch (authority) {
+    case "ssh.github.com:443":
+      return "github.com";
+    case "altssh.gitlab.com:443":
+      return "gitlab.com";
+    case "altssh.bitbucket.org:443":
+      return "bitbucket.org";
+  }
+}
+
 /** Standard public SSH clone aliases, plus a GitHub host established by the caller. */
 export function normalizeHostedGitRepositoryUrl(
   remote: string,
@@ -56,7 +68,7 @@ export function normalizeGitRepositoryUrl(
   sshAliasUrl?: string,
 ): string {
   // The caller identifies a host whose standard Git SSH login maps to HTTPS.
-  const destination = sshAliasUrl ? new URL(sshAliasUrl) : undefined;
+  const destination = sshAliasUrl ? URL.parse(sshAliasUrl) : undefined;
   const connectedHost =
     destination?.protocol === "https:"
       ? destination.hostname.toLowerCase()
@@ -82,9 +94,9 @@ export function normalizeGitRepositoryUrl(
     const hostname = url.hostname.toLowerCase();
     const standardSsh =
       isGitSshUser(ssh[1]!, hostname) && (url.port === "" || url.port === "22");
-    const githubSshOverHttps =
-      ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
-    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
+    const alternate =
+      ssh[1] === "git" && publicGitSsh443Host(url.host.toLowerCase());
+    if (alternate) return `https://${alternate}${url.pathname}`;
     if (standardSsh) return `https://${hostname}${url.pathname}`;
   }
   return repository;

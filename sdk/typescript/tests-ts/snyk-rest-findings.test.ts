@@ -562,7 +562,11 @@ test.each([
     };
     const checkout = await snykCheckout(scp);
     try {
-      for (const remote of [scp, `ssh://git@${host}:22/${name}.git`]) {
+      for (const remote of [
+        scp,
+        `ssh://git@${host}:22/${name}.git`,
+        `ssh://git@altssh.${host}:443/${name}.git`,
+      ]) {
         const { collect } = transport(
           document(project({ origin, remote })),
           document([issue()]),
@@ -576,6 +580,8 @@ test.each([
         scp.toLowerCase(),
         `other@${host}:${name}`,
         `ssh://git@${host}:2222/${name}`,
+        `ssh://other@altssh.${host}:443/${name}`,
+        `ssh://git@altssh.${host}:22/${name}`,
         `git@scm.example.test:${name}`,
       ]) {
         const { collect, requests } = transport(
@@ -759,9 +765,26 @@ test("a wrong project, product or repository fails before listing issues or acce
   );
 });
 
-test("matches the HTTP target spelling emitted by Snyk CLI for public HTTPS remotes", async () => {
+test("matches the HTTP target spelling emitted by Snyk CLI for public Git remotes", async () => {
   for (const [remote, selected] of [
     ["http://github.com/Example/repository.git", sourceRepositoryUrl],
+    [
+      "http://github.com:443/Example/repository.git",
+      "https://github.com:443/example/repository",
+    ],
+    ["http://ssh.github.com:443/Example/repository.git", sourceRepositoryUrl],
+    [
+      "http://altssh.gitlab.com:443/Group/repo.git",
+      "https://gitlab.com/Group/repo",
+    ],
+    [
+      "http://altssh.bitbucket.org:443/Group/repo.git",
+      "https://bitbucket.org/Group/repo",
+    ],
+    [
+      "http://gitlab.com:8443/Group/repo.git",
+      "https://gitlab.com:8443/Group/repo",
+    ],
     ["http://gitlab.com/Team/project.git", "https://gitlab.com/Team/project"],
     ["http://bitbucket.org/Team/project", "https://bitbucket.org/Team/project"],
     ["http://example.ghe.com/Org/repo.git", "https://example.ghe.com/org/repo"],
@@ -776,12 +799,32 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public HTTPS remo
       document(source),
       document([issue()]),
     ).collect({ ...options, sourceRepositoryUrl: selected });
-    expect(normalizeSnykIssues(report).sourceRepositoryUrl).toBe(selected);
+    expect(
+      normalizeSnykIssues(JSON.parse(JSON.stringify(report)))
+        .sourceRepositoryUrl,
+    ).toBe(selected);
   }
   for (const [origin, remote, selected] of [
     ["github", "http://github.com/example/repository", sourceRepositoryUrl],
     ["cli", "http://github.com/example/other", sourceRepositoryUrl],
     ["cli", "http://github.com:80/example/repository", sourceRepositoryUrl],
+    ["cli", "http://github.com:443/example/repository", sourceRepositoryUrl],
+    [
+      "cli",
+      "http://github.com:8443/example/repository",
+      "https://github.com:443/example/repository",
+    ],
+    ["cli", "http://ssh.github.com:22/example/repository", sourceRepositoryUrl],
+    [
+      "cli",
+      "http://user@ssh.github.com:443/example/repository",
+      sourceRepositoryUrl,
+    ],
+    [
+      "cli",
+      "http://other.github.com:443/example/repository",
+      sourceRepositoryUrl,
+    ],
     [
       "cli",
       "http://gitlab.com/team/project",

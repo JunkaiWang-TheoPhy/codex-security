@@ -1,7 +1,6 @@
 import {
   type ExternalImportTarget,
   cloudRepositoryUrlKey,
-  repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -153,7 +152,7 @@ export function normalizeSemgrepFindings(
   options: SemgrepImportOptions = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeSemgrepReport(input, options, target, repositoryUrlKey);
+  return normalizeSemgrepReport(input, options, target);
 }
 
 /** @internal The file importer supplies its destination-specific repository comparison. */
@@ -161,7 +160,7 @@ export function normalizeSemgrepReport(
   input: unknown,
   options: SemgrepImportOptions,
   target: ExternalImportTarget,
-  key: typeof repositoryUrlKey,
+  isGitHub?: (url: string) => boolean,
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
@@ -169,7 +168,7 @@ export function normalizeSemgrepReport(
       document,
       options.sourceRepositoryUrl,
       target,
-      key,
+      isGitHub,
     );
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
     return normalizeSemgrepSarif(document, options, target);

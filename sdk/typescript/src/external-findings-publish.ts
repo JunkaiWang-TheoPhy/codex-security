@@ -788,7 +788,9 @@ async function preparePublicationInput(
         options.provider === "semgrep"
           ? semgrepPlatformFindingRepository(
               evidence.source_data,
-              cloudRepositoryUrlKey,
+              (url) =>
+                cloudRepositoryUrlKey(url) ===
+                cloudRepositoryUrlKey(destination.url),
             )
           : undefined,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),

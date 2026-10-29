@@ -345,20 +345,35 @@ test("maps Supply Chain packages, preserves source-only reachability, and keeps 
     locations: [],
     source_data: { finding: { reachability: "reachable" } },
   });
-  const advisoryOnly = {
-    ...finding,
-    vulnerability_identifier: "CVE-2025-0001",
-  };
-  const sparse = normalizeSemgrepPlatformFindings({
-    ...platformReport([advisoryOnly, platformFinding(22)]),
+  for (const metadata of [
+    {},
+    { found_dependency: {} },
+    { found_dependency: { ecosystem: "npm", version: "1.0.0" } },
+  ]) {
+    const advisoryOnly = {
+      ...finding,
+      ...metadata,
+      vulnerability_identifier: "CVE-2025-0001",
+    };
+    const result = normalizeSemgrepPlatformFindings({
+      ...platformReport([advisoryOnly]),
+      product: "sca",
+    });
+    expect(result.findings[0]?.evidence).toMatchObject({
+      advisory_ids: ["CVE-2025-0001"],
+      packages: [],
+      source_data: { finding: advisoryOnly },
+    });
+  }
+  const invalid = normalizeSemgrepPlatformFindings({
+    ...platformReport([
+      { ...finding, found_dependency: {}, vulnerability_identifier: " " },
+      { ...sca, id: 22, found_dependency: { package: 42 } },
+      { ...sca, id: 23, found_dependency: [] },
+    ]),
     product: "sca",
   });
-  expect(sparse.findings[0]?.evidence).toMatchObject({
-    advisory_ids: ["CVE-2025-0001"],
-    packages: [],
-    source_data: { finding: advisoryOnly },
-  });
-  expect(sparse.excluded).toHaveLength(1);
+  expect(invalid.excluded).toHaveLength(3);
   expect(normalizeSemgrepPlatformFindings(report).excluded).toHaveLength(1);
   const code = platformReport([finding]);
   const ai = normalizeSemgrepPlatformFindings({ ...code, product: "ai_sast" });

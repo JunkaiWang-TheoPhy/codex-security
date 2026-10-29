@@ -7,7 +7,7 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
-  localRepositoryUrlKey,
+  isVerifiedGitHubRepository,
   repositoryUrlKey,
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
@@ -76,12 +76,15 @@ export async function readExternalFindings(
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path, target);
     if (findings.sourceRepositoryUrl) {
-      const key =
-        findings.sourceRepositoryPlatform === "github"
-          ? cloudRepositoryUrlKey
-          : findings.sourceRepositoryPlatform === "other" || target === "cloud"
-            ? repositoryUrlKey
-            : (url: string) => localRepositoryUrlKey(url, references);
+      const github =
+        findings.sourceRepositoryPlatform === "github" ||
+        (findings.sourceRepositoryPlatform === undefined &&
+          (target === "cloud" ||
+            isVerifiedGitHubRepository(
+              findings.sourceRepositoryUrl,
+              references,
+            )));
+      const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
       if (
         options.sourceRepositoryUrl &&
         key(findings.sourceRepositoryUrl) !== key(options.sourceRepositoryUrl)
@@ -102,15 +105,12 @@ export async function readExternalFindings(
   }
   if (options.provider === "semgrep") {
     // Cloud checks retained URLs against its connected destination before publication.
-    const key =
-      target === "cloud"
-        ? cloudRepositoryUrlKey
-        : (url: string) => localRepositoryUrlKey(url, references);
     const findings = normalizeSemgrepReport(
       await readScannerJson(path),
       { sourceRepositoryUrl: options.sourceRepositoryUrl },
       target,
-      key,
+      (url) =>
+        target === "cloud" || isVerifiedGitHubRepository(url, references),
     );
     if (findings.sourceRepositoryUrl) return { findings };
     const sourceRepositories = findings.findings.flatMap(({ evidence }) => {

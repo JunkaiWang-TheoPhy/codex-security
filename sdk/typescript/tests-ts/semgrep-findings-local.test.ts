@@ -67,6 +67,92 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
   }
 });
 
+test("replays native SSH evidence and URL-less labels from the selected Semgrep project", async () => {
+  const fixture = await localFindingsFixture({ remote: repositoryUrl });
+  try {
+    const report = platformReport([]);
+    const project = {
+      ...report.project,
+      name: "billing-module",
+      url: "ssh://git@github.com/example/project.git",
+    };
+    const alias = "local_scan/backend";
+    const rows = [
+      { ...platformFinding(8), repository: { name: alias } },
+      {
+        ...platformFinding(9),
+        repository: { url: "git@github.com:example/project.git" },
+      },
+    ];
+    const responses = [{ project }, { findings: rows }];
+    const collected = await collectSemgrepPlatformFindings(
+      {
+        deployment: report.deployment,
+        project: project.name,
+        ref: report.ref,
+        sourceRepositoryUrl: repositoryUrl,
+        token: "synthetic-token",
+      },
+      {
+        environment: fixture.environment,
+        fetch: async () => Response.json(responses.shift()),
+      },
+    );
+    expect(collected).toMatchObject({
+      project,
+      sourceRepositoryUrl: repositoryUrl,
+      repositoryAliases: [alias],
+      findings: rows,
+    });
+    const file = join(fixture.root, "semgrep.json");
+    await writeFile(file, JSON.stringify(collected));
+    const options = {
+      repository: fixture.repository,
+      sourceKey: "platform",
+      provider: "semgrep" as const,
+    };
+    const dependencies = { environment: fixture.environment };
+    const prepared = await prepareLocalExternalImport(
+      file,
+      options,
+      dependencies,
+    );
+    expect((await prepared.import()).counts.created).toBe(2);
+    const stored = await listLocalExternalFindings(options, dependencies);
+    expect(stored.map((entry) => entry.evidence.source_data)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          repositoryAliases: [alias],
+          project,
+          finding: rows[0],
+        }),
+        expect.objectContaining({ project, finding: rows[1] }),
+      ]),
+    );
+    expect(() =>
+      normalizeSemgrepPlatformFindings({ ...collected, repositoryAliases: [] }),
+    ).toThrow("matching source repository");
+    for (const url of [
+      "git@github.com:other/project.git",
+      "ssh://deploy@github.com/example/project.git",
+      "ssh://git@github.com:2222/example/project.git",
+      "git@scm.example.test:example/project.git",
+    ]) {
+      expect(() =>
+        normalizeSemgrepPlatformFindings({
+          ...collected,
+          project: { ...project, url },
+          sourceRepositoryUrl: url.includes("scm.example.test")
+            ? "https://scm.example.test/example/project"
+            : repositoryUrl,
+        }),
+      ).toThrow();
+    }
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {
   const url = "https://scm.example.test/Team/Project";
   const fixture = await localFindingsFixture({ remote: url.toLowerCase() });
@@ -99,7 +185,10 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
 
     const row = {
       ...platformFinding(7),
-      repository: { name: "project", url: url.toLowerCase() },
+      repository: {
+        name: "project",
+        url: "git@scm.example.test:team/project.git",
+      },
     };
     const responses = [
       { project: { ...report.project, url } },
@@ -123,9 +212,7 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
       sourceRepositoryUrl: url.toLowerCase(),
       findings: [row],
     });
-    expect(() => normalizeSemgrepPlatformFindings(collected)).toThrow(
-      "does not match",
-    );
+    expect(() => normalizeSemgrepPlatformFindings(collected)).toThrow();
     const file = join(fixture.root, "semgrep.json");
     await writeFile(file, JSON.stringify(collected));
     const prepareFile = (source?: { url: string; platform?: "github" }) =>
@@ -149,6 +236,14 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
     expect(
       (await prepareFile({ url, platform: "github" })).preview.findings,
     ).toHaveLength(1);
+    const ssh = "scm.example.test:team/project.git";
+    expect(
+      (await prepareFile({ url: "git@" + ssh, platform: "github" })).preview
+        .findings,
+    ).toHaveLength(1);
+    await expect(
+      prepareFile({ url: "other@" + ssh, platform: "github" }),
+    ).rejects.toThrow("does not match");
   } finally {
     await fixture.dispose();
   }
@@ -203,6 +298,16 @@ test.each([
     "https://github.com:443/example/project",
   ],
   ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
+  [
+    "https://github.com:443/example/project",
+    "git@github.com:example/project.git",
+    repositoryUrl,
+  ],
+  [
+    "https://github.com:443/example/archive.git.git",
+    "git@github.com:example/archive.git.git",
+    "https://github.com/example/archive.git.git",
+  ],
   [
     "https://bitbucket.org/team/project",
     "git+ssh://git@bitbucket.org:22/team/project.git",

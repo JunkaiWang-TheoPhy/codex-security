@@ -20,7 +20,7 @@ import {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
-  localRepositoryUrlKey,
+  isVerifiedGitHubRepository,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
@@ -425,11 +425,12 @@ async function hasGitMetadata(
 function hostedRepositoryMatches(
   source: ExternalSourceRepository,
   value: string,
+  expectedKey?: string,
 ): boolean {
   const github = source.platform === "github";
   const key = github ? cloudRepositoryUrlKey : repositoryUrlKey;
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
-  return key(url) === key(source.url);
+  return key(url) === (expectedKey ?? key(source.url));
 }
 
 async function requireMatchingRepository(
@@ -505,7 +506,7 @@ async function requireMatchingRepository(
       if (
         httpKey && http.test(remote)
           ? parsed.key === httpKey
-          : hostedRepositoryMatches(hosted, remote)
+          : hostedRepositoryMatches(hosted, remote, httpKey)
       )
         return;
     }
@@ -697,7 +698,7 @@ export async function prepareLocalImport(
     }
     if (options.provider === "semgrep")
       native = semgrepPlatformFindingRepository(data, (url) =>
-        localRepositoryUrlKey(url, dependencies.sourceRepositories),
+        isVerifiedGitHubRepository(url, dependencies.sourceRepositories),
       );
     if (native) {
       hostedUrl ??= native;

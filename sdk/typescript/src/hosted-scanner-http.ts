@@ -1,6 +1,6 @@
 import { CodexSecurityError } from "./errors.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
-import { requiredText } from "./scanner-import.js";
+import { decodeScannerJson, requiredText } from "./scanner-import.js";
 
 export interface HostedScannerHttpOptions {
   environment?: NodeJS.ProcessEnv;
@@ -22,6 +22,17 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
   return raw;
 }
 
+function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
+  if (name === "SNYK_API_V3_URL" || name === "SNYK_API_REST_URL") {
+    // snyk-config enumerates environment names and preserves their case, even on Windows.
+    for (const key in environment) {
+      if (key === name) return environment[key];
+    }
+    return undefined;
+  }
+  return importEnvironmentSetting(environment, name)?.value;
+}
+
 /** Use a vendor environment token only at the origin configured for it. */
 export function hostedEnvironmentToken(
   environment: NodeJS.ProcessEnv,
@@ -32,7 +43,7 @@ export function hostedEnvironmentToken(
   const token = importEnvironmentSetting(environment, tokenName)?.value;
   if (token) {
     for (const name of originNames) {
-      const configured = importEnvironmentSetting(environment, name)?.value;
+      const configured = endpointSetting(environment, name);
       if (!configured) continue;
       const url = URL.parse(configured);
       // Snyk derives its REST host from the general endpoint (e.g. app.eu.snyk.io).
@@ -66,7 +77,7 @@ export function hostedScannerHttp(
   async function getJson(
     url: URL,
     authorization: string,
-    parse?: (body: string) => unknown,
+    parse: (body: string) => unknown = JSON.parse,
   ): Promise<unknown> {
     signal?.throwIfAborted();
     const response = await request(url, {
@@ -85,7 +96,7 @@ export function hostedScannerHttp(
         `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
       );
     }
-    return parse ? parse(await response.text()) : response.json();
+    return parse(decodeScannerJson(await response.arrayBuffer()));
   }
   return { signal, getJson };
 }

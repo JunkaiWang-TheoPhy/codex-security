@@ -78,17 +78,19 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
-export async function readScannerJson(path: string): Promise<unknown> {
-  const bytes = await readScannerBytes(path);
-  let decoded: string;
+export function decodeScannerJson(bytes: ArrayBuffer | Uint8Array): string {
   try {
-    decoded = strictUtf8.decode(bytes);
+    return strictUtf8.decode(bytes);
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner report is not valid UTF-8. ${errorMessage(error)}`,
       { cause: error },
     );
   }
+}
+
+export async function readScannerJson(path: string): Promise<unknown> {
+  const decoded = decodeScannerJson(await readScannerBytes(path));
   try {
     return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {

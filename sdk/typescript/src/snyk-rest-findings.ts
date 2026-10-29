@@ -10,6 +10,7 @@ import { requireExternalImports } from "./external-imports-feature.js";
 import {
   isPublicGitHost,
   normalizeHostedGitRepositoryUrl,
+  publicGitSsh443Host,
 } from "./git-remote.js";
 import {
   hostedScannerHttp,
@@ -204,6 +205,22 @@ function checkOrganization(
     );
 }
 
+// Snyk CLI renders HTTPS and SSH Git remotes as HTTP, preserving explicit ports.
+function cliRepositoryKey(remote: string) {
+  const parts = /^http:\/\/([^/]+)(\/.*)$/iu.exec(remote);
+  if (!parts) return;
+  const authority = parts[1]!.toLowerCase();
+  const alternate = publicGitSsh443Host(authority);
+  const hostname = authority.replace(/:\d+$/u, "");
+  if (
+    alternate ||
+    isPublicGitHost(hostname) ||
+    hostname === "dev.azure.com" ||
+    /^[a-z\d-]+\.visualstudio\.com$/u.test(hostname)
+  )
+    return repositoryUrlKey(`https://${alternate ?? authority}${parts[2]}`);
+}
+
 function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
@@ -217,15 +234,7 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   const key = enterprise ? cloudRepositoryUrlKey : repositoryUrlKey;
   const target = key(normalized);
   const source = key(selected.sourceRepositoryUrl);
-  // Snyk CLI renders the Git remote as HTTP even when it was cloned over HTTPS or SSH.
-  const authority = /^http:\/\/([^/]+)\//u.exec(target)?.[1];
-  const cliTarget =
-    origin === "cli" &&
-    authority !== undefined &&
-    (isPublicGitHost(authority) ||
-      authority === "dev.azure.com" ||
-      /^[a-z\d-]+\.visualstudio\.com$/u.test(authority)) &&
-    source === target.replace("http:", "https:");
+  const cliTarget = origin === "cli" && cliRepositoryKey(url) === source;
   if (/[?#]/u.test(url) || (target !== source && !cliTarget))
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",

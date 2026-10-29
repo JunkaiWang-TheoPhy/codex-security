@@ -23,11 +23,13 @@ project ID, ref and product. For collections spanning multiple pages, it checks
 for overlapping finding IDs and rereads the first page. Retry if either check
 detects a change. The API does not provide an atomic snapshot, so concurrent
 changes confined to later pages can still cause findings to be skipped.
-If the project has no SCM URL, supply `--source-repository-url` when collecting.
-The saved `semgrep-platform-findings/v1` report retains native URLs and any
-distinct operator mapping. An import verifies path casing on custom hosts
-against a known GitHub binding. For split projects, Semgrep's project ID scopes
-the request. Rows can name the project or its physical repository.
+If the project has no SCM URL or supplies an SSH clone URL, provide
+its HTTP(S) URL with `--source-repository-url`. The report keeps the native URL
+and mapping. Both SSH clones and case-only path differences on custom hosts
+require a verified GitHub binding at import. The project ID scopes collection. A URL-less row may
+carry an independently configured repository name, so the collector records
+those additional names for replay. Every import still checks the destination,
+native URLs and ref.
 This endpoint excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 

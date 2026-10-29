@@ -86,6 +86,20 @@ test(transportTest, async () => {
   await expect(snyk()).rejects.toThrow("injected transport");
   await expect(semgrep()).rejects.toThrow("injected transport");
 
+  const eu = "https://api.eu.snyk.io";
+  const us = "https://api.snyk.io/rest";
+  process.env["Snyk_Api_V3_Url"] = us;
+  transport.environment["SNYK_Api_REST_Url"] = us;
+  transport.environment[
+    process.platform === "win32" ? "Snyk_Cfg_Endpoint" : "SNYK_CFG_ENDPOINT"
+  ] = eu;
+  await expect(snyk()).rejects.toThrow("SNYK_CFG_ENDPOINT");
+  snykOptions.apiOrigin = eu;
+  await expect(snyk()).rejects.toThrow("injected transport");
+  delete process.env["Snyk_Api_V3_Url"];
+  process.env["SNYK_API_V3_URL"] = us;
+  await expect(snyk()).rejects.toThrow("SNYK_API_V3_URL");
+
   transport.environment["SEMGREP_APP_URL"] = "https://example.invalid";
   await expect(semgrep()).rejects.toThrow("SEMGREP_APP_URL");
   await expect(semgrep("explicit")).rejects.toThrow("injected transport");
@@ -95,6 +109,7 @@ test(transportTest, async () => {
   expect(transport.requests).toEqual([
     "token synthetic-snyk",
     "Bearer synthetic-semgrep",
+    "token synthetic-snyk",
     "Bearer explicit",
     "Bearer synthetic-semgrep",
   ]);
@@ -142,6 +157,42 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
   }
   await expect(collect(eu, "explicit")).rejects.toThrow("requested project");
   expect(requests).toEqual([`${eu} token explicit`]);
+});
+
+test("hosted collection rejects invalid UTF-8 before it can replace vendor evidence", async () => {
+  // The two distinct issue keys would both decode to the same replacement character.
+  const malformed = (byte: number) =>
+    new Response(
+      Buffer.concat([
+        Buffer.from('{"key":"'),
+        Buffer.from([byte]),
+        Buffer.from('"}'),
+      ]),
+    );
+  for (const byte of [0xfe, 0xff]) {
+    const transport = { environment, fetch: async () => malformed(byte) };
+    await expect(
+      collectSnykIssues(
+        {
+          organizationId,
+          projectId,
+          sourceRepositoryUrl,
+          product: "open-source",
+        },
+        transport,
+      ),
+    ).rejects.toThrow("not valid UTF-8");
+    await expect(
+      collectSemgrepPlatformFindings(
+        {
+          deployment: "example",
+          project: platformProject.name,
+          ref: platformRef,
+        },
+        transport,
+      ),
+    ).rejects.toThrow("not valid UTF-8");
+  }
 });
 
 test("the Semgrep CLI emits a replayable report without a framework wrapper", async () => {

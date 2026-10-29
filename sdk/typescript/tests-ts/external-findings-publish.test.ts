@@ -51,7 +51,10 @@ import {
   platformFinding,
   platformReport,
 } from "./support/semgrep-platform-fixtures.js";
-import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
+import {
+  snykRestFixture,
+  snykRestProject,
+} from "./support/snyk-rest-fixtures.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -1294,6 +1297,29 @@ test.each(["open-source", "code"] as const)(
   },
 );
 
+test("hosted Snyk resolves an unverified Enterprise mapping against the connected Cloud repository", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const report = {
+    ...snykRestFixture("open-source", { sourceRepositoryUrl: url }),
+    project: snykRestProject({ origin: "github-enterprise", remote: null }),
+  };
+  const cloud = await fixture(report, url.toLowerCase());
+  const selected = {
+    ...options,
+    provider: "snyk" as const,
+    sourceRepositoryUrl: url.toLowerCase(),
+  };
+  const prepare = () =>
+    prepareExternalPublication(cloud.file, selected, cloud.deps);
+  expect((await prepare()).preview.findings).toHaveLength(1);
+  cloud.state.repositoryUrl += "-foreign";
+  await expect(prepare()).rejects.toThrow("does not match");
+  cloud.state.repositoryUrl = url.toLowerCase();
+  report.project = snykRestProject({ origin: "gitlab", remote: url });
+  await writeFile(cloud.file, JSON.stringify(report));
+  await expect(prepare()).rejects.toThrow("does not match the declared");
+});
+
 test("hosted Semgrep accepts Enterprise casing against the connected Cloud repository", async () => {
   const url = "https://scm.example.test/Team/Project";
   const report = platformReport();
@@ -1304,7 +1330,10 @@ test("hosted Semgrep accepts Enterprise casing against the connected Cloud repos
     findings: [
       {
         ...row,
-        repository: { name: "physical-monorepo", url: url.toLowerCase() },
+        repository: {
+          name: "physical-monorepo",
+          url: "ssh://git@scm.example.test/team/project.git",
+        },
       },
     ],
   });
