@@ -29,6 +29,7 @@ import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
+  positiveInt64,
   record,
   hostedRepositoryPath,
   requiredText,
@@ -79,12 +80,11 @@ function productType(value: unknown): Product {
 }
 
 function platformId(value: unknown): number | string | undefined {
-  if (
-    typeof value === "string" &&
-    /^[1-9]\d{0,18}$/u.test(value) &&
-    BigInt(value) <= 9223372036854775807n
-  )
-    return Number.isSafeInteger(Number(value)) ? Number(value) : value;
+  if (typeof value === "string") {
+    const id = positiveInt64(value);
+    if (id !== undefined)
+      return Number.isSafeInteger(Number(id)) ? Number(id) : id;
+  }
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0)
     return value;
 }

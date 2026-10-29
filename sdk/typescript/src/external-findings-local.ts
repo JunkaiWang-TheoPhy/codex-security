@@ -155,6 +155,9 @@ function remoteRepository(
   bound: boolean,
   hostedKey?: (url: string) => string,
 ): { key: string; account?: string; homeRelative?: boolean } | undefined {
+  // libcurl rejects multiple unescaped userinfo separators before making a request.
+  if (/^(?:https?|ftps?):\/\/[^/?#@]*@[^/?#@]*@/iu.test(value))
+    return undefined;
   const key =
     hostedKey ??
     (provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey);
@@ -886,17 +889,13 @@ export async function prepareLocalImport(
         sources.set(source.url, { url: source.url });
         if (source.nativeUrl)
           sources.set(source.nativeUrl, { url: source.nativeUrl });
+        // A native plugin may report its local drive path. Check it against the checkout below.
         if (
-          !hostedUrl &&
           reportPlatform === "other" &&
+          windowsDrivePath.test(source.url) &&
           isGitSshRemote(source.url)
         )
-          // A private SSH selector retained by Snyk can match the same transport literally.
-          hostedUrl = normalizeHostedGitRepositoryUrl(
-            source.url,
-            undefined,
-            false,
-          );
+          hostedUrl ??= source.url;
         // Only retained or independent evidence can establish GitHub on a populated report.
         if (source.platform !== undefined)
           hostedGitHub = (hostedGitHub ?? true) && source.platform === "github";
@@ -963,11 +962,18 @@ export async function prepareLocalImport(
     const github =
       hostedGitHub ?? references.some(({ platform }) => platform === "github");
     const url = projectedUrl
-      ? hostedRepositoryUrl(
-          normalizeHostedGitRepositoryUrl(projectedUrl, undefined, github),
-          "Projected source repository URL",
-        )
+      ? normalizeHostedGitRepositoryUrl(projectedUrl, undefined, github)
       : source;
+    // A case-sensitive report may retain only its private SSH selector.
+    if (
+      projectedUrl &&
+      !(
+        reportPlatform === "other" &&
+        !windowsDrivePath.test(url) &&
+        isGitSshRemote(url)
+      )
+    )
+      hostedRepositoryUrl(url, "Projected source repository URL");
     hosted = {
       url,
       platform: github ? "github" : undefined,

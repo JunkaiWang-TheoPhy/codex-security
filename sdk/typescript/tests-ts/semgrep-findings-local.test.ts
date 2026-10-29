@@ -138,6 +138,14 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
   );
   expect((await prepared.import()).counts.created).toBe(2);
 
+  // A rounded fractional token must not overwrite the genuine occurrence for ID 1.
+  const small = JSON.stringify(platformReport([platformFinding(1)]));
+  await writeFile(
+    fixture.file,
+    small.replace('"id":1,', '"id":1.00000000000000001,'),
+  );
+  expect((await readSemgrepFindings(fixture.file)).excluded).toHaveLength(1);
+
   const amount = "-9.007199254740993E+15";
   const exponential = platformReport([
     { ...platformFinding(1), measurements: [amount] },
@@ -409,6 +417,7 @@ test.each([
   "ftp://github.com/example/project",
   " ssh://git@github.com/example/project.git",
   "https::https://github.com/example/foreign.git",
+  "https::https://a@b@github.com/example/project.git",
   "ext::ssh git@github.com %S example/foreign.git",
   "example::file:///example/foreign.git",
   "example::foreign\nhttps://github.com/example/project",
@@ -453,7 +462,7 @@ test.each([
 test.each([
   [
     repositoryUrl,
-    "https://git@github.com:443/example/project.git",
+    "https://git%40fixture@github.com:443/example/project.git",
     "https://github.com:443/example/project",
   ],
   ["https://github.com:443/example/project", repositoryUrl, repositoryUrl],
@@ -546,27 +555,27 @@ test("checks scanner repository links independently of Git checkout URLs", async
 
 const gitlabUrl = "https://gitlab.com/Group/My-Repo";
 test.each([
-  ["{1}", "%7B1%7D"],
-  ["%7B1%7D", "{1}"],
-])(
-  "a hosted checkout ending in %s distinguishes literal HTTP path bytes",
-  async (suffix, other) => {
-    await using f = await platformCheckout(gitlabUrl + suffix);
-    const prepare = (path: string) =>
-      prepareNormalizedLocalImport(
-        {
-          read: 0,
-          findings: [],
-          excluded: [],
-          sourceRepositoryUrl: gitlabUrl + path,
-        },
-        f.options,
-        f.dependencies,
-      );
-    expect((await prepare(suffix)).preview.findings).toEqual([]);
-    await expect(prepare(other)).rejects.toThrow(
-      "does not match a configured remote",
+  ["{1}", "{1}", false],
+  ["{1}", "%7B1%7D", false],
+  ["%7B1%7D", "%7B1%7D", true],
+  ["/tmp{1}/../repo", "/repo", true],
+  ["/repo", "/tmp{1}/../repo", true],
+] as const)(
+  "compares the Git checkout %s with the scanner link %s",
+  async (checkout, source, matches) => {
+    await using f = await platformCheckout(gitlabUrl + checkout);
+    const prepared = prepareNormalizedLocalImport(
+      {
+        read: 0,
+        findings: [],
+        excluded: [],
+        sourceRepositoryUrl: gitlabUrl + source,
+      },
+      f.options,
+      f.dependencies,
     );
+    if (matches) expect((await prepared).preview.findings).toEqual([]);
+    else await expect(prepared).rejects.toThrow("does not match");
   },
 );
 

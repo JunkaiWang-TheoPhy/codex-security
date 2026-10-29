@@ -92,6 +92,7 @@ describe("local normalized scanner findings", () => {
             sourceRepositories: [{ url: declared }],
           },
         );
+      await expect(prepare("", url)).rejects.toThrow("Source repository URL");
       await expect(prepare(foreign, url)).rejects.toThrow("does not match");
       await expect(prepare(url, foreign)).rejects.toThrow("does not match");
       expect((await prepare(url, url)).preview.findings).toEqual(
@@ -109,6 +110,26 @@ describe("local normalized scanner findings", () => {
               },
             };
       await expect(prepare(url, url)).rejects.toThrow("does not match");
+    },
+  );
+  test.each(["snyk", "semgrep"] as const)(
+    "projected %s reports match a private SSH repository literally",
+    async (provider) => {
+      const url = "git@scm.example.test:Team/Repo.git";
+      const f = await fixture({ remote: url });
+      const report = { ...input(), sourceRepositoryPlatform: "other" as const };
+      const prepare = (url: string) =>
+        prepareNormalizedLocalImport(
+          report,
+          { ...source, provider, repository: f.repository },
+          { environment: f.environment, sourceRepositories: [{ url }] },
+        );
+      expect((await prepare(url)).preview.findings).toEqual(report.findings);
+      await expect(prepare(url.toLowerCase())).rejects.toThrow(
+        "does not match",
+      );
+      execFileSync("git", ["-C", f.repository, "remote", "remove", "origin"]);
+      await expect(prepare("C:/org/repo")).rejects.toThrow("HTTP(S)");
     },
   );
   test.each(["snyk", "semgrep"] as const)(

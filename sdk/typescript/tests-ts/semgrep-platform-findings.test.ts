@@ -457,7 +457,11 @@ test("keeps known non-GitHub URLs case-sensitive during collection", async () =>
 });
 
 test("losslessly captures distinct int64 IDs and rejects a truncated saved report", async () => {
-  const ids = ["9223372036854775806", "9223372036854775807"];
+  const ids = [
+    "9223372036854775806",
+    "9.223372036854775807e18",
+    "9007199254740990.5",
+  ];
   const records = ids.map((id) => ({
     ...platformFinding(17),
     id,
@@ -465,7 +469,7 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
   }));
   // Emit int64 fields as JSON numbers without rounding them in the fixture.
   const json = JSON.stringify({ findings: records }).replace(
-    /"(\d{16,19})"/gu,
+    /"([\d.e]{16,})"/gu,
     "$1",
   );
   const report = await collectPages(new Response(json));
@@ -473,7 +477,14 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
   const parsed = normalizeSemgrepPlatformFindings(
     JSON.parse(JSON.stringify(report)),
   );
+  expect(parsed.excluded).toHaveLength(1);
+  const canonical = normalizeSemgrepPlatformFindings(
+    platformReport([{ ...records[1], id: "9223372036854775807" }]),
+  );
   expect(parsed.findings).toHaveLength(2);
+  expect(parsed.findings[1]?.source_finding_id).toBe(
+    canonical.findings[0]!.source_finding_id,
+  );
   expect(parsed.findings[0]?.source_finding_id).not.toBe(
     parsed.findings[1]?.source_finding_id,
   );

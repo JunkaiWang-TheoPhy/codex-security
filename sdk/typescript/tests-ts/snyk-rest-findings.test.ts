@@ -1015,9 +1015,13 @@ test("compares Snyk native HTTP repository URLs without changing their scheme", 
   ).toThrow("target URL");
 });
 
-test("checks native Snyk HTTP paths before removing dot segments", async () => {
+test("checks the actual HTTP and Git paths of native Snyk targets", async () => {
   const source = "https://scm.example.test/Team/repo";
-  for (const path of [String.raw`foreign\sub/../repo`, "%2e%2e/../repo"]) {
+  for (const path of [
+    String.raw`foreign\sub/../repo`,
+    "%2e%2e/../repo",
+    "repo{one}",
+  ]) {
     const remote = "https://scm.example.test/Team/" + path;
     const native = project({ origin: "gitlab", remote });
     const { requests, collect } = transport(

@@ -187,6 +187,11 @@ recover:
   but persisting a later receipt failed. If an upgrade accepts additional rows
   from the same file, its preview is a new selection. Resume the original
   selection first using the earlier version or the saved normalized SDK input.
+  An older Snyk or Semgrep request saved without a repository binding needs a
+  matching current catalog URL if its evidence cannot identify the original
+  repository. Resume it before renaming. Ambiguous paths include those with a
+  literal `k` or `K` (as in `work`), a terminal `.` or `..` segment, or an
+  encoded clone suffix such as `proj%2Egit`.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

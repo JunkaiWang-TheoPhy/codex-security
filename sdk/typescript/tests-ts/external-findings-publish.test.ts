@@ -55,6 +55,7 @@ import {
 } from "./support/semgrep-platform-fixtures.js";
 import {
   snykRestFixture,
+  snykRestIssue,
   snykRestProject,
 } from "./support/snyk-rest-fixtures.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
@@ -1550,6 +1551,41 @@ test("hosted Semgrep accepts Enterprise casing against the connected Cloud repos
   await expect(prepare()).rejects.toThrow("does not match");
 });
 
+test("a narrowed Snyk clone spelling cannot resume a broader approval", async () => {
+  const url = "https://scm.example.test/Team/repo";
+  const clone = url + ".git";
+  const cloud = await fixture([], clone);
+  const findings = [url, clone].map(
+    (sourceRepositoryUrl, i) =>
+      normalizeSnykIssues({
+        ...snykRestFixture("open-source", {
+          sourceRepositoryUrl,
+          issues: [snykRestIssue({ key: "issue-" + i })],
+        }),
+        project: snykRestProject({ origin: "gitlab", remote: url }),
+      }).findings[0]!,
+  );
+  findings.push({
+    source_finding_id: "opaque",
+    evidence: { title: "Opaque", severity: "high" },
+  });
+  const prepare = (sourceRepositoryUrl?: string) =>
+    prepareNormalizedExternalPublication(
+      { read: findings.length, excluded: [], findings, sourceRepositoryUrl },
+      { ...options, provider: "snyk" },
+      cloud.deps,
+    );
+  await expect(prepare(url)).rejects.toThrow("does not match");
+  const original = await prepare();
+  cloud.state.loseResponse = true;
+  await expect(original.publish()).rejects.toThrow("resume the saved request");
+  cloud.state.repositoryUrl = "https://scm.example.test/Renamed/repo";
+  await expect(prepare(url)).rejects.toThrow("does not match");
+  expect(cloud.posts).toHaveLength(1);
+  await (await prepare()).publish();
+  expect(cloud.posts[1]).toBe(cloud.posts[0]);
+});
+
 test("a stricter Snyk declaration checks the original GitHub Enterprise target on Cloud", async () => {
   const sourceRepositoryUrl = "https://scm.example.test/Team/project";
   const cloud = await fixture([], sourceRepositoryUrl);
@@ -1630,6 +1666,44 @@ test("a bound retry accepts equivalent HTTP path bytes after a catalog rename", 
   expect((await retry.publish()).verified).toBe(1);
   expect(cloud.posts[1]).toBe(cloud.posts[0]);
 });
+
+test.each([
+  ["proj%2Egit", "proj%2Egit.git", false],
+  ["pkg", "pKg", false],
+  ["app/sub/..", "app/sub/...git", false],
+  ["pr%6Fject", "pr%6Fject", true],
+] as const)(
+  "checks the earlier Cloud URL comparison for %s",
+  async (path, catalog, safe) => {
+    const prefix = "https://github.com/example/";
+    const source = prefix + path;
+    const cloud = await fixture([], prefix + catalog);
+    const { findings } = normalizeSemgrepPlatformFindings(platformReport());
+    const evidence = findings[0]!.evidence;
+    delete evidence.source_data;
+    evidence.details!.repository = { url: source };
+    const prepare = (sourceRepositoryUrl?: string) =>
+      prepareNormalizedExternalPublication(
+        { read: 1, findings, excluded: [], sourceRepositoryUrl },
+        { ...options, provider: "semgrep" },
+        cloud.deps,
+      );
+    cloud.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    if (!safe) await expect(prepare(source)).rejects.toThrow("does not match");
+    cloud.state.repositoryUrl = prefix + "renamed";
+    if (!safe) {
+      await expect(prepare(source)).rejects.toThrow("does not match");
+      cloud.state.repositoryUrl = source;
+    }
+    const retry = await prepare(source);
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(cloud.posts).toEqual([cloud.posts[0]!, cloud.posts[0]!]);
+  },
+);
 
 test("a repository reset retires an unbound Semgrep request after a rename", async () => {
   const { findings, sourceRepositoryUrl } =
@@ -1899,6 +1973,7 @@ test("platform-only Semgrep declarations check retained SARIF provenance before 
       { ...options, provider: "semgrep" },
       cloud.deps,
     );
+  await expect(prepare("")).rejects.toThrow("Source repository URL");
   await expect(prepare(undefined, "github")).rejects.toThrow("does not match");
   const first = await prepare();
   cloud.state.loseResponse = true;

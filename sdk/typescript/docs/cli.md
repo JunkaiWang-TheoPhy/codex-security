@@ -1423,6 +1423,10 @@ covers plugin setup, CLI exit codes, multi-project scans and evidence limits.
 Use the opt-in collectors to read existing findings. Save complete `--format json`
 output and pass it to `publish findings` only when collection succeeds. Field
 filters, token limits and `--full-output` change the saved format.
+The scanner's repository URL must resolve to the same path in a browser and in
+Git. For example, use `/team/repo%7Bone%7D` for an escaped brace path that
+both can request. Collection and replay reject a literal `/team/repo{one}`
+because browsers escape its braces while Git sends them literally.
 
 - `import snyk PROJECT_UUID --snyk-org ORG_UUID --source-repository-url URL`
   reads Open Source issues by default. Select `--snyk-product code` for the Code

@@ -97,25 +97,54 @@ export function decodeScannerJson(bytes: ArrayBuffer | Uint8Array): string {
   }
 }
 
+/** Canonical decimal digits of a positive int64 JSON number without rounding it. */
+export function positiveInt64(source: string): string | undefined {
+  const parts = /^(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(source);
+  if (!parts) return;
+  const fraction = parts[2] ?? "";
+  const digits = (parts[1]! + fraction).replace(/^0+/u, "");
+  const length = digits.length + Number(parts[3] ?? 0) - fraction.length;
+  if (
+    !digits ||
+    length < 1 ||
+    length > 19 ||
+    /[1-9]/u.test(digits.slice(length))
+  )
+    return;
+  const id = digits.slice(0, length).padEnd(length, "0");
+  if (length < 19 || id <= "9223372036854775807") return id;
+}
+
 export function parseHostedScannerJson(source: string): unknown {
   return JSON.parse(
     source,
-    (_key, value: unknown, context?: { source?: string }) => {
+    (key, value: unknown, context?: { source?: string }) => {
       if (
         typeof value === "number" &&
         (!Number.isFinite(value) ||
           (Number.isInteger(value) && !Number.isSafeInteger(value)))
       )
         return requiredText(context?.source, "Exact scanner numeric value");
+      // A fractional ID can round to a positive safe integer in the initial parse.
+      if (
+        key === "id" &&
+        typeof value === "number" &&
+        Number.isInteger(value) &&
+        value > 0
+      ) {
+        const token = context?.source;
+        if (token && token !== String(value) && !positiveInt64(token))
+          return token;
+      }
       return value;
     },
   );
 }
 
-// Only numbers with 16 or more integer digits or a positive exponent can exceed
-// the safe integer range. A match inside a string only triggers an extra parse.
+// Sixteen mantissa digits may lose precision even if the parsed integer is safe.
+// A positive exponent can also overflow. A match inside a string only costs a parse.
 const possiblyUnsafeJsonNumber =
-  /(?:\[|[:,])\s*-?(?:\d{16}|\d+(?:\.\d+)?e\+?\d)/iu;
+  /(?:\[|[:,])\s*-?(?:(?:\d\.?){16}|\d+(?:\.\d+)?e\+?\d)/iu;
 
 export async function readScannerJson(
   path: string,
