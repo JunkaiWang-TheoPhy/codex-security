@@ -26,6 +26,7 @@ import {
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { snykRepositoryClaims } from "../src/snyk-findings.js";
+import { normalizeGitRepositoryUrl } from "../src/git-remote.js";
 import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
@@ -1443,6 +1444,72 @@ test("hosted Semgrep accepts Enterprise casing against the connected Cloud repos
   expect((await prepare()).preview.findings).toHaveLength(1);
   cloud.state.repositoryUrl += "-foreign";
   await expect(prepare()).rejects.toThrow("does not match");
+});
+
+test("hosted Snyk compares legacy SSH claims with the verified platform's casing", async () => {
+  const url = "https://scm.example.test/Team/my%2Drepo";
+  const hosted = normalizeSnykIssues({
+    ...snykRestFixture("open-source", { sourceRepositoryUrl: url }),
+    project: snykRestProject({ origin: "gitlab", remote: url }),
+  });
+  const cloud = await fixture([], url);
+  for (const format of ["plugin", "SARIF"] as const) {
+    const prepare = async (owner: string) => {
+      const { normalized } = await snykRepositoryEvidence(
+        format,
+        `git@scm.example.test:${owner}/my-repo.git`,
+      );
+      return prepareNormalizedExternalPublication(
+        { ...hosted, findings: [...normalized.findings, ...hosted.findings] },
+        { ...options, provider: "snyk" },
+        cloud.deps,
+      );
+    };
+    await expect(prepare("team")).rejects.toThrow("does not match");
+    expect((await prepare("Team")).preview.findings).toHaveLength(2);
+  }
+  expect(cloud.posts).toHaveLength(0);
+});
+
+test("hosted Semgrep binds retained SARIF provenance after typed evidence is projected out", async () => {
+  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
+  const { normalizeSemgrepSarif } = await import("../src/semgrep-findings.js");
+  const hosted = normalizeSemgrepPlatformFindings(platformReport());
+  const cloud = await fixture([], hosted.sourceRepositoryUrl);
+  const settings = { ...options, provider: "semgrep" as const };
+  const sarif = semgrepSarif();
+  function mixed(url: string) {
+    const legacy = normalizeSemgrepSarif(
+      {
+        ...sarif,
+        runs: sarif.runs.map((run) => ({
+          ...run,
+          versionControlProvenance: [{ repositoryUri: url }],
+        })),
+      },
+      { sourceRepositoryUrl: url },
+    );
+    const row = legacy.findings[0]!;
+    delete row.evidence.details;
+    return { read: 2, findings: [row, ...hosted.findings], excluded: [] };
+  }
+  const foreign = mixed("https://github.com/example/foreign");
+  for (const input of [foreign, { ...hosted, ...foreign }])
+    await expect(
+      prepareNormalizedExternalPublication(input, settings, cloud.deps),
+    ).rejects.toThrow("does not match");
+  expect(cloud.posts).toHaveLength(0);
+  const valid = mixed(hosted.sourceRepositoryUrl);
+  const prepare = () =>
+    prepareNormalizedExternalPublication(valid, settings, cloud.deps);
+  const first = await prepare();
+  cloud.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  cloud.state.repositoryUrl += "-renamed";
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(2);
+  expect(cloud.posts[1]).toBe(cloud.posts[0]);
 });
 
 test.each(["semgrep", "snyk"] as const)(
@@ -4236,13 +4303,12 @@ for (const [cases, matches] of [
           repository,
         );
         const source = normalized.findings[0]!.evidence.source_data;
-        const claims = snykRepositoryClaims(source, {
-          cloudRepositoryUrl: destination,
-        });
-        expect(claims, format).toHaveLength(1);
+        const claims = snykRepositoryClaims(source);
+        expect(claims, format).toEqual([{ url: repository }]);
         expect(
-          cloudRepositoryUrlKey(claims[0]!.url) ===
-            cloudRepositoryUrlKey(destination),
+          cloudRepositoryUrlKey(
+            normalizeGitRepositoryUrl(claims[0]!.url, destination),
+          ) === cloudRepositoryUrlKey(destination),
           format,
         ).toBe(matches);
         expect(source, format).toMatchObject(original);

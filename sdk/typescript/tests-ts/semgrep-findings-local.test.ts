@@ -66,6 +66,48 @@ function collectProject(
   );
 }
 
+test("a retained Platform row binds mixed SARIF provenance in either order", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  await using fixture = await platformCheckout(url);
+  const { findings: platform } = normalizeSemgrepPlatformFindings({
+    ...platformReport(),
+    project: { ...platformProject, url },
+    findings: [{ ...platformFinding(7), repository: { url } }],
+  });
+  const raw = semgrepSarif();
+  const legacy = normalizeSemgrepSarif(
+    {
+      ...raw,
+      runs: raw.runs.map((run) => ({
+        ...run,
+        versionControlProvenance: [{ repositoryUri: url.toLowerCase() }],
+      })),
+    },
+    { sourceRepositoryUrl: url },
+  );
+  for (const findings of [
+    [...legacy.findings, ...platform],
+    [...platform, ...legacy.findings],
+  ]) {
+    const input = { read: findings.length, findings, excluded: [] };
+    await expect(
+      prepareNormalizedLocalImport(
+        input,
+        fixture.options,
+        fixture.dependencies,
+      ),
+    ).rejects.toThrow("does not match");
+    expect(
+      (
+        await prepareNormalizedLocalImport(input, fixture.options, {
+          ...fixture.dependencies,
+          sourceRepositories: [{ url, platform: "github" }],
+        })
+      ).preview.findings,
+    ).toHaveLength(findings.length);
+  }
+});
+
 test("a saved Platform collection replays and updates unassessed findings in SQLite", async () => {
   await using fixture = await platformCheckout(
     repositoryUrl,

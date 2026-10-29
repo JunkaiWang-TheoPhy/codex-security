@@ -5,8 +5,12 @@ import { environmentEntry } from "./auth.js";
 import { SNYK_REST_ISSUES_FORMAT } from "./snyk-rest-findings.js";
 import { snykRepositoryClaims } from "./snyk-findings.js";
 import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
-import { semgrepPlatformFindingRepository } from "./semgrep-platform-findings.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
+} from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
+import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import {
   forwardExternalImportSetting,
   requireExternalImports,
@@ -663,6 +667,14 @@ export async function prepareLocalImport(
   if (hostedUrl) sources.set(hostedUrl, { url: hostedUrl });
   const reportPlatform =
     options.provider === "snyk" ? current.sourceRepositoryPlatform : undefined;
+  const singleProject = Boolean(
+    hostedUrl ||
+    reportPlatform ||
+    (options.provider === "semgrep" &&
+      current.findings.some(({ evidence }) =>
+        isSemgrepPlatformReport(evidence.source_data),
+      )),
+  );
   let snykGitHub: boolean | undefined =
     reportPlatform === "other" ? false : undefined;
   if (!current.findings.length && reportPlatform === "github")
@@ -672,9 +684,7 @@ export async function prepareLocalImport(
     if (url) sources.set(url, { url });
     const data = evidence.source_data;
     if (options.provider === "snyk") {
-      for (const source of snykRepositoryClaims(data, {
-        normalizeGitRemote: false,
-      })) {
+      for (const source of snykRepositoryClaims(data)) {
         sources.set(source.url, { url: source.url });
         if (data?.["format"] === SNYK_REST_ISSUES_FORMAT)
           hostedUrl ??= source.url;
@@ -690,14 +700,12 @@ export async function prepareLocalImport(
       if (native) {
         hostedUrl ??= native;
         sources.set(native, { url: native });
-      } else if (current.sourceRepositoryUrl) {
+      } else if (singleProject) {
         for (const source of semgrepSarifSourceRepositories(data))
           sources.set(source.url, source);
       }
     }
   }
-  // A projection can retain a case-sensitive platform and typed URLs without the original report URL.
-  if (reportPlatform === "other") hostedUrl ??= sources.keys().next().value;
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
@@ -718,21 +726,38 @@ export async function prepareLocalImport(
     ...(inspector ? [inspector] : []),
     ...(dependencies.sourceRepositories ?? []),
   ]) {
-    // A supplied GitHub hint cannot loosen an existing case-sensitive source binding.
+    // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
         source.url,
-        options.inspectorProjectMap || reportPlatform === "other"
-          ? { url: source.url }
-          : source,
+        options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
   let hosted: ExternalSourceRepository | undefined;
-  if (hostedUrl) {
+  const references = [...sources.values()];
+  const projectedUrl =
+    singleProject && !hostedUrl
+      ? (
+          references.find(({ url }) => /^https?:\/\//iu.test(url)) ??
+          references[0]
+        )?.url
+      : undefined;
+  const source = hostedUrl ?? projectedUrl;
+  if (source) {
     const github =
-      snykGitHub ??
-      [...sources.values()].some((source) => source.platform === "github");
-    hosted = { url: hostedUrl, platform: github ? "github" : undefined };
+      snykGitHub ?? references.some(({ platform }) => platform === "github");
+    // A projected report can retain only SSH references. The Git parser supplies the
+    // candidate host; only a supported hosted SSH alias can establish its HTTPS URL.
+    let url = source;
+    if (projectedUrl) {
+      const reference =
+        remoteRepository(source, options.provider, true)?.key ?? source;
+      url = hostedRepositoryUrl(
+        normalizeHostedGitRepositoryUrl(source, reference, github),
+        "Projected source repository URL",
+      );
+    }
+    hosted = { url, platform: github ? "github" : undefined };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
       if (!hostedRepositoryMatches(hosted, url))

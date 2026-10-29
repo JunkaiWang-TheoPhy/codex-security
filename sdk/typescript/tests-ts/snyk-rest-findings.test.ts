@@ -419,18 +419,11 @@ test.each(["open-source", "code"] as const)(
         remote: "https://git.example.test/example/repository",
       }),
     };
-    for (const mode of [
-      { normalizeGitRemote: false },
-      { cloudRepositoryUrl: sourceRepositoryUrl },
-    ]) {
-      expect(snykRepositoryClaims(scoped, mode)).toEqual([
-        { url: sourceRepositoryUrl, platform: undefined },
-      ]);
-      expect(() => snykRepositoryClaims(swapped, mode)).toThrow("target URL");
-      expect(() => snykRepositoryClaims(caseSensitive, mode)).toThrow(
-        "target URL",
-      );
-    }
+    expect(snykRepositoryClaims(scoped)).toEqual([
+      { url: sourceRepositoryUrl, platform: undefined },
+    ]);
+    expect(() => snykRepositoryClaims(swapped)).toThrow("target URL");
+    expect(() => snykRepositoryClaims(caseSensitive)).toThrow("target URL");
     for (const invalid of [
       { ...scoped, format: "other" },
       { ...scoped, apiVersion: "latest" },
@@ -1200,6 +1193,49 @@ test("mixing Snyk project origins keeps case-sensitive native repository claims"
     expect(
       (await fixture.prepareNormalized(sca)).preview.findings,
     ).toHaveLength(1);
+    const other = "https://gitlab.com/Other/project";
+    execFileSync("git", [
+      "-C",
+      fixture.repository,
+      "remote",
+      "add",
+      "other",
+      other,
+    ]);
+    const references = [{ url }, { url: other }];
+    for (const platform of ["github", "other"] as const)
+      await expect(
+        fixture.prepareNormalized(
+          { ...sca, sourceRepositoryPlatform: platform },
+          references,
+        ),
+      ).rejects.toThrow("does not match");
+    delete sca.sourceRepositoryPlatform;
+    expect(
+      (await fixture.prepareNormalized(sca, references)).preview.findings,
+    ).toHaveLength(1);
+    sca.sourceRepositoryPlatform = "github";
+    const ssh = {
+      url: "git@scm.example.test:owner/project.git",
+      platform: "github" as const,
+    };
+    for (const refs of [[ssh], [ssh, { url }], [{ url }, ssh]])
+      expect(
+        (await fixture.prepareNormalized(sca, refs)).preview.findings,
+      ).toHaveLength(1);
+    const unsupported = "ssh://deploy@scm.example.test/Owner/project.git";
+    execFileSync("git", [
+      "-C",
+      fixture.repository,
+      "remote",
+      "set-url",
+      "other",
+      unsupported,
+    ]);
+    sca.sourceRepositoryPlatform = "other";
+    await expect(
+      fixture.prepareNormalized(sca, [{ url: unsupported }]),
+    ).rejects.toThrow("HTTP(S)");
   } finally {
     await fixture.dispose();
   }

@@ -1,7 +1,6 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import { normalizeGitRepositoryUrl } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import {
   normalizeSnykIssues,
@@ -151,29 +150,16 @@ export function normalizeSnykFindingsExport(
 /** @internal Repository claims retained in original Snyk evidence. */
 export function snykRepositoryClaims(
   source: unknown,
-  {
-    normalizeGitRemote = true,
-    cloudRepositoryUrl,
-  }: {
-    normalizeGitRemote?: boolean;
-    /** The selected destination from the authenticated Cloud repository catalog. */
-    cloudRepositoryUrl?: string;
-  } = {},
 ): ReturnType<typeof snykRestFindingRepository>[] {
   if (!isRecord(source)) return [];
   if (source["format"] === SNYK_REST_ISSUES_FORMAT)
     return [snykRestFindingRepository(source)];
-  const repositoryClaim = (value: string) => ({
-    url: normalizeGitRemote
-      ? normalizeGitRepositoryUrl(value, cloudRepositoryUrl)
-      : value,
-  });
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
     const repository = text(target["repository"]);
     if (repository === null || repository === "unknown") return [];
-    return [repositoryClaim(repository)];
+    return [{ url: repository }];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -195,7 +181,7 @@ export function snykRepositoryClaims(
       record(entry, "Snyk repository provenance")["repositoryUri"],
       "Snyk repository URI",
     );
-    return repositoryClaim(repository);
+    return { url: repository };
   });
 }
 

@@ -14,7 +14,12 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readCloudCredentials } from "./cloud-publish.js";
 import { abortable } from "./targets.js";
-import { semgrepPlatformFindingRepository } from "./semgrep-platform-findings.js";
+import { normalizeGitRepositoryUrl } from "./git-remote.js";
+import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
+} from "./semgrep-platform-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -801,13 +806,20 @@ async function preparePublicationInput(
     if (!saved) requireDestination(parsed.sourceRepositoryUrl);
     if (binding) requireDestination(binding.url, binding.findingId);
     for (const [id, source] of hostedSnyk) requireDestination(source.url, id);
+    const hostedSemgrep =
+      options.provider === "semgrep" &&
+      (parsed.sourceRepositoryUrl ||
+        findings.some(({ evidence }) =>
+          isSemgrepPlatformReport(evidence.source_data),
+        ));
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      const data = evidence.source_data;
       const urls = [
         evidence.details?.repository?.url,
         options.provider === "semgrep"
           ? semgrepPlatformFindingRepository(
-              evidence.source_data,
+              data,
               (url) =>
                 cloudRepositoryUrlKey(url) ===
                 cloudRepositoryUrlKey(destination.url),
@@ -815,9 +827,12 @@ async function preparePublicationInput(
           : undefined,
         ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
         ...(options.provider === "snyk" && !hostedSnyk.has(id)
-          ? snykRepositoryClaims(evidence.source_data, {
-              cloudRepositoryUrl: destination.url,
-            }).map(({ url }) => url)
+          ? snykRepositoryClaims(data).map(({ url }) =>
+              normalizeGitRepositoryUrl(url, destination.url, !strictSnyk),
+            )
+          : []),
+        ...(hostedSemgrep && !isSemgrepPlatformReport(data)
+          ? semgrepSarifSourceRepositories(data).map(({ url }) => url)
           : []),
         ...(options.provider === "endor"
           ? endorRepositoryUrls(evidence.source_data)
