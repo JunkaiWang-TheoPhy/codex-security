@@ -1076,6 +1076,16 @@ test("Wiz can import, resume and update its own occurrence with upstream Inspect
   const saved = JSON.parse(await readFile(path, "utf8"));
   delete saved.inputProjection;
   await writeFile(path, JSON.stringify(saved));
+  await expect(
+    prepareNormalizedExternalPublication(
+      {
+        ...(await readVendorFindings(f.file)),
+        sourceRepositoryUrl: f.destination().url,
+      },
+      options,
+      f.deps,
+    ),
+  ).rejects.toThrow(/saved import evidence|original deployment and locale/i);
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);
@@ -1348,17 +1358,23 @@ test("Semgrep Supply Chain binds fresh requests to its project and resumes after
     found_dependency: { package: "example", version: "1" },
     vulnerability_identifier: "CVE-2025-0001",
   };
-  const cloud = await fixture({ ...platformReport([record]), product: "sca" });
+  const report = { ...platformReport([record]), product: "sca" };
+  const cloud = await fixture(report);
+  const settings = { ...options, provider: "semgrep" as const };
   const prepare = () =>
-    prepareExternalPublication(
-      cloud.file,
-      { ...options, provider: "semgrep" },
-      cloud.deps,
-    );
+    prepareExternalPublication(cloud.file, settings, cloud.deps);
   const first = await prepare();
   cloud.state.loseResponse = true;
   await expect(first.publish()).rejects.toThrow("resume the saved request");
   cloud.state.repositoryUrl = "https://github.com/example/renamed";
+  const changed = {
+    ...normalizeSemgrepPlatformFindings(report),
+    sourceRepositoryUrl: cloud.state.repositoryUrl,
+  };
+  await expect(
+    prepareNormalizedExternalPublication(changed, settings, cloud.deps),
+  ).rejects.toThrow("Saved import evidence does not match");
+  expect(cloud.posts).toHaveLength(1);
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);

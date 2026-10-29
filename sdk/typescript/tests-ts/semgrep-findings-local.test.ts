@@ -11,6 +11,7 @@ import {
   normalizeSemgrepSarif,
   readSemgrepFindings,
 } from "../src/semgrep-findings.js";
+import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   platformFinding,
@@ -58,6 +59,40 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
       assessment: { state: "not_assessed" },
       evidence: { details: { source_status: "fixed" } },
     });
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const fixture = await localFindingsFixture({ remote: url.toLowerCase() });
+  try {
+    const report = platformReport([]);
+    const input = normalizeSemgrepPlatformFindings({
+      ...report,
+      project: { ...report.project, url },
+    });
+    const prepare = (source: { url: string; platform?: "github" }) =>
+      prepareNormalizedLocalImport(
+        input,
+        {
+          repository: fixture.repository,
+          sourceKey: "platform",
+          provider: "semgrep",
+        },
+        { environment: fixture.environment, sourceRepositories: [source] },
+      );
+    await expect(prepare({ url: url.toLowerCase() })).rejects.toThrow(
+      "does not match",
+    );
+    await expect(
+      prepare({ url: url + "-other", platform: "github" }),
+    ).rejects.toThrow("does not match");
+    expect(
+      (await prepare({ url: url.toLowerCase(), platform: "github" })).preview
+        .findings,
+    ).toEqual([]);
   } finally {
     await fixture.dispose();
   }

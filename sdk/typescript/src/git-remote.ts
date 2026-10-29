@@ -33,24 +33,21 @@ export function isGitHubCloudHost(host: string): boolean {
 
 export function normalizeGitRepositoryUrl(
   repository: string,
-  selectedGitHubUrl?: string,
+  sshAliasUrl?: string,
 ): string {
-  // A connected Cloud repository or a selected GitHub SCM project identifies
-  // which Enterprise host supports GitHub's SSH aliases.
-  const destination = selectedGitHubUrl
-    ? new URL(selectedGitHubUrl)
-    : undefined;
+  // The caller identifies a host whose standard Git SSH login maps to HTTPS.
+  const destination = sshAliasUrl ? new URL(sshAliasUrl) : undefined;
   const connectedHost =
     destination?.protocol === "https:"
       ? destination.hostname.toLowerCase()
       : undefined;
   const connectedTenant = /^([^.]+)\.ghe\.com$/u.exec(connectedHost ?? "")?.[1];
-  const isGitHubSshUser = (username: string, hostname: string) =>
+  const isGitSshUser = (username: string, hostname: string) =>
     (username === "git" &&
       (hostname === "github.com" || hostname === connectedHost)) ||
     (username === connectedTenant && hostname === connectedHost);
   const scp = /^([^@/:]+)@([^/:]+):(.+)$/u.exec(repository);
-  if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
+  if (scp && isGitSshUser(scp[1]!, scp[2]!.toLowerCase()))
     return `https://${scp[2]}/${scp[3]}`;
   // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
   const ssh = /^ssh:\/\/([^/@]+)@[^/@]+(\/.*)$/u.exec(repository);
@@ -61,13 +58,12 @@ export function normalizeGitRepositoryUrl(
     // Git sends the literal SSH path, including dot segments, query and fragment.
     if (url.pathname !== ssh[2]) return repository;
     const hostname = url.hostname.toLowerCase();
-    const githubSsh =
-      isGitHubSshUser(ssh[1]!, hostname) &&
-      (url.port === "" || url.port === "22");
+    const standardSsh =
+      isGitSshUser(ssh[1]!, hostname) && (url.port === "" || url.port === "22");
     const githubSshOverHttps =
       ssh[1] === "git" && hostname === "ssh.github.com" && url.port === "443";
     if (githubSshOverHttps) return `https://github.com${url.pathname}`;
-    if (githubSsh) return `https://${hostname}${url.pathname}`;
+    if (standardSsh) return `https://${hostname}${url.pathname}`;
   }
   return repository;
 }

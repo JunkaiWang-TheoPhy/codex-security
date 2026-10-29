@@ -27,9 +27,9 @@ For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
 separate source key. The default API origin is `https://api.snyk.io`. Use
 `--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
 The collector checks the selected repository URL against the project target
-when Snyk supplies one. For GitHub SCM projects, a standard SSH target can match
-the selected GitHub Enterprise HTTPS URL. Other custom-host mappings require
-matching repository URLs.
+when Snyk supplies one. Standard Git SSH targets can match the selected HTTPS
+URL for GitHub SCM projects and GitLab.com projects. Other custom-host mappings
+require matching repository URLs.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.

@@ -59,8 +59,10 @@ export async function prepareLocalExternalImport(
         platform: "github",
       }));
   }
+  const { environment, ...workbench } = dependencies;
   return prepareLocalImport(parsed.findings, normalizedOptions, {
-    ...dependencies,
+    ...workbench,
+    environment,
     sourceRepositories: [
       ...(dependencies.sourceRepositories ?? []),
       ...sourceRepositories,

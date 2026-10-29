@@ -689,6 +689,9 @@ export async function prepareLocalImport(
         source.url,
         options.inspectorProjectMap ? { url: source.url } : source,
       );
+    // Every supplied repository must match the hosted project below.
+    if (sources.get(source.url)?.platform === "github")
+      verifiedGitHubUrl ??= hostedRepository;
   }
   if (hostedRepository) {
     // A hosted project identifies one repository even when the checkout has multiple remotes.

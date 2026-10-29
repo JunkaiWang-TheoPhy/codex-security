@@ -474,6 +474,53 @@ test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository"
     expect(() => check(remote)).toThrow();
 });
 
+test("collects and replays GitLab.com SSH targets for the selected namespace and project", async () => {
+  const selected = {
+    ...options,
+    sourceRepositoryUrl: "https://gitlab.com/Group/subgroup/project",
+  };
+  const checkout = await localFindingsFixture({
+    remote: "git@gitlab.com:Group/subgroup/project.git",
+  });
+  try {
+    for (const remote of [
+      "git@gitlab.com:Group/subgroup/project.git",
+      "ssh://git@gitlab.com:22/Group/subgroup/project.git",
+    ]) {
+      const { collect } = transport(
+        document(project({ origin: "gitlab", remote })),
+        document([issue()]),
+      );
+      const saved = await collect(selected);
+      const normalized = normalizeSnykIssues(saved, "local");
+      const prepared = await prepareNormalizedLocalImport(
+        normalized,
+        {
+          repository: checkout.repository,
+          provider: "snyk",
+          sourceKey: projectId,
+        },
+        { environment: checkout.environment },
+      );
+      expect(prepared.preview.findings).toHaveLength(1);
+    }
+    for (const remote of [
+      "git@gitlab.com:group/subgroup/project",
+      "other@gitlab.com:Group/subgroup/project",
+      "ssh://git@gitlab.com:2222/Group/subgroup/project",
+      "git@gitlab.example.test:Group/subgroup/project",
+    ]) {
+      const { collect, requests } = transport(
+        document(project({ origin: "gitlab", remote })),
+      );
+      await expect(collect(selected)).rejects.toThrow("target URL");
+      expect(requests).toHaveLength(1);
+    }
+  } finally {
+    await checkout.dispose();
+  }
+});
+
 test("issue identity is stable across updates, resource IDs, pages and display names, not across scopes", () => {
   const original = envelope();
   const id = (input: unknown) =>

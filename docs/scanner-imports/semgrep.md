@@ -18,9 +18,10 @@ codex-security publish findings platform.json --to local --provider semgrep \
 ```
 
 The collector resolves the SCM URL and reads all pages for the selected
-project ID, ref and product. If the project has no SCM URL, supply
-`--source-repository-url` when collecting. The saved `semgrep-platform-findings/v1`
-report carries the repository URL for local or Cloud import. This endpoint
+project ID, ref and product. If pages overlap as the backlog changes, rerun
+collection. If the project has no SCM URL, supply `--source-repository-url` when
+collecting. The saved `semgrep-platform-findings/v1` report keeps that mapping
+separate from the project metadata for local or Cloud import. This endpoint
 excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 

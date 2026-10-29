@@ -1,3 +1,4 @@
+import { environmentEntry } from "./auth.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
@@ -12,8 +13,7 @@ import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { normalizeGitRepositoryUrl } from "./git-remote.js";
 import {
-  combineHostedSignals,
-  getHostedJson,
+  hostedScannerHttp,
   hostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
@@ -122,11 +122,11 @@ function uuid(value: unknown, label: string): string {
 
 type Scope = SnykScope & { apiOrigin: string };
 
-function scope(input: Resource | CollectSnykIssuesOptions): Scope {
-  const apiOrigin = requiredText(input["apiOrigin"], "Snyk API origin").replace(
-    /\/$/u,
-    "",
-  );
+function scope(
+  input: Resource | CollectSnykIssuesOptions,
+  origin: unknown,
+): Scope {
+  const apiOrigin = requiredText(origin, "Snyk API origin").replace(/\/$/u, "");
   if (!origins.has(apiOrigin))
     throw new Error("Select a documented Snyk regional HTTPS API origin.");
   const product = input["product"];
@@ -208,7 +208,11 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   const url = requiredText(remote, "Snyk target URL");
   const normalized = normalizeGitRepositoryUrl(
     url,
-    origin.startsWith("github") ? selected.sourceRepositoryUrl : undefined,
+    origin === "gitlab"
+      ? "https://gitlab.com"
+      : origin.startsWith("github")
+        ? selected.sourceRepositoryUrl
+        : undefined,
   );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
@@ -369,22 +373,18 @@ export async function collectSnykIssues(
   options: CollectSnykIssuesOptions,
   dependencies: HostedScannerHttpOptions = {},
 ): Promise<SnykIssuesExport> {
-  requireExternalImports(dependencies.environment);
-  const signal = combineHostedSignals(options.signal, dependencies.signal);
-  signal?.throwIfAborted();
-  const selected = scope({
-    ...options,
-    apiOrigin: options.apiOrigin ?? defaultOrigin,
-  });
+  const environment = dependencies.environment ?? process.env;
+  requireExternalImports(environment);
+  const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
+  const selected = scope(options, options.apiOrigin ?? defaultOrigin);
   const token = requiredText(
-    options.token ?? (dependencies.environment ?? process.env)["SNYK_TOKEN"],
+    options.token ?? environmentEntry(environment, "SNYK_TOKEN"),
     "Snyk API token (SNYK_TOKEN)",
   );
   if (/[\r\n]/u.test(token))
     throw new Error("Snyk API token cannot contain a line break.");
-  const http = { ...dependencies, signal };
   const get = async (url: URL, label: string) =>
-    jsonApi(await getHostedJson(url, `token ${token}`, http), label);
+    jsonApi(await getJson(url, `token ${token}`), label);
   const getResource = async (url: URL, kind: string) =>
     record(
       (await get(url, `Snyk ${kind} response`))["data"],
@@ -433,7 +433,7 @@ function savedContext(document: Resource) {
     throw new Error(
       `Expected ${SNYK_REST_ISSUES_FORMAT} for API version ${apiVersion}.`,
     );
-  const selected = scope(document);
+  const selected = scope(document, document["apiOrigin"]);
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];

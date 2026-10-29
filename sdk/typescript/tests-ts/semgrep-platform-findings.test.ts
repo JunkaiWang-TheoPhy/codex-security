@@ -123,6 +123,12 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
   for (const [response, error] of [
     [Response.json({ findings: first }), "repeated"],
     [
+      Response.json({
+        findings: [{ ...first[99], id: "100" }, platformFinding(101)],
+      }),
+      "repeated",
+    ],
+    [
       new Response("try later", {
         status: 429,
         headers: { "retry-after": "11" },
@@ -135,6 +141,37 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
       error,
     );
   }
+});
+
+test("keeps an operator mapping separate from a URL-less project and its short repository name", async () => {
+  const project = { ...platformProject, url: null };
+  const finding = { ...platformFinding(1), repository: { name: "project" } };
+  const responses = [{ project }, { findings: [finding] }];
+  const report = await collectSemgrepPlatformFindings(
+    { ...options, sourceRepositoryUrl: platformProject.url },
+    { environment, fetch: async () => Response.json(responses.shift()) },
+  );
+  expect(report).toMatchObject({
+    project,
+    sourceRepositoryUrl: platformProject.url,
+  });
+  const { findings } = normalizeSemgrepPlatformFindings(report);
+  expect(findings[0]?.evidence).toMatchObject({
+    details: { repository: { url: platformProject.url } },
+    source_data: { project, sourceRepositoryUrl: platformProject.url, finding },
+  });
+  expect(() =>
+    normalizeSemgrepPlatformFindings(
+      report,
+      "https://github.com/other/project",
+    ),
+  ).toThrow("does not match");
+  expect(() =>
+    normalizeSemgrepPlatformFindings({
+      ...report,
+      findings: [{ ...finding, repository: { name: "other/project" } }],
+    }),
+  ).toThrow("matching source repository");
 });
 
 test("losslessly captures distinct int64 IDs and rejects a truncated saved report", async () => {
@@ -166,7 +203,7 @@ test("losslessly captures distinct int64 IDs and rejects a truncated saved repor
   ).toThrow("Incomplete");
 });
 
-test("rejects wrong repository or ref even on rows otherwise excluded; excludes ambiguous and unsafe integer IDs", () => {
+test("rejects wrong repository or ref even on rows otherwise excluded; excludes ambiguous and unsafe integer IDs", async () => {
   const finding = platformFinding(10);
   expect(() =>
     normalizeSemgrepPlatformFindings(
@@ -192,8 +229,9 @@ test("rejects wrong repository or ref even on rows otherwise excluded; excludes 
     expect(() =>
       normalizeSemgrepPlatformFindings(platformReport([wrong])),
     ).toThrow();
+  const samePage = await collectPages({ findings: [finding, finding] });
   const duplicate = normalizeSemgrepPlatformFindings(
-    platformReport([finding, finding, { ...finding, id: 2 ** 53 }]),
+    platformReport([...samePage.findings, { ...finding, id: 2 ** 53 }]),
   );
   expect(duplicate.excluded).toHaveLength(3);
   expect(duplicate.findings).toHaveLength(0);

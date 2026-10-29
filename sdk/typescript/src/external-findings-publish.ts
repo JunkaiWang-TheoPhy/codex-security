@@ -556,9 +556,22 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
-  const inputDigest = hash("sha256", canonicalJson(currentIdentity));
-  const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
-  function validateSaved(serialized: string, legacy = false): SavedSubmission {
+  // Keep the lookup key stable so a changed declaration cannot stage a second request.
+  const repositoryKey =
+    parsed.sourceRepositoryUrl &&
+    cloudRepositoryUrlKey(parsed.sourceRepositoryUrl);
+  const digest = (identity: unknown) =>
+    hash(
+      "sha256",
+      canonicalJson(repositoryKey ? [identity, repositoryKey] : identity),
+    );
+  const inputDigest = digest(currentIdentity);
+  const legacyInputDigest = digest(legacyIdentity);
+  function validateSaved(
+    serialized: string,
+    projection: "current" | "legacy" | "unidentified" = "current",
+  ): SavedSubmission {
+    const legacy = projection !== "current";
     const content = JSON.parse(serialized) as SavedSubmission;
     if (
       content.accountId !== credentials.account_id ||
@@ -577,7 +590,9 @@ async function preparePublicationInput(
             (legacy ? legacyInputDigest : inputDigest) &&
           content.inputProjection?.savedEvidenceDigest ===
             hash("sha256", savedEvidence)
-        : savedEvidence === canonicalJson(expected);
+        : savedEvidence === canonicalJson(expected) &&
+          // Unknown legacy filenames must still block a duplicate. They may never be replayed here.
+          (!repositoryKey || projection === "unidentified");
     if (!matches)
       throw new Error(
         "Saved import evidence does not match the selected input.",
@@ -629,7 +644,7 @@ async function preparePublicationInput(
         // must remain isolated by their deployment-bound checkpoint keys.
         const content = JSON.parse(serialized) as SavedSubmission | null;
         if (!content || content.inputProjection !== undefined) continue;
-        validateSaved(serialized, true);
+        validateSaved(serialized, "unidentified");
       } catch {
         continue;
       }
@@ -674,7 +689,7 @@ async function preparePublicationInput(
           }
           // A competing resumer may have completed and removed both paths while
           // this caller waited. Retain its observed immutable request and receipts.
-          const content = validateSaved(serialized ?? captured, true);
+          const content = validateSaved(serialized ?? captured, "legacy");
           if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
             throw new CodexSecurityError(
               "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",

@@ -1,3 +1,4 @@
+import { environmentEntry } from "./auth.js";
 import {
   type ExternalImportTarget,
   repositoryUrlKey,
@@ -6,8 +7,7 @@ import {
 import type { ExternalFindings } from "./external-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
-  combineHostedSignals,
-  getHostedJson,
+  hostedScannerHttp,
   hostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
@@ -42,13 +42,15 @@ export interface SemgrepPlatformOptions {
 interface Project {
   id: number | string;
   name: string;
-  url: string;
+  url: string | null;
 }
 
 export interface SemgrepPlatformReport {
   format: typeof format;
   deployment: string;
   project: Project;
+  /** Operator-supplied mapping when the project has no SCM URL. */
+  sourceRepositoryUrl?: string;
   ref: string;
   product: Product;
   findingCount: number;
@@ -61,14 +63,21 @@ function productType(value: unknown): Product {
   return value as Product;
 }
 
-function platformId(value: unknown, label: string): number | string {
+function platformId(value: unknown): number | string | undefined {
   if (
     typeof value === "string" &&
     /^[1-9]\d{0,18}$/u.test(value) &&
     BigInt(value) <= 9223372036854775807n
   )
     return Number.isSafeInteger(Number(value)) ? Number(value) : value;
-  return position(value, label);
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0)
+    return value;
+}
+
+function requiredId(value: unknown, label: string): number | string {
+  const id = platformId(value);
+  if (id === undefined) throw new Error(`${label} must be a positive integer.`);
+  return id;
 }
 
 function parsePlatformJson(body: string): unknown {
@@ -94,28 +103,37 @@ function assertRepository(value: unknown, expected: string): void {
     );
 }
 
-function projectContext(value: unknown, declared?: string): Project {
+function projectContext(value: unknown, declared?: unknown) {
   const { id, name, url: nativeUrl } = record(value, "Semgrep project");
   const url = hostedRepositoryUrl(
     text(nativeUrl) ?? declared,
     "Semgrep project repository URL",
   );
-  if (declared) assertRepository(declared, url);
-  return {
-    id: platformId(id, "Semgrep project ID"),
+  if (declared !== undefined) assertRepository(declared, url);
+  const project: Project = {
+    id: requiredId(id, "Semgrep project ID"),
     name: requiredText(name, "Semgrep project name"),
-    url,
+    url: text(nativeUrl),
   };
+  const binding = project.url
+    ? { project }
+    : { project, sourceRepositoryUrl: url };
+  return { binding, url };
 }
 
-function scopedFinding(value: unknown, project: Project, ref: string) {
+function scopedFinding(
+  value: unknown,
+  selected: ReturnType<typeof projectContext>,
+  ref: string,
+) {
+  const { name: projectName } = selected.binding.project;
   const finding = record(value, "Semgrep Platform finding");
   const { url, name } = record(
     finding["repository"],
     "Semgrep finding repository",
   );
-  if (text(url)) assertRepository(url, project.url);
-  else if (name !== project.name)
+  if (text(url)) assertRepository(url, selected.url);
+  else if (name !== projectName && name !== projectName.split("/").at(-1))
     throw new Error(
       "Semgrep Platform finding lacks a matching source repository.",
     );
@@ -132,10 +150,9 @@ export async function collectSemgrepPlatformFindings(
 ): Promise<SemgrepPlatformReport> {
   const environment = dependencies.environment ?? process.env;
   requireExternalImports(environment);
-  const signal = combineHostedSignals(options.signal, dependencies.signal);
-  signal?.throwIfAborted();
+  const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
   const token = requiredText(
-    options.token ?? environment["SEMGREP_APP_TOKEN"],
+    options.token ?? environmentEntry(environment, "SEMGREP_APP_TOKEN"),
     "Semgrep Web API token (SEMGREP_APP_TOKEN)",
   );
   const deployment = requiredText(options.deployment, "Semgrep deployment");
@@ -150,17 +167,17 @@ export async function collectSemgrepPlatformFindings(
   const ref = requiredText(options.ref, "Semgrep ref");
   const product = productType(options.product ?? "sast");
   const base = `https://semgrep.dev/api/v1/deployments/${encodeURIComponent(deployment)}`;
-  const http = { ...dependencies, signal };
   const get = async (url: URL) =>
     record(
-      await getHostedJson(url, `Bearer ${token}`, http, parsePlatformJson),
+      await getJson(url, `Bearer ${token}`, parsePlatformJson),
       "Semgrep API response",
     );
   const { sourceRepositoryUrl } = options;
   const lookup = await get(
     new URL(`${base}/projects/${encodeURIComponent(name)}`),
   );
-  const project = projectContext(lookup["project"], sourceRepositoryUrl);
+  const selected = projectContext(lookup["project"], sourceRepositoryUrl);
+  const { project } = selected.binding;
   if (project.name !== name)
     throw new Error("Semgrep returned a different project than requested.");
   const url = new URL(`${base}/findings`);
@@ -172,30 +189,37 @@ export async function collectSemgrepPlatformFindings(
     page_size: "100",
   }).toString();
   const findings: unknown[] = [];
-  const fullPages = new Set<string>();
+  const previousIds = new Set<number | string>();
   for (let page = 0; ; page++) {
     url.searchParams.set("page", String(page));
     const response = await get(new URL(url));
     const batch = array(response["findings"], "Semgrep Platform findings").map(
-      (row) => scopedFinding(row, project, ref),
+      (row) => scopedFinding(row, selected, ref),
     );
+    const ids = batch
+      .map(({ id }) => platformId(id))
+      .filter((id) => id !== undefined);
+    // Rows with invalid IDs are excluded during import. Still detect a repeated full page of them.
+    if (!ids.length && batch.length >= 100)
+      ids.push(
+        stableId(
+          "page",
+          batch.map(({ id }) => id),
+        ),
+      );
+    if (ids.some((id) => previousIds.has(id)))
+      throw new Error(
+        "Semgrep Platform repeated findings across pages; retry the collection.",
+      );
     for (const finding of batch) findings.push(finding);
     if (batch.length < 100) break;
-    const fingerprint = stableId(
-      "page",
-      batch.map(({ id }) => id),
-    );
-    if (fullPages.has(fingerprint))
-      throw new Error(
-        "Semgrep Platform repeated a findings page; retry the collection.",
-      );
-    fullPages.add(fingerprint);
+    for (const id of ids) previousIds.add(id);
   }
   signal?.throwIfAborted();
   return {
     format,
     deployment,
-    project,
+    ...selected.binding,
     product,
     ref,
     findingCount: findings.length,
@@ -213,13 +237,16 @@ export function semgrepPlatformFindingRepository(
   input: unknown,
 ): string | undefined {
   if (!isSemgrepPlatformReport(input)) return undefined;
-  const project = projectContext(input["project"]);
+  const selected = projectContext(
+    input["project"],
+    input["sourceRepositoryUrl"],
+  );
   scopedFinding(
     input["finding"],
-    project,
+    selected,
     requiredText(input["ref"], "Semgrep ref"),
   );
-  return project.url;
+  return selected.url;
 }
 
 export function normalizeSemgrepPlatformFindings(
@@ -230,7 +257,11 @@ export function normalizeSemgrepPlatformFindings(
   if (!isSemgrepPlatformReport(input))
     throw new Error("Expected a complete Semgrep Platform export.");
   const deployment = requiredText(input["deployment"], "Semgrep deployment");
-  const project = projectContext(input["project"], declared);
+  const selected = projectContext(
+    input["project"],
+    input["sourceRepositoryUrl"] ?? declared,
+  );
+  if (declared !== undefined) assertRepository(declared, selected.url);
   const ref = requiredText(input["ref"], "Semgrep ref");
   const product = productType(input["product"]);
   const findings = array(input["findings"], "Semgrep Platform findings");
@@ -238,9 +269,9 @@ export function normalizeSemgrepPlatformFindings(
     throw new Error(
       "Incomplete Semgrep Platform export: finding count does not match.",
     );
-  const context = { format, deployment, project, ref, product };
+  const context = { format, deployment, ...selected.binding, ref, product };
   const result = normalizeRecords(
-    findings.map((finding) => scopedFinding(finding, project, ref)),
+    findings.map((finding) => scopedFinding(finding, selected, ref)),
     (finding, id) => {
       const location = record(
         finding["location"] ?? {},
@@ -297,7 +328,7 @@ export function normalizeSemgrepPlatformFindings(
           title: ruleName,
           details: {
             kind: "sast",
-            repository: { url: project.url },
+            repository: { url: selected.url },
             scanner_origin: "Semgrep",
             rule: { id: ruleName },
             source_status: text(finding["status"]),
@@ -329,12 +360,12 @@ export function normalizeSemgrepPlatformFindings(
     ({ id }) =>
       stableId("semgrep-platform", [
         deployment,
-        project.id,
+        selected.binding.project.id,
         product,
         ref,
-        platformId(id, "Semgrep finding ID"),
+        requiredId(id, "Semgrep finding ID"),
       ]),
     target,
   );
-  return { ...result, sourceRepositoryUrl: project.url };
+  return { ...result, sourceRepositoryUrl: selected.url };
 }

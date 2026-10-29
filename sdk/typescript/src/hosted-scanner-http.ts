@@ -21,35 +21,40 @@ export function hostedRepositoryUrl(value: unknown, label: string): string {
   return raw;
 }
 
-export function combineHostedSignals(
-  first?: AbortSignal,
-  second?: AbortSignal,
-): AbortSignal | undefined {
-  return first && second ? AbortSignal.any([first, second]) : (first ?? second);
-}
-
-export async function getHostedJson(
-  url: URL,
-  authorization: string,
-  options: HostedScannerHttpOptions = {},
-  parse?: (body: string) => unknown,
-): Promise<unknown> {
-  options.signal?.throwIfAborted();
-  const response = await (options.fetch ?? fetch)(url, {
-    method: "GET",
-    headers: {
-      accept: "application/vnd.api+json, application/json",
-      authorization,
-    },
-    redirect: "error",
-    signal: options.signal,
-  });
-  if (!response.ok) {
-    const retry = response.headers.get("retry-after");
-    const detail = await response.text();
-    throw new CodexSecurityError(
-      `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
-    );
+export function hostedScannerHttp(
+  dependencies: HostedScannerHttpOptions,
+  callerSignal?: AbortSignal,
+) {
+  const { signal: transportSignal } = dependencies;
+  const signal =
+    callerSignal && transportSignal
+      ? AbortSignal.any([callerSignal, transportSignal])
+      : (callerSignal ?? transportSignal);
+  signal?.throwIfAborted();
+  const request = dependencies.fetch?.bind(dependencies) ?? fetch;
+  async function getJson(
+    url: URL,
+    authorization: string,
+    parse?: (body: string) => unknown,
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
+    const response = await request(url, {
+      method: "GET",
+      headers: {
+        accept: "application/vnd.api+json, application/json",
+        authorization,
+      },
+      redirect: "error",
+      signal,
+    });
+    if (!response.ok) {
+      const retry = response.headers.get("retry-after");
+      const detail = await response.text();
+      throw new CodexSecurityError(
+        `GET ${url.origin}${url.pathname} failed (HTTP ${response.status})${retry ? `; Retry-After: ${retry}` : ""}${detail ? `: ${detail}` : "."}`,
+      );
+    }
+    return parse ? parse(await response.text()) : response.json();
   }
-  return parse ? parse(await response.text()) : response.json();
+  return { signal, getJson };
 }
