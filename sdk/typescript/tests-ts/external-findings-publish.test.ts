@@ -39,6 +39,7 @@ import type {
 } from "../src/external-import-models.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
 import {
   importedAlert,
   importedAdvisory,
@@ -267,6 +268,104 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
     }),
   ).rejects.toThrow("scan metadata rather than vulnerability records");
   expect(contactedCloud).toBe(false);
+});
+
+test("Dependabot publishes on the existing GitHub provider and rejects foreign repositories before POST", async () => {
+  const input = { ...githubDependabotAlert(), source: "extra" };
+  const correct = await fixture([input]);
+  const selection = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const first = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(first.preview.requests[0]!.source.provider).toBe("github");
+  expect(correct.posts).toHaveLength(0);
+  const original = structuredClone(first.preview.requests[0]!);
+  first.preview.requests[0]!.request_id = "edited-request";
+  first.preview.findings[0]!.evidence.title = "Edited preview";
+  first.preview.requests[0]!.items[0]!.evidence.url =
+    "https://github.com/example/other/security/dependabot/1";
+  correct.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow();
+  expect(JSON.parse(correct.posts[0]!)).toEqual(original);
+  const retry = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(correct.posts[1]).toBe(correct.posts[0]);
+  const replay = await prepareExternalPublication(
+    correct.file,
+    selection,
+    correct.deps,
+  );
+  expect((await replay.publish()).counts.unchanged).toBe(1);
+  const foreign = await fixture([input], "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(foreign.file, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const native = await readGitHubFindings(correct.file);
+  await expect(
+    prepareNormalizedExternalPublication(native, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const projected = structuredClone(native);
+  delete projected.findings[0]!.evidence.source_data;
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        projected,
+        selection,
+        correct.deps,
+      )
+    ).preview.requests,
+  ).toHaveLength(1);
+  projected.findings[0]!.evidence.url = input.url;
+  projected.findings[0]!.evidence.source_data = {
+    security_vulnerability: input.security_vulnerability,
+  };
+  projected.findings[0]!.source_finding_id = "alert-1";
+  const compatible = await prepareNormalizedExternalPublication(
+    projected,
+    selection,
+    correct.deps,
+  );
+  expect((await compatible.publish()).counts.created).toBe(1);
+  expect(
+    (
+      await (
+        await prepareNormalizedExternalPublication(
+          projected,
+          selection,
+          correct.deps,
+        )
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  await expect(
+    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+  ).rejects.toThrow(/does not match/i);
+  const conflicting = structuredClone(native);
+  conflicting.findings[0]!.evidence.url = githubDependabotAlert(2).html_url;
+  await expect(
+    prepareNormalizedExternalPublication(conflicting, selection, correct.deps),
+  ).rejects.toThrow(/alert URL/i);
+  const relabeled = structuredClone(native);
+  relabeled.findings[0]!.source_finding_id =
+    "github.com/example/other/dependabot/2";
+  await expect(
+    prepareNormalizedExternalPublication(relabeled, selection, foreign.deps),
+  ).rejects.toThrow(/source finding ID/i);
+  expect(foreign.posts).toHaveLength(0);
 });
 
 async function fixture(
@@ -974,20 +1073,25 @@ test.each(["semgrep", "snyk"] as const)(
     const input =
       provider === "semgrep"
         ? normalizeSemgrepPlatformFindings(platformReport())
-        : normalizeSnykIssues(
-            snykRestFixture("open-source", { sourceRepositoryUrl }),
-          );
-    const raw = input.findings[0]!.evidence.source_data!;
-    if (provider === "semgrep")
-      raw["finding"] = {
-        ...platformFinding(12),
-        repository: { name: "example/other", url: foreign },
-      };
-    else
-      raw["project"] = snykRestFixture("open-source", {
-        sourceRepositoryUrl: foreign,
-      }).project;
-    const cloud = await fixture();
+        : normalizeSnykIssues(snykRestFixture("code", { sourceRepositoryUrl }));
+    const local = await localFindingsFixture({ remote: sourceRepositoryUrl });
+    cleanups.push(local.dispose);
+    const alias = structuredClone(input.findings[0]!);
+    alias.source_finding_id = "typed-only";
+    delete alias.evidence.source_data;
+    alias.evidence.details!.repository!.url =
+      provider === "snyk"
+        ? "git@github.com:example/project.git"
+        : "ssh://git@github.com/example/project.git";
+    const localOptions = { ...options, provider, repository: local.repository };
+    const localDeps = { environment: local.environment };
+    const mixed = { ...input, read: 2, findings: [...input.findings, alias] };
+    expect(
+      (await prepareNormalizedLocalImport(mixed, localOptions, localDeps))
+        .preview.findings,
+    ).toHaveLength(2);
+    input.findings[0]!.evidence.details!.repository!.url = foreign;
+    const cloud = await fixture([], foreign);
     await expect(
       prepareNormalizedExternalPublication(
         input,
@@ -996,41 +1100,50 @@ test.each(["semgrep", "snyk"] as const)(
       ),
     ).rejects.toThrow("does not match");
     expect(cloud.posts).toHaveLength(0);
-    const local = await localFindingsFixture({ remote: sourceRepositoryUrl });
-    try {
+
+    await promisify(execFile)("git", [
+      "-C",
+      local.repository,
+      "remote",
+      "add",
+      "upstream",
+      foreign,
+    ]);
+    const plain = await mkdtemp(join(local.root, "plain-"));
+    for (const repository of [local.repository, plain])
       await expect(
         prepareNormalizedLocalImport(
           input,
-          { ...options, provider, repository: local.repository },
-          { environment: local.environment },
+          { ...localOptions, repository },
+          localDeps,
         ),
       ).rejects.toThrow("does not match");
-    } finally {
-      await local.dispose();
-    }
   },
 );
 
-test("Semgrep Supply Chain report binds its repository even without typed SAST details", async () => {
+test("Semgrep Supply Chain binds fresh requests to its project and resumes after a rename", async () => {
   const record = {
     ...platformFinding(3),
     found_dependency: { package: "example", version: "1" },
     vulnerability_identifier: "CVE-2025-0001",
   };
-  const report = { ...platformReport([record]), product: "sca" };
-  const selected = { ...options, provider: "semgrep" as const };
-  const matched = await fixture(report);
-  const prepared = await prepareExternalPublication(
-    matched.file,
-    selected,
-    matched.deps,
-  );
-  expect((await prepared.publish()).verified).toBe(1);
-  const other = await fixture(report, "https://github.com/example/other");
-  await expect(
-    prepareExternalPublication(other.file, selected, other.deps),
-  ).rejects.toThrow("does not match");
-  expect(other.posts).toEqual([]);
+  const cloud = await fixture({ ...platformReport([record]), product: "sca" });
+  const prepare = () =>
+    prepareExternalPublication(
+      cloud.file,
+      { ...options, provider: "semgrep" },
+      cloud.deps,
+    );
+  const first = await prepare();
+  cloud.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  cloud.state.repositoryUrl = "https://github.com/example/renamed";
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(cloud.posts[1]).toBe(cloud.posts[0]);
+  await expect(prepare()).rejects.toThrow("does not match");
+  expect(cloud.posts).toHaveLength(2);
 });
 
 test("a canceled Cloud preparation does not open the artifact or contact the destination", async () => {
@@ -1041,30 +1154,6 @@ test("a canceled Cloud preparation does not open the artifact or contact the des
       signal: AbortSignal.abort(stopped),
     }),
   ).rejects.toBe(stopped);
-});
-
-test("editing a preview cannot change an upload or its interrupted replay", async () => {
-  const fixtureState = await fixture();
-  const prepared = await prepareExternalPublication(
-    fixtureState.file,
-    options,
-    fixtureState.deps,
-  );
-  const original = structuredClone(prepared.preview.requests[0]!);
-  prepared.preview.findings[0]!.evidence.title = "Edited preview title";
-  prepared.preview.requests[0]!.request_id = "edited-request";
-  prepared.preview.requests[0]!.source.source_key = "edited-source";
-  fixtureState.state.loseResponse = true;
-  await expect(prepared.publish()).rejects.toThrow();
-  expect(JSON.parse(fixtureState.posts[0]!)).toEqual(original);
-  const retry = await prepareExternalPublication(
-    fixtureState.file,
-    options,
-    fixtureState.deps,
-  );
-  expect(retry.preview.resumed).toBe(true);
-  await retry.publish();
-  expect(fixtureState.posts[1]).toBe(fixtureState.posts[0]);
 });
 
 test("CLI creates, reimports unchanged, and updates the same canonical finding", async () => {

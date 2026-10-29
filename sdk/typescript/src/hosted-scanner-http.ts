@@ -1,9 +1,24 @@
 import { CodexSecurityError } from "./errors.js";
+import { requiredText } from "./scanner-import.js";
 
 export interface HostedScannerHttpOptions {
   environment?: NodeJS.ProcessEnv;
   fetch?: (url: URL, init: RequestInit) => Promise<Response>;
   signal?: AbortSignal;
+}
+
+export function hostedRepositoryUrl(value: unknown, label: string): string {
+  const raw = requiredText(value, label);
+  const url = URL.parse(raw);
+  if (
+    !url ||
+    url.pathname === "/" ||
+    !/^https?:\/\/[^@/?#\\\s]+\/[^?#\\\s]+$/iu.test(raw)
+  )
+    throw new Error(
+      "Select an HTTP(S) source repository URL with a path and without credentials, query or fragment.",
+    );
+  return raw;
 }
 
 export function combineHostedSignals(

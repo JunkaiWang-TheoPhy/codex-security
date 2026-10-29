@@ -77,8 +77,10 @@ export function scannerFindingRepositoryUrls(
     const url = trivyRepositoryUrl(report, cloudRepositoryUrl);
     return url ? [url] : [];
   }
-  if (provider === "semgrep" && isSemgrepPlatformReport(sourceData))
-    return [semgrepPlatformFindingRepository(sourceData)];
+  if (provider === "semgrep") {
+    const url = semgrepPlatformFindingRepository(sourceData);
+    return url ? [url] : [];
+  }
   if (
     provider === "snyk" &&
     (cloudRepositoryUrl !== undefined ||

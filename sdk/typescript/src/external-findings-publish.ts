@@ -39,6 +39,7 @@ import {
   isTrivyReportHeader,
 } from "./trivy-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
@@ -783,6 +784,9 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
+        options.provider === "github"
+          ? dependabotRepository(finding)
+          : undefined,
       ];
       const mismatch =
         typedUrl && cloudRepositoryUrlKey(typedUrl) !== destinationKey

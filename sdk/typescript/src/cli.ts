@@ -219,10 +219,12 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 import { collectSnykIssues } from "./snyk-rest-findings.js";
 import {
   collectSemgrepPlatformFindings,
@@ -1293,8 +1295,7 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importGitHubAdvisories?: typeof importGitHubAdvisories;
-  collectSnykIssues?: typeof collectSnykIssues;
-  collectSemgrepPlatformFindings?: typeof collectSemgrepPlatformFindings;
+  hostedScannerFetch?: HostedScannerHttpOptions["fetch"];
   importScan?: typeof importScan;
   readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
@@ -3552,15 +3553,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep, OpenGrep, Trivy, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For hosted Snyk Open Source or Code, or Semgrep Platform findings, save complete JSON from import snyk or import semgrep. For Snyk CLI Open Source, use native snyk test JSON, plugin snyk-findings-export/v1, or Open Source SARIF. For Semgrep CLI Code, supply native JSON or SARIF and --source-repository-url. For OpenGrep, supply native JSON and --source-repository-url; imports use the semgrep storage provider and preserve OpenGrep as the scanner origin. For Trivy, supply native repository or filesystem JSON with language-package vulnerabilities. Set --trivy-scan-root unless the report’s Git metadata confirms a whole-checkout scan. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import a saved scanner report locally or to Cloud.",
+      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Saved hosted Snyk or Semgrep findings; Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Trivy repository/filesystem JSON with language-package vulnerabilities; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Saved report in a format accepted by the selected reader.",
           ),
       }),
       options: z.object({
@@ -3573,7 +3574,7 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Report reader; OpenGrep uses the semgrep storage provider.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider.",
           ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
@@ -3950,7 +3951,7 @@ export async function main(
       }
     },
   });
-  function registerGitHubAdvisories() {
+  function registerOptInCollectors() {
     imports.command("github-advisories", {
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
@@ -3968,7 +3969,7 @@ export async function main(
         githubAdvisory: z
           .array(
             optionValue("--github-advisory").regex(
-              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+              GHSA_ID,
               "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
             ),
           )
@@ -4048,8 +4049,10 @@ export async function main(
         }
       },
     });
-  }
-  function registerHostedScannerImports() {
+    const http = {
+      environment: dependencies.environment,
+      fetch: dependencies.hostedScannerFetch,
+    };
     const output = z.record(z.string(), z.unknown()).optional();
     async function collect(
       run: (signal: AbortSignal) => Promise<object>,
@@ -4107,17 +4110,16 @@ export async function main(
       run: ({ args, options, error }) =>
         collect(
           (signal) =>
-            (dependencies.collectSnykIssues ?? collectSnykIssues)(
+            collectSnykIssues(
               {
                 projectId: args.project,
                 organizationId: options.snykOrg,
                 product: options.snykProduct,
                 apiOrigin: options.snykApiOrigin,
                 sourceRepositoryUrl: options.sourceRepositoryUrl,
-                token: dependencies.environment["SNYK_TOKEN"],
                 signal,
               },
-              { environment: dependencies.environment },
+              http,
             ),
           error,
         ),
@@ -4154,10 +4156,7 @@ export async function main(
       run: ({ args, options, error }) =>
         collect(
           (signal) =>
-            (
-              dependencies.collectSemgrepPlatformFindings ??
-              collectSemgrepPlatformFindings
-            )(
+            collectSemgrepPlatformFindings(
               {
                 project: args.project,
                 deployment: options.semgrepDeployment,
@@ -4166,16 +4165,13 @@ export async function main(
                 sourceRepositoryUrl: options.sourceRepositoryUrl,
                 signal,
               },
-              { environment: dependencies.environment },
+              http,
             ),
           error,
         ),
     });
   }
-  if (importsEnabled) {
-    registerGitHubAdvisories();
-    registerHostedScannerImports();
-  }
+  if (importsEnabled) registerOptInCollectors();
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -6928,13 +6924,10 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-    if (
+    const optInCollector =
       command === "import" &&
-      ["github", "github-advisories", "semgrep", "snyk"].includes(
-        subcommand ?? "",
-      ) &&
-      frameworkFlags.rawCollector
-    ) {
+      ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "");
+    if (command === "import" && frameworkFlags.rawCollector) {
       // Incur's skill-sync notice turns a saved collector array into an object.
       cliOptions.sync = false;
     }
@@ -6942,8 +6935,7 @@ export async function main(
       !importsEnabled &&
       ((command === "publish" && subcommand === "findings") ||
         (command === "findings" && subcommand === "imported") ||
-        (command === "import" &&
-          ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "")))
+        optInCollector)
     ) {
       if (
         process.env["COMPLETE"] ||
@@ -6963,8 +6955,7 @@ export async function main(
         // This route only formats a disabled command; it is not an installed skill.
         cliOptions.sync = false;
         if (command === "publish") registerFindingPublication();
-        else if (subcommand === "github-advisories") registerGitHubAdvisories();
-        else registerHostedScannerImports();
+        else registerOptInCollectors();
         valueOptions = cliValueOptions(commands);
       }
     }

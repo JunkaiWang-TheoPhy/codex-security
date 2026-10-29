@@ -21,9 +21,10 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { parseGitRemote } from "./git-remote.js";
+import { normalizeGitRepositoryUrl, parseGitRemote } from "./git-remote.js";
 import { trivyRemoteKey, trivyBatchSourceUrls } from "./trivy-findings.js";
 import { isRecord } from "./record.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -540,6 +541,7 @@ export async function prepareNormalizedLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   validateExternalReport(current.report);
+  let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -550,6 +552,22 @@ export async function prepareNormalizedLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    if (options.provider !== "github") continue;
+    const native = dependabotRepository(finding);
+    if (!native) continue;
+    const claimed = finding.evidence.details?.repository?.url;
+    if (
+      claimed &&
+      cloudRepositoryUrlKey(claimed) !== cloudRepositoryUrlKey(native)
+    )
+      throw new CodexSecurityError(
+        "The normalized repository does not match the original Dependabot alert.",
+      );
+    if (dependabotSource && dependabotSource !== native)
+      throw new CodexSecurityError(
+        "Select Dependabot alerts from only one GitHub host and repository.",
+      );
+    dependabotSource = native;
   }
   const sources = new Set(
     options.provider === "trivy" ? trivyBatchSourceUrls(current, false) : [],
@@ -558,10 +576,7 @@ export async function prepareNormalizedLocalImport(
     options.repository,
     dependencies,
   );
-  const githubSources = new Set<string>();
-  for (const { url, platform } of dependencies.sourceRepositories ?? []) {
-    (platform === "github" ? githubSources : sources).add(url);
-  }
+  let hostedRepository: string | undefined;
   const typedTrivyUrls = new Set<string>();
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
@@ -572,9 +587,26 @@ export async function prepareNormalizedLocalImport(
     for (const source of scannerFindingRepositoryUrls(
       options.provider,
       evidence.source_data,
-    ))
+    )) {
       sources.add(source);
+      if (options.provider === "snyk" || options.provider === "semgrep")
+        hostedRepository = source;
+    }
   }
+  if (hostedRepository) {
+    // A hosted project identifies one repository even when the checkout has multiple remotes.
+    const expected = repositoryUrlKey(hostedRepository);
+    for (const url of sources)
+      if (repositoryUrlKey(normalizeGitRepositoryUrl(url)) !== expected)
+        throw new CodexSecurityError(
+          "The normalized repository does not match the hosted scanner project.",
+        );
+  }
+  const githubSources = new Set<string>();
+  for (const { url, platform } of dependencies.sourceRepositories ?? []) {
+    (platform === "github" ? githubSources : sources).add(url);
+  }
+  if (dependabotSource) githubSources.add(dependabotSource);
   await requireMatchingRepository(
     repository,
     options.provider,
