@@ -382,7 +382,7 @@ export function normalizePlatformReport(
   const context = { format, deployment, ...selected.binding, ref, product };
   const result = normalizeRecords(
     findings.map((finding) => scopedFinding(finding, selected, ref)),
-    ({ finding, label }, id) => {
+    ({ finding, label }) => {
       const location = record(
         finding["location"] ?? {},
         "Semgrep finding location",
@@ -467,26 +467,23 @@ export function normalizePlatformReport(
           },
         };
       }
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            description,
-            severity: scannerSeverity(text(finding["severity"])),
-            locations: path ? [{ path, line }] : [],
-            branch: ref,
-            source_data: structuredClone({
-              ...context,
-              ...(selected.observed
-                ? { repositoryAliases: label ? [label] : [] }
-                : {}),
-              finding,
-            }),
-            ...productEvidence,
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          description,
+          severity: scannerSeverity(text(finding["severity"])),
+          locations: path ? [{ path, line }] : [],
+          branch: ref,
+          source_data: structuredClone({
+            ...context,
+            ...(selected.observed
+              ? { repositoryAliases: label ? [label] : [] }
+              : {}),
+            finding,
+          }),
+          ...productEvidence,
+        },
+        target,
+      );
     },
     ({ finding: { id } }) =>
       stableId("semgrep-platform", [

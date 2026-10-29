@@ -637,7 +637,7 @@ export function normalizeSnykIssues(
   const code = source.product === "code";
   const result = normalizeRecords(
     readIssues(document, source),
-    (issue, sourceFindingId) => {
+    (issue) => {
       const attributes = record(issue["attributes"], "Snyk issue attributes");
       const status = attributes["status"];
       if (
@@ -661,39 +661,36 @@ export function normalizeSnykIssues(
       const activeCoordinates = records(attributes, "coordinates").filter(
         (coordinate) => status === "open" && coordinate["state"] === "open",
       );
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(attributes["title"], "Snyk issue title"),
-            description: text(attributes["description"]),
-            severity:
-              severity === "info" ? "informational" : scannerSeverity(severity),
-            advisory_ids: code ? [] : problemIds(problems),
-            ...(code
-              ? codeEvidence(activeCoordinates, context.scm)
-              : {
-                  packages: packageEvidence(activeCoordinates, context),
-                }),
-            source_updated_at: Math.floor(updated / 1000),
-            source_data: structuredClone({ ...source, issue }),
-            ...(code && {
-              details: {
-                kind: "sast",
-                repository: { url: source.sourceRepositoryUrl },
-                scanner_origin: "Snyk Code",
-                source_status: status,
-                rule: rules.length === 1 ? { id: rules[0] } : null,
-                weakness_ids: problemIds(
-                  records(attributes, "classes"),
-                  "weakness",
-                ),
-              },
-            }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(attributes["title"], "Snyk issue title"),
+          description: text(attributes["description"]),
+          severity:
+            severity === "info" ? "informational" : scannerSeverity(severity),
+          advisory_ids: code ? [] : problemIds(problems),
+          ...(code
+            ? codeEvidence(activeCoordinates, context.scm)
+            : {
+                packages: packageEvidence(activeCoordinates, context),
+              }),
+          source_updated_at: Math.floor(updated / 1000),
+          source_data: structuredClone({ ...source, issue }),
+          ...(code && {
+            details: {
+              kind: "sast",
+              repository: { url: source.sourceRepositoryUrl },
+              scanner_origin: "Snyk Code",
+              source_status: status,
+              rule: rules.length === 1 ? { id: rules[0] } : null,
+              weakness_ids: problemIds(
+                records(attributes, "classes"),
+                "weakness",
+              ),
+            },
+          }),
+        },
+        target,
+      );
     },
     (issue) => {
       const attributes = selectedIssueAttributes(issue, source);

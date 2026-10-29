@@ -1,13 +1,12 @@
-import { normalizeSnykFindingsExport } from "../src/snyk-findings.js";
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import { normalizeSnykFindingsExport } from "../src/snyk-findings.js";
 import {
-  listLocalExternalFindings,
-  prepareNormalizedLocalImport,
-} from "../src/external-findings-local.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
+  createAndReplayFinding,
+  localFindingsFixture,
+  localReportFixture,
+  updateStoredFinding,
+} from "./external-findings-local-helpers.js";
 import {
   snykJson,
   snykPluginExport,
@@ -44,101 +43,54 @@ test.each([
 });
 
 test("a Snyk plugin's Windows path cannot identify a one-letter SSH host", async () => {
-  await using f = await localFindingsFixture({ remote: "git@c:/org/repo" });
+  await using fixture = await localReportFixture(
+    "snyk.json",
+    { provider: "snyk", sourceKey: "snyk" },
+    { remote: "git@c:/org/repo" },
+  );
   const input = snykPluginExport();
   input.collection.target.repository = "C:/org/repo";
-  const path = join(f.root, "snyk.json");
-  await writeFile(path, JSON.stringify(input));
-  await expect(
-    prepareLocalExternalImport(
-      path,
-      { repository: f.repository, provider: "snyk", sourceKey: "snyk" },
-      { environment: f.environment },
-    ),
-  ).rejects.toThrow("does not match a configured remote");
+  await fixture.writeJson(input);
+  await expect(fixture.prepare()).rejects.toThrow(
+    "does not match a configured remote",
+  );
 });
 
 test.each(["plugin", "JSON", "SARIF"] as const)(
   "Snyk %s findings persist locally and update without duplicating their identities",
   async (format) => {
-    await using fixture = await localFindingsFixture({
-      remote: "https://github.com/example/project",
-    });
+    await using fixture = await localReportFixture(
+      "snyk.json",
+      { provider: "snyk", sourceKey: `snyk-${format.toLowerCase()}` },
+      { remote: "https://github.com/example/project" },
+    );
     const input =
       format === "plugin"
         ? snykPluginExport()
         : format === "JSON"
           ? snykJson()
           : snykSarif();
-    const path = join(fixture.root, "snyk.json");
-    const options = {
-      repository: fixture.repository,
-      provider: "snyk" as const,
-      sourceKey: `snyk-${format.toLowerCase()}`,
-    };
-    const dependencies = { environment: fixture.environment };
-    await writeFile(path, JSON.stringify(input));
+    await fixture.writeJson(input);
 
-    const prepared = await prepareLocalExternalImport(
-      path,
-      options,
-      dependencies,
-    );
-    expect(prepared.preview.excluded).toEqual([]);
-    expect(prepared.preview.findings).toHaveLength(1);
-    expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
-    expect((await prepared.import()).counts).toEqual({
-      created: 1,
-      updated: 0,
-      unchanged: 0,
-    });
-
-    const [stored] = await listLocalExternalFindings(options, dependencies);
-    expect(stored).toMatchObject({
-      repository: fixture.repository,
-      provider: "snyk",
-      sourceKey: options.sourceKey,
-      sourceFindingId: prepared.preview.findings[0]!.source_finding_id,
-      version: 1,
-    });
-    expect(stored!.evidence).toEqual(prepared.preview.findings[0]!.evidence);
-    expect(stored!.assessment).toEqual({ state: "not_assessed" });
-    expect(stored!.evidence).not.toHaveProperty("confidence");
+    const stored = await createAndReplayFinding(fixture);
+    expect(stored.provider).toBe("snyk");
+    expect(stored.evidence.locations).toEqual([]);
+    expect(stored.evidence.packages![0]!.manifest_path).toBeNull();
     if ("findings" in input) {
-      expect(stored!.evidence.locations).toEqual([]);
-      expect(stored!.evidence.packages![0]!.manifest_path).toBeNull();
-      expect(stored!.evidence.source_data).toMatchObject({
+      expect(stored.evidence.source_data).toMatchObject({
         collection: input.collection,
         finding: input.findings[0],
       });
     } else if ("vulnerabilities" in input) {
-      expect(stored!.evidence.locations).toEqual([]);
-      expect(stored!.evidence.packages![0]!.manifest_path).toBeNull();
-      expect(stored!.evidence.source_data).toMatchObject({
+      expect(stored.evidence.source_data).toMatchObject({
         vulnerability: input.vulnerabilities[0],
       });
     } else {
-      expect(stored!.evidence.locations).toEqual([]);
-      expect(stored!.evidence.packages![0]!.manifest_path).toBeNull();
-      expect(stored!.evidence.source_data).toMatchObject({
+      expect(stored.evidence.source_data).toMatchObject({
         result: input.runs[0]!.results[0],
         rule: input.runs[0]!.tool.driver.rules[0],
       });
     }
-
-    const repeated = await prepareLocalExternalImport(
-      path,
-      options,
-      dependencies,
-    );
-    expect((await repeated.import()).counts).toEqual({
-      created: 0,
-      updated: 0,
-      unchanged: 1,
-    });
-    expect(await listLocalExternalFindings(options, dependencies)).toEqual([
-      stored!,
-    ]);
 
     if ("findings" in input) {
       input.findings[0]!.severity.value = "low";
@@ -151,30 +103,11 @@ test.each(["plugin", "JSON", "SARIF"] as const)(
         "Low severity - synthetic vulnerability in @example/package";
       input.runs[0]!.results[0]!.message.text = "Updated dependency evidence";
     }
-    await writeFile(path, JSON.stringify(input));
-    const changed = await prepareLocalExternalImport(
-      path,
-      options,
-      dependencies,
-    );
-    expect((await changed.import()).counts).toEqual({
-      created: 0,
-      updated: 1,
-      unchanged: 0,
-    });
-    const updated = await listLocalExternalFindings(options, dependencies);
-    expect(updated).toHaveLength(1);
-    expect(updated[0]).toMatchObject({
-      id: stored!.id,
-      sourceFindingId: stored!.sourceFindingId,
-      createdAt: stored!.createdAt,
-      version: 2,
-    });
-    expect(updated[0]!.assessment).toEqual({ state: "not_assessed" });
-    expect(updated[0]!.evidence).toEqual(changed.preview.findings[0]!.evidence);
-    expect(updated[0]!.evidence.severity).toBe("low");
-    expect(updated[0]!.evidence.source_data).not.toEqual(
-      stored!.evidence.source_data,
+    await fixture.writeJson(input);
+    const updated = await updateStoredFinding(fixture, stored);
+    expect(updated.evidence.severity).toBe("low");
+    expect(updated.evidence.source_data).not.toEqual(
+      stored.evidence.source_data,
     );
   },
 );
@@ -182,9 +115,11 @@ test.each(["plugin", "JSON", "SARIF"] as const)(
 test.each(["plugin", "SARIF"] as const)(
   "Snyk %s repository provenance cannot be imported into a different local checkout",
   async (format) => {
-    await using fixture = await localFindingsFixture({
-      remote: "https://github.com/example/other",
-    });
+    await using fixture = await localReportFixture(
+      "snyk.json",
+      { provider: "snyk", sourceKey: "snyk-sca" },
+      { remote: "https://github.com/example/other" },
+    );
     const sarif = snykSarif();
     const input =
       format === "plugin"
@@ -198,55 +133,33 @@ test.each(["plugin", "SARIF"] as const)(
               ],
             })),
           };
-    const path = join(fixture.root, "snyk.json");
-    await writeFile(path, JSON.stringify(input));
-    const options = {
-      repository: fixture.repository,
-      provider: "snyk" as const,
-      sourceKey: "snyk-sca",
-    };
-    const dependencies = { environment: fixture.environment };
-    await expect(
-      prepareLocalExternalImport(path, options, dependencies),
-    ).rejects.toThrow(/repository/iu);
-    expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
+    await fixture.writeJson(input);
+    await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
+    expect(await fixture.read()).toEqual([]);
   },
 );
 
 test.each([2222, 2223])(
   "Snyk plugin repository matching preserves the SSH port (checkout port %i)",
   async (port) => {
-    await using fixture = await localFindingsFixture({
-      remote: `ssh://git@github.example.test:${port}/example/project.git`,
-    });
+    await using fixture = await localReportFixture(
+      "snyk.json",
+      { provider: "snyk", sourceKey: "snyk-sca" },
+      { remote: `ssh://git@github.example.test:${port}/example/project.git` },
+    );
     const input = snykPluginExport();
     input.collection.target.repository =
       "ssh://git@github.example.test:2222/example/project.git";
-    const path = join(fixture.root, "snyk.json");
-    await writeFile(path, JSON.stringify(input));
-    const options = {
-      repository: fixture.repository,
-      provider: "snyk" as const,
-      sourceKey: "snyk-sca",
-    };
-    const dependencies = { environment: fixture.environment };
+    await fixture.writeJson(input);
     if (port !== 2222) {
-      await expect(
-        prepareLocalExternalImport(path, options, dependencies),
-      ).rejects.toThrow(/repository/iu);
-      expect(await listLocalExternalFindings(options, dependencies)).toEqual(
-        [],
-      );
+      await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
+      expect(await fixture.read()).toEqual([]);
       return;
     }
 
-    const prepared = await prepareLocalExternalImport(
-      path,
-      options,
-      dependencies,
-    );
+    const prepared = await fixture.prepare();
     expect((await prepared.import()).counts.created).toBe(1);
-    const records = await listLocalExternalFindings(options, dependencies);
+    const records = await fixture.read();
     expect(records).toHaveLength(1);
     expect(records[0]!.evidence.source_data).toMatchObject({
       collection: {
