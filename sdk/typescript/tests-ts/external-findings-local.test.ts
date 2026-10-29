@@ -1923,6 +1923,25 @@ describe("local normalized scanner findings", () => {
     },
   );
 
+  test.each(["", "https::"])(
+    "matches the repository selected by %sHTTPS queries",
+    async (helper) => {
+      const base = "https://git.example.test/git";
+      const { repository, environment } = await fixture({
+        remote: `${helper}${base}?project=B`,
+      });
+      const prepare = (suffix: string) =>
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          { environment, sourceRepositories: [{ url: base + suffix }] },
+        );
+      await prepare("?project=B");
+      await expect(prepare("?project=A")).rejects.toThrow("does not match");
+      await expect(prepare("")).rejects.toThrow("does not match");
+    },
+  );
+
   test.each([
     ["ftp", "ftp", false],
     ["ftps", "https", true],

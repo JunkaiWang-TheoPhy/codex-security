@@ -11,7 +11,10 @@ import {
   prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
-import { snapshotImportOptions } from "./external-findings.js";
+import {
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+} from "./external-findings.js";
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
@@ -24,14 +27,11 @@ export async function prepareLocalExternalImport(
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
+  const verifiedRepositories = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  );
   const parsed = await abortable(
-    () =>
-      readExternalFindings(
-        path,
-        settings,
-        "local",
-        dependencies.sourceRepositories,
-      ),
+    () => readExternalFindings(path, settings, "local", verifiedRepositories),
     dependencies.signal,
   );
   const normalizedOptions = {
@@ -47,7 +47,7 @@ export async function prepareLocalExternalImport(
     // agree with the caller's source URL when the checkout has no remote.
     const source = settings.sourceRepositoryUrl!;
     sourceRepositories = [{ url: source }, ...sourceRepositories];
-    const knownGitHub = dependencies.sourceRepositories?.some(
+    const knownGitHub = verifiedRepositories.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
@@ -65,13 +65,8 @@ export async function prepareLocalExternalImport(
         platform: "github",
       }));
   }
-  const { environment, ...workbench } = dependencies;
-  return prepareLocalImport(parsed.findings, normalizedOptions, {
-    ...workbench,
-    environment,
-    sourceRepositories: [
-      ...(dependencies.sourceRepositories ?? []),
-      ...sourceRepositories,
-    ],
-  });
+  return prepareLocalImport(parsed.findings, normalizedOptions, dependencies, [
+    ...verifiedRepositories,
+    ...sourceRepositories,
+  ]);
 }

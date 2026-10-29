@@ -23,6 +23,7 @@ import {
   checkHostedFindingProvider,
   snapshotExternalFindings,
   snapshotImportOptions,
+  snapshotSourceRepositories,
   type ExternalFindings,
   type HostedExternalFindings,
   type NormalizedFindingsFor,
@@ -193,10 +194,16 @@ function remoteRepository(
       ? ""
       : url.port;
   const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
-  if (!bound) return { key: key(origin + path) };
+  const httpTransport = url.protocol === "http:" || url.protocol === "https:";
+  const rawSuffix = /[?#].*$/su.exec(value)?.[0] ?? "";
+  // Git appends its HTTP service path before libcurl strips fragment text.
+  const requestSuffix = httpTransport
+    ? rawSuffix.replace(/#.*$/su, "#").replace(/\/$/u, "")
+    : "";
+  if (!bound) return { key: key(origin + path) + requestSuffix };
 
   if (!ssh && url.protocol !== "git:") {
-    if (url.protocol === "http:" || url.protocol === "https:") {
+    if (httpTransport) {
       // libcurl and WHATWG differ on backslashes and encoded dot segments.
       const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
         value,
@@ -207,14 +214,8 @@ function remoteRepository(
       else if (/\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
         return { key: "\0" + value };
     }
-    const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
-    // HTTP sends the query and omits fragment text from repository requests.
-    if (suffix && !["http:", "https:"].includes(url.protocol))
-      return { key: key(origin + path) + "\0" };
-    return {
-      key:
-        key(origin + path) + suffix.replace(/#.*$/su, "#").replace(/\/$/u, ""),
-    };
+    if (rawSuffix && !httpTransport) return { key: key(origin + path) + "\0" };
+    return { key: key(origin + path) + requestSuffix };
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
@@ -432,8 +433,10 @@ async function hasGitMetadata(
   );
 }
 
+type HostedRepository = ExternalSourceRepository & { gitlab?: boolean };
+
 function hostedRepositoryMatches(
-  source: ExternalSourceRepository,
+  source: HostedRepository,
   value: string,
   expectedKey?: string,
 ): boolean {
@@ -442,8 +445,8 @@ function hostedRepositoryMatches(
   const github = source.platform === "github";
   const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
   return (
-    hostedRepositoryUrlKey(url, github) ===
-    (expectedKey ?? hostedRepositoryUrlKey(source.url, github))
+    hostedRepositoryUrlKey(url, github, source.gitlab) ===
+    (expectedKey ?? hostedRepositoryUrlKey(source.url, github, source.gitlab))
   );
 }
 
@@ -451,7 +454,7 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
-  hosted: ExternalSourceRepository | undefined,
+  hosted: HostedRepository | undefined,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -659,7 +662,7 @@ async function requireMatchingRepository(
   if (hosted) {
     const platform = hosted.platform ?? provider;
     const key = (url: string) =>
-      hostedRepositoryUrlKey(url, hosted.platform === "github");
+      hostedRepositoryUrlKey(url, hosted.platform === "github", hosted.gitlab);
     const http = /^https?:\/\//iu;
     const httpKey = http.test(hosted.url)
       ? remoteRepository(hosted.url, platform, true, key)?.key
@@ -800,6 +803,9 @@ export async function prepareLocalImport(
   input: HostedExternalFindings,
   options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies,
+  sourceRepositories = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  ),
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = snapshotExternalFindings(input, options.provider);
@@ -850,6 +856,7 @@ export async function prepareLocalImport(
         isSemgrepPlatformReport(evidence.source_data),
       )),
   );
+  let hostedGitLab = options.provider === "snyk" && current.findings.length > 0;
   let hostedGitHub: boolean | undefined =
     reportPlatform === "other" ? false : undefined;
   if (
@@ -863,7 +870,9 @@ export async function prepareLocalImport(
     if (url) sources.set(url, { url });
     const data = evidence.source_data;
     if (options.provider === "snyk") {
-      for (const source of snykRepositoryClaims(data)) {
+      const claims = snykRepositoryClaims(data);
+      hostedGitLab &&= claims.some((source) => source.gitlab);
+      for (const source of claims) {
         sources.set(source.url, { url: source.url });
         if (source.nativeUrl)
           sources.set(source.nativeUrl, { url: source.nativeUrl });
@@ -890,7 +899,7 @@ export async function prepareLocalImport(
         data,
         (url) =>
           reportPlatform !== "other" &&
-          isVerifiedGitHubRepository(url, dependencies.sourceRepositories),
+          isVerifiedGitHubRepository(url, sourceRepositories),
       );
       if (native) {
         hostedUrl ??= native;
@@ -923,7 +932,7 @@ export async function prepareLocalImport(
   }
   for (const source of [
     ...(inspector ? [inspector] : []),
-    ...(dependencies.sourceRepositories ?? []),
+    ...sourceRepositories,
   ]) {
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
@@ -932,7 +941,7 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
-  let hosted: ExternalSourceRepository | undefined;
+  let hosted: HostedRepository | undefined;
   const references = [...sources.values()];
   const projectedUrl =
     singleProject && !hostedUrl
@@ -951,7 +960,11 @@ export async function prepareLocalImport(
           "Projected source repository URL",
         )
       : source;
-    hosted = { url, platform: github ? "github" : undefined };
+    hosted = {
+      url,
+      platform: github ? "github" : undefined,
+      gitlab: hostedGitLab,
+    };
     // Validate the entire report even when the checkout has several remotes or none.
     for (const url of sources.keys())
       if (!hostedRepositoryMatches(hosted, url))

@@ -41,14 +41,17 @@ export function isGitSshRemote(remote: string): boolean {
 
 function sshAuthority(host: string): URL | null {
   if (/[\/\\?#@\s\x00-\x1f\x7f]/u.test(host)) return null;
-  const parsed = URL.parse(`ssh://${host}`);
+  // Git passes a leading plus on decimal ports through to OpenSSH.
+  const parse = (authority: string) =>
+    URL.parse("ssh://" + authority.replace(/:\+(\d+)$/u, ":$1"));
+  const parsed = parse(host);
   if (parsed) return parsed;
   // Git accepts brackets around DNS names, with an SSH port inside or after the brackets.
-  const bracketed = /^\[([^\]]+)\](?::(\d*))?$/u.exec(host);
+  const bracketed = /^\[([^\]]+)\](?::(\+?\d*))?$/u.exec(host);
   // An empty port outside the brackets is ignored, but an inner trailing colon is a hostname byte.
   if (!bracketed || bracketed[1]!.endsWith(":")) return null;
   const [, name, port] = bracketed;
-  return URL.parse(`ssh://${name}${port ? `:${port}` : ""}`);
+  return parse(name + (port ? `:${port}` : ""));
 }
 
 /** Parse transport syntax only; callers decide which hosts and credentials are allowed. */
@@ -123,7 +126,7 @@ export function isKnownGitHost(host: string): boolean {
 }
 
 /** Public SSH-over-443 authorities and their HTTPS repository hosts. */
-export function publicGitSsh443Host(authority: string): string | undefined {
+function publicGitSsh443Host(authority: string): string | undefined {
   switch (authority) {
     case "ssh.github.com:443":
       return "github.com";

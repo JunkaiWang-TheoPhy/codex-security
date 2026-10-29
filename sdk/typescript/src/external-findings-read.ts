@@ -11,7 +11,7 @@ import {
   isVerifiedGitHubRepository,
 } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
-import { readSnykFindings } from "./snyk-findings.js";
+import { readSnykFindings, snykRepositoryClaims } from "./snyk-findings.js";
 import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import {
   normalizeSemgrepReport,
@@ -95,10 +95,12 @@ export async function readExternalFindings(
               findings.sourceRepositoryUrl,
               references,
             )));
-      if (
-        hostedRepositoryUrlKey(findings.sourceRepositoryUrl, github) !==
-        hostedRepositoryUrlKey(declared, github)
-      )
+      // A hosted file comes from a single validated project.
+      const gitlab = snykRepositoryClaims(
+        findings.findings[0]?.evidence.source_data,
+      ).some((source) => source.gitlab);
+      const key = (url: string) => hostedRepositoryUrlKey(url, github, gitlab);
+      if (key(findings.sourceRepositoryUrl) !== key(declared))
         throw new Error(
           "Snyk REST source repository does not match the declared source repository URL.",
         );

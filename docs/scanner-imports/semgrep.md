@@ -25,8 +25,9 @@ detects a change. The API does not provide an atomic snapshot, so concurrent
 changes confined to later pages can still cause findings to be skipped.
 If the project has no SCM URL or supplies an SSH clone URL, provide
 its HTTP(S) URL with `--source-repository-url`. The report keeps the native URL
-and mapping. Both SSH clones and case-only path differences on custom hosts
-require a verified GitHub binding at import. The project ID scopes collection.
+and mapping. On custom hosts, match the path case and the presence or absence
+of `.git` exactly. A verified GitHub binding also accepts SSH clones, case
+variants and an optional `.git` suffix. The project ID scopes collection.
 A row can carry an independently configured repository name. The collector
 records the names it receives for the selected project, and replay checks
 supplied names against that list. Older exports without the list use the

@@ -130,6 +130,8 @@ export function hostedScannerHttp(
   const request = dependencies.fetch?.bind(dependencies) ?? fetch;
   async function getJson(url: URL, authorization: string): Promise<unknown> {
     signal?.throwIfAborted();
+    if (/[\0\r\n]/u.test(authorization))
+      throw new Error("Scanner API token cannot contain a NUL or line break.");
     const response = await request(url, {
       method: "GET",
       headers: {

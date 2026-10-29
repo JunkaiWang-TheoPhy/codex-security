@@ -47,18 +47,16 @@ Bitbucket.org. A custom GitHub Enterprise host also requires GitHub SCM
 provenance from the Snyk project. When a separately fetched target identifies
 its integration, an SCM project requires a supported integration from the same
 provider family, such as GitHub Enterprise and its GitHub Server App.
+On custom hosts, keep the exact `.git` suffix spelling unless the project
+supplies a matching target URL from its GitHub Enterprise or GitLab integration.
 
-Snyk CLI records HTTP(S) and SSH origins as HTTP targets and drops the SSH
-login. On a custom Git server, a home-relative SSH path can name a different
-repository from the same HTTP path. On SSH-capable Git services, the importer
-also rejects CLI targets with literal `.` or `..` path components because HTTP
-resolves them while SSH sends them to the server. For Open Source projects,
-Snyk can record a `git+ssh` port as the first path component. The importer
-cannot distinguish that port from a numeric repository namespace. To replace
-an ambiguous Open Source export, provide the repository's HTTPS URL with
+For Open Source projects, Snyk CLI can record a local Git path and a hosted
+repository as the same HTTP target. The importer rejects these ambiguous
+targets during collection and saved-report replay. Set the project's target
+explicitly with
 [`snyk monitor --remote-repo-url=https://git.example.test/team/repo.git`](https://docs.snyk.io/developer-tools/snyk-cli/commands/monitor#--remote-repo-urlurl)
-and collect from the resulting Snyk project. When Snyk supplies no target URL,
-the collector uses the repository selected with `--source-repository-url`.
+and collect a new export. When Snyk supplies no target URL, the collector
+uses the repository selected with `--source-repository-url`.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.

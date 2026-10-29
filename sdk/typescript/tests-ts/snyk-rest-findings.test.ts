@@ -606,6 +606,23 @@ test.each([
   },
 );
 
+test("accepts a custom-host .git alias only when the Snyk integration establishes it", () => {
+  const url = "https://git.example.test/team/lib";
+  const report = (origin: string, remote: string) => ({
+    ...envelope(),
+    sourceRepositoryUrl: url,
+    project: project({ origin, remote }),
+  });
+  expect(() => normalizeSnykIssues(report("api", url + ".git"))).toThrow(
+    "target URL",
+  );
+  for (const origin of ["gitlab", "github-enterprise"])
+    expect(
+      normalizeSnykIssues(report(origin, url + ".git")).findings,
+    ).toHaveLength(1);
+  expect(normalizeSnykIssues(report("api", url)).findings).toHaveLength(1);
+});
+
 test.each([
   ["Jalape%c3%b1o", "Jalape%C3%B1o"],
   ["Jalapeño", "Jalape%C3%B1o"],
@@ -922,177 +939,79 @@ test("a wrong project, product or repository fails before listing issues or acce
   );
 });
 
-test("matches the HTTP target spelling emitted by Snyk CLI for public Git remotes", async () => {
-  const github = "github.com/example/repository";
-  for (const [remote, selected] of [
-    ["github.com/Example/repository.git", github],
-    [github, "github.com/example/%72epository"],
-    ["github.com:22/Example/repository.git", github],
-    ["github.com:022/Example/repository.git", github],
-    [
-      "github.com:22/Example/repository.git",
-      "github.com:22/example/repository",
-    ],
-    ["gitlab.com:22/Group%2Fsub/project.git", "gitlab.com/Group/sub/project"],
-    [
-      "gitlab.com:22/Group%2Fsub/project.git",
-      "gitlab.com:22/Group%2Fsub/project",
-    ],
-    ["github.com:22/example%2Frepository", github],
-    [
-      "github.com:443/Example/repository.git",
-      "github.com:443/example/repository",
-    ],
-    ["ssh.github.com:443/Example/repository.git", github],
-    ["ssh.github.com:0443/Example/repository.git", github],
-    ["ssh.github.com:443/example/%72epository", github],
-    ["ssh.github.com:443/example%2Frepository.git", github],
-    ["altssh.gitlab.com:443/Group%2Frepo.git", "gitlab.com/Group/repo"],
-    ["altssh.bitbucket.org:443/Group%2Frepo.git", "bitbucket.org/Group/repo"],
-    ["gitlab.com:8443/Group/repo.git", "gitlab.com:8443/Group/repo"],
-    ["gitlab.com/123456/Team/project", "gitlab.com/123456/Team/project"],
-    ["gitlab.com/Team/project.git", "gitlab.com/Team/project"],
-    ["bitbucket.org/Team/project", "bitbucket.org/Team/project"],
-    ["example.ghe.com/Org/repo.git", "example.ghe.com/org/repo"],
-    ["dev.azure.com/Org/p/_git/r", "dev.azure.com/Org/p/_git/r"],
-    ["dev.azure.com/Org/p/old/../_git/r", "dev.azure.com/Org/p/_git/r"],
-    ["org.visualstudio.com/p/_git/r", "org.visualstudio.com/p/_git/r"],
-  ] as const) {
-    const source = project({ origin: "cli", remote: "http://" + remote });
-    const report = await transport(
-      document(source),
-      document([issue()]),
-    ).collect({ ...options, sourceRepositoryUrl: "https://" + selected });
-    expect(
-      normalizeSnykIssues(JSON.parse(JSON.stringify(report)))
-        .sourceRepositoryUrl,
-    ).toBe("https://" + selected);
-  }
-  for (const [remote, selected, origin = "cli"] of [
-    [github, github, "github"],
-    ["github.com/example/other", github],
-    ["github.com/example/old/../repository", github],
-    ["gitlab.com:22/Group/./project", "gitlab.com:22/Group/project"],
-    ["gitlab.com/22/Group/project.git", "gitlab.com/22/Group/project"],
-    ["gitlab.com/22/Group/project.git", "gitlab.com/Group/project"],
-    ["gitlab.com/%30%32%32%2FGroup/project", "gitlab.com/022%2FGroup/project"],
-    ["github.com:80/example/repository", github],
-    ["github.com:443/example/repository", github],
-    ["github.com:2222/example/repository", github],
-    ["git.example.test:22/team/repo", "git.example.test/team/repo"],
-    ["github.com:8443/example/repository", "github.com:443/example/repository"],
-    ["ssh.github.com:22/example/repository", github],
-    ["user@ssh.github.com:443/example/repository", github],
-    ["other.github.com:443/example/repository", github],
-    ["gitlab.com/team/project", "gitlab.com/Team/project"],
-    ["git.example.test/group/project", "git.example.test/group/project"],
-    ["github.com/example%2Frepository", github],
-    ["github.com:22/example%252Frepository", github],
-    ["gitlab.com:22/Group%2Fsub/project", "gitlab.com/Group%2Fsub/project"],
-    ["gitlab.com:22/Group%2Fsub/project", "gitlab.com:22/Group/sub/project"],
-    [
-      "ssh.github.com:443/example%2Frepository",
-      "github.com/example%2Frepository",
-    ],
-    ["ssh.github.com:443/example%252Frepository", github],
-    ["github.com/example%252Frepository", "github.com/example%2Frepository"],
-  ] as const) {
-    const { collect, requests } = transport(
-      document(project({ origin, remote: "http://" + remote })),
-    );
+test("rejects ambiguous Snyk monitor HTTP targets before fetching issues or replaying a report", async () => {
+  // The CLI emits this same target for git@github.com:example/repository.git
+  // and the local path /mnt/mirrors/git@github.com:example/repository.git.
+  const http = "http://github.com/example/repository.git";
+  const https = "https://github.com/example/repository.git";
+  const monitored = project({ origin: "cli", remote: http });
+  for (const source of [http, https]) {
+    const { collect, requests } = transport(document(monitored));
     await expect(
-      collect({ ...options, sourceRepositoryUrl: "https://" + selected }),
-    ).rejects.toThrow("target URL");
+      collect({ ...options, sourceRepositoryUrl: source }),
+    ).rejects.toThrow("--remote-repo-url");
     expect(requests).toHaveLength(1);
+    const report = {
+      ...envelope(),
+      sourceRepositoryUrl: source,
+      project: monitored,
+    };
+    expect(() => normalizeSnykIssues(report)).toThrow("--remote-repo-url");
+    expect(() =>
+      snykRestFindingRepository({ ...report, issue: issue() }),
+    ).toThrow("--remote-repo-url");
   }
+  const run = transport(
+    document(project({ origin: "cli", remote: https })),
+    document([issue()]),
+  );
+  const explicit = await run.collect({
+    ...options,
+    sourceRepositoryUrl: https,
+  });
+  expect(normalizeSnykIssues(explicit).sourceRepositoryUrl).toBe(https);
 });
 
-test("compares native HTTP repository paths and preserves ambiguous Snyk CLI spellings", () => {
-  const plain = "gitlab.com/Group/my-project";
-  const escaped = "gitlab.com/Group/my%2Dproject";
-  const check = (native: string, declared: string, origin: string) =>
+test("compares Snyk native HTTP repository URLs without changing their scheme", () => {
+  const plain = "http://gitlab.com/Group/my-project";
+  const escaped = "http://gitlab.com/Group/my%2Dproject";
+  const check = (
+    remote: string | null,
+    source: string,
+    origin = "gitlab",
+    product: "open-source" | "code" = "open-source",
+  ) =>
     normalizeSnykIssues({
-      ...envelope(),
-      sourceRepositoryUrl: "http://" + declared,
-      project: project({ origin, remote: "http://" + native }),
+      ...snykRestFixture(product, { sourceRepositoryUrl: source }),
+      project: project({
+        manager: product === "code" ? "sast" : "npm",
+        origin,
+        remote,
+      }),
     });
-  for (const [native, declared] of [
+  for (const [native, selected] of [
     [plain, escaped],
     [escaped, plain],
   ] as const) {
-    const report = check(native, declared, "gitlab");
-    expect(report.sourceRepositoryUrl).toBe("http://" + declared);
+    const report = check(native, selected);
+    expect(report.sourceRepositoryUrl).toBe(selected);
     expect(report.findings[0]!.evidence.source_data).toMatchObject({
-      project: project({ origin: "gitlab", remote: "http://" + native }),
+      project: project({ remote: native, origin: "gitlab" }),
     });
-    expect(check(native, declared, "cli").sourceRepositoryUrl).toBe(
-      "http://" + declared,
-    );
   }
-  const dotted = "gitlab.com/Group/old/../my-project";
-  expect(check(dotted, plain, "gitlab").sourceRepositoryUrl).toBe(
-    "http://" + plain,
-  );
-  expect(check(plain, dotted, "cli").sourceRepositoryUrl).toBe(
-    "http://" + dotted,
-  );
-  expect(() => check(dotted, dotted, "cli")).toThrow("target URL");
-  const numeric = "gitlab.com/22/Group/project";
-  expect(() => check(numeric, numeric, "cli")).toThrow("target URL");
-  for (const origin of ["gitlab", "api"])
-    expect(check(numeric, numeric, origin).sourceRepositoryUrl).toBe(
-      "http://" + numeric,
-    );
-  const codeUrl = "http://" + numeric;
   expect(
-    normalizeSnykIssues({
-      ...snykRestFixture("code", { sourceRepositoryUrl: codeUrl }),
-      project: project({ manager: "sast", origin: "cli", remote: codeUrl }),
-    }).sourceRepositoryUrl,
-  ).toBe(codeUrl);
-  const override = "https://" + numeric;
-  expect(
-    normalizeSnykIssues({
-      ...envelope(),
-      sourceRepositoryUrl: override,
-      project: project({ origin: "cli", remote: override }),
-    }).sourceRepositoryUrl,
-  ).toBe(override);
+    check("http://gitlab.com/Group/old/../my-project", plain)
+      .sourceRepositoryUrl,
+  ).toBe(plain);
   expect(() =>
-    check("gitlab.com/Group/old\t/../my-project", plain, "gitlab"),
+    check("http://gitlab.com/Group/old\t/../my-project", plain),
   ).toThrow("percent-encode");
-});
-
-test("requires an unambiguous target when Snyk CLI supplies a private repository URL", async () => {
-  const http = "http://git.example.test/team/repo.git";
-  const https = "https://git.example.test/team/repo.git";
-  const report = (
-    remote: string | null,
-    sourceRepositoryUrl: string,
-    origin = "cli",
-  ) => ({
-    ...envelope(),
-    sourceRepositoryUrl,
-    project: project({ origin, remote }),
-  });
-  const ambiguous = report(http, http);
-  const { collect, requests } = transport(document(ambiguous.project));
-  await expect(
-    collect({ ...options, sourceRepositoryUrl: http }),
-  ).rejects.toThrow("target URL");
-  expect(requests).toHaveLength(1);
-  expect(() => normalizeSnykIssues(ambiguous)).toThrow("target URL");
+  expect(check(null, plain, "cli").sourceRepositoryUrl).toBe(plain);
+  expect(check(plain, plain, "api").sourceRepositoryUrl).toBe(plain);
+  expect(check(plain, plain, "cli", "code").sourceRepositoryUrl).toBe(plain);
   expect(() =>
-    snykRestFindingRepository({ ...ambiguous, issue: issue() }),
+    check(plain, plain.replace("http:", "https:"), "cli", "code"),
   ).toThrow("target URL");
-  for (const source of [
-    report(https, https),
-    report(null, http),
-    report(http, http, "gitlab"),
-  ])
-    expect(normalizeSnykIssues(source).sourceRepositoryUrl).toBe(
-      source.sourceRepositoryUrl,
-    );
 });
 
 test("does not save mixed or unverifiable issue scopes, even on the last page", async () => {

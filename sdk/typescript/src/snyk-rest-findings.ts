@@ -9,13 +9,7 @@ import {
 } from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import {
-  gitTransportBytes,
-  isKnownGitHost,
-  isPublicGitHost,
-  normalizeHostedGitRepositoryUrl,
-  publicGitSsh443Host,
-} from "./git-remote.js";
+import { normalizeHostedGitRepositoryUrl } from "./git-remote.js";
 import {
   checkSnykTokenOrigin,
   hostedScannerHttp,
@@ -211,57 +205,19 @@ function checkOrganization(
     );
 }
 
-// Snyk CLI renders HTTPS and SSH Git remotes as HTTP, preserving explicit ports.
-function matchesCliRepository(
-  remote: string,
-  source: string,
-  product: Scope["product"],
-) {
-  const parts = /^http:\/\/([^/]+)(\/.*)$/iu.exec(remote);
-  if (!parts) return false;
-  const authority = parts[1]!.toLowerCase();
-  const hostname = authority.replace(/:\d+$/u, "");
-  const path = parts[2]!;
-  const publicWebHost =
-    isKnownGitHost(hostname) && hostname !== "vs-ssh.visualstudio.com";
-  const publicSshHost = isPublicGitHost(hostname);
-  const sshAuthority = authority.replace(/:0+(?=\d)/u, ":");
-  const sshEndpoint =
-    publicGitSsh443Host(sshAuthority) ||
-    (publicSshHost && sshAuthority === `${hostname}:22`);
-  // The CLI drops the SSH login, so a private user's home-relative path can look like an HTTP URL.
-  if (!publicWebHost && !sshEndpoint) return false;
-  if (product === "open-source" && isPublicGitHost(authority)) {
-    // Snyk monitor can put a git+ssh or ssh+git port into the first path component.
-    const prefix = /^\/([\t-\r ]*\+?\d*)\//u.exec(
-      gitTransportBytes(path, false),
-    )?.[1];
-    const port = Number(prefix);
-    if (prefix === "" || (port > 0 && port <= 65535)) return false;
-  }
-  // HTTP resolves literal dot segments, while SSH sends them to the repository service.
-  if ((publicSshHost || sshEndpoint) && /\/\.{1,2}(?:\/|$)/u.test(path))
-    return false;
-  // On an SSH endpoint Git passes the URI-decoded path to upload-pack.
-  const sshAlias = sshEndpoint
-    ? normalizeHostedGitRepositoryUrl(
-        `ssh://git@${authority}${path}`,
-        source,
-        false,
-      )
-    : undefined;
-  return (
-    hostedRepositoryUrlKey(remote) === source ||
-    (publicWebHost &&
-      hostedRepositoryUrlKey(`https://${authority}${path}`) === source) ||
-    (sshAlias !== undefined && hostedRepositoryUrlKey(sshAlias) === source)
-  );
-}
-
 function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
   validateHostedRepositoryBytes(url);
+  // Snyk monitor can render a local path and a Git server as the same HTTP target.
+  if (
+    origin === "cli" &&
+    selected.product === "open-source" &&
+    /^http:\/\//iu.test(url)
+  )
+    throw new Error(
+      "Snyk CLI HTTP target URL cannot verify a repository. Set an explicit HTTPS URL with snyk monitor --remote-repo-url and collect the resulting project.",
+    );
   const normalized = normalizeHostedGitRepositoryUrl(
     url,
     selected.sourceRepositoryUrl,
@@ -269,19 +225,15 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   );
   const enterprise =
     origin === "github-enterprise" || origin === "github-server-app";
-  const source = hostedRepositoryUrlKey(
-    selected.sourceRepositoryUrl,
-    enterprise,
-  );
-  const matches =
-    origin === "cli" && /^http:\/\//iu.test(url)
-      ? matchesCliRepository(url, source, selected.product)
-      : hostedRepositoryUrlKey(normalized, enterprise) === source;
-  if (/[?#]/u.test(url) || !matches)
+  const gitlab = origin === "gitlab";
+  const key = (value: string) =>
+    hostedRepositoryUrlKey(value, enterprise, gitlab);
+  const source = key(selected.sourceRepositoryUrl);
+  if (/[?#]/u.test(url) || key(normalized) !== source)
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
-  if (enterprise) return normalized;
+  if (enterprise || gitlab) return normalized;
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -536,11 +488,12 @@ function savedContext(document: Resource) {
   const context = projectContext(project, selected);
   const target = document["target"];
   const nativeUrl = checkTarget(target, selected, context);
-  const platform: HostedExternalFindings["sourceRepositoryPlatform"] = nativeUrl
-    ? "github"
-    : context.scm && !context.origin.startsWith("github")
-      ? "other"
-      : undefined;
+  const platform: HostedExternalFindings["sourceRepositoryPlatform"] =
+    nativeUrl && context.origin.startsWith("github")
+      ? "github"
+      : context.scm && !context.origin.startsWith("github")
+        ? "other"
+        : undefined;
   return {
     source: { ...formatVersion, ...selected, project, target },
     context,
@@ -553,13 +506,15 @@ export function snykRestFindingRepository(sourceData: Resource): {
   url: string;
   platform?: HostedExternalFindings["sourceRepositoryPlatform"];
   nativeUrl?: string;
+  gitlab?: boolean;
 } {
-  const { source, platform, nativeUrl } = savedContext(sourceData);
+  const { source, context, platform, nativeUrl } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
   const url = source.sourceRepositoryUrl;
   return {
     url,
     platform,
+    ...(nativeUrl && context.origin === "gitlab" && { gitlab: true }),
     ...(nativeUrl && nativeUrl !== url && { nativeUrl }),
   };
 }

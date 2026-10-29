@@ -247,6 +247,35 @@ test("replays native SSH evidence and URL-less labels from the selected Semgrep 
   }
 });
 
+test("local file and normalized imports retain the repository references selected at invocation", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  await using fixture = await platformCheckout(url.toLowerCase());
+  const report = {
+    ...platformReport([]),
+    project: { ...platformProject, url },
+  };
+  await writeFile(fixture.file, JSON.stringify(report));
+  const reference = { url, platform: "github" as const };
+  const dependencies = {
+    ...fixture.dependencies,
+    sourceRepositories: [reference],
+  };
+  const prepared = Promise.all([
+    prepareLocalExternalImport(fixture.file, fixture.options, dependencies),
+    prepareNormalizedLocalImport(
+      normalizeSemgrepPlatformFindings(report),
+      fixture.options,
+      dependencies,
+    ),
+  ]);
+  reference.url += "-foreign";
+  dependencies.sourceRepositories.length = 0;
+  expect((await prepared).map(({ preview }) => preview.findings)).toEqual([
+    [],
+    [],
+  ]);
+});
+
 test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {
   const url = "https://scm.example.test/Team/Project";
   await using fixture = await platformCheckout(url.toLowerCase());

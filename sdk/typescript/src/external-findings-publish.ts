@@ -500,14 +500,20 @@ async function preparePublicationInput(
     hostedSnyk.size,
   );
   if (bound) validateHostedRepositoryBytes(options.repository);
+  const nativeSources = [...hostedSnyk.values()];
+  const gitlab =
+    nativeSources.length === parsed.findings.length &&
+    nativeSources.every((source) => source.gitlab);
   const strictPath =
     parsed.sourceRepositoryPlatform === "other" ||
-    [...hostedSnyk.values()].some(({ platform }) => platform === "other");
+    nativeSources.some(({ platform }) => platform === "other");
   // The authenticated catalog uses GitHub URL identity even when scanner evidence needs strict path casing.
   const catalogKey = bound
     ? (url: string) => hostedRepositoryUrlKey(url, true)
     : cloudRepositoryUrlKey;
-  const reportKey = strictPath ? hostedRepositoryUrlKey : catalogKey;
+  const reportKey = strictPath
+    ? (url: string) => hostedRepositoryUrlKey(url, false, gitlab)
+    : catalogKey;
   const reportSource =
     parsed.sourceRepositoryUrl ||
     hostedSnyk.values().next().value?.url ||

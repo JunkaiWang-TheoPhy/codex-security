@@ -127,6 +127,11 @@ test.each([
 test.each([
   ["ssh://git@[github.com]", true],
   ["ssh://git@[github.com]:22", true],
+  ["ssh://git@github.com:+22", true],
+  ["ssh://git@[github.com]:+22", true],
+  ["ssh://git@github.com:%2B0022", true],
+  ["ssh://git@ssh.github.com:+443", true],
+  ["ssh://git@github.com:+2222", false],
   ["ssh://git@[github.com:22]", true],
   ["ssh://git@[github.com:22]:", true],
   ["ssh://git@[github.com:]", false],

@@ -21,6 +21,7 @@ import type { SemgrepImportOptions } from "./semgrep-findings.js";
 import {
   isGitHubCloudHost,
   isKnownGitHost,
+  isPublicGitHost,
   normalizeHostedGitRepositoryUrl,
 } from "./git-remote.js";
 import { position, weaknessIds } from "./native-json-findings.js";
@@ -142,7 +143,13 @@ function projectContext(
       ? { project, sourceRepositoryUrl: mapping }
       : { project };
   const observed = repositoryAliases !== undefined;
-  const scmPath = new URL(url).pathname.slice(1).replace(/(?:\.git)?\/?$/u, "");
+  const { hostname, pathname } = new URL(url);
+  const scmPath = pathname
+    .slice(1)
+    .replace(
+      github || isPublicGitHost(hostname) ? /(?:\.git)?\/?$/u : /\/$/u,
+      "",
+    );
   const names = observed
     ? array(repositoryAliases, "Semgrep repository aliases").map((name) =>
         requiredText(name, "Semgrep repository alias"),

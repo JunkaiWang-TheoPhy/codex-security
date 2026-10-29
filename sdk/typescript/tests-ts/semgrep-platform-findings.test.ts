@@ -159,6 +159,12 @@ test("fails before acquisition without opt-in, honors cancellation, and never re
   await expect(
     collectSemgrepPlatformFindings(options, { environment: {}, fetch: never }),
   ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS");
+  await expect(
+    collectSemgrepPlatformFindings(options, {
+      environment: { ...environment, SEMGREP_APP_TOKEN: "synthetic\nline" },
+      fetch: never,
+    }),
+  ).rejects.toThrow("NUL or line break");
   for (const project of [".", ".."])
     await expect(
       collectSemgrepPlatformFindings(
@@ -394,6 +400,18 @@ test.each([
     }
   },
 );
+
+test("preserves .git on custom repository URLs and legacy name-only rows", () => {
+  const url = "https://git.example.test/team/lib";
+  const read = (repository: { url?: string; name?: string }) =>
+    normalizeSemgrepPlatformFindings({
+      ...platformReport([{ ...platformFinding(10), repository }]),
+      project: { ...platformProject, name: "scan-project", url: url + ".git" },
+    });
+  expect(() => read({ url })).toThrow("repository");
+  expect(() => read({ name: "lib" })).toThrow("repository");
+  expect(read({ name: "lib.git" }).findings).toHaveLength(1);
+});
 
 test("keeps known non-GitHub URLs case-sensitive during collection", async () => {
   for (const host of [

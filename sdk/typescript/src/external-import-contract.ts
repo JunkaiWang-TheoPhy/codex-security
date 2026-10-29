@@ -1,6 +1,10 @@
 import { isIP } from "node:net";
 import { isNumberObject } from "node:util/types";
-import { decodeUnreserved, normalizeGitRepositoryUrl } from "./git-remote.js";
+import {
+  decodeUnreserved,
+  isPublicGitHost,
+  normalizeGitRepositoryUrl,
+} from "./git-remote.js";
 import type { ExternalSourceRepository } from "./external-findings.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
@@ -45,8 +49,9 @@ const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
 /** Compare repository URLs without changing the retained vendor evidence.
  * GitHub repository paths are case-insensitive; unknown VCS hosts stay strict.
  * Keep protocols and explicit ports distinct, matching the Cloud URL contract. */
-export function repositoryUrlKey(value: string): string {
-  const normalized = value.replace(/\/$/u, "").replace(/\.git$/u, "");
+export function repositoryUrlKey(value: string, gitSuffix = true): string {
+  let normalized = value.replace(/\/$/u, "");
+  if (gitSuffix) normalized = normalized.replace(/\.git$/u, "");
   const parts = /^(https?):\/\/([^/?#]+)((?:\/[^?#]*)?)((?:[?#].*)?)$/iu.exec(
     normalized,
   );
@@ -95,13 +100,22 @@ function hostedHttpPath(path: string): string {
 }
 
 /** Compare hosted HTTP repository spellings without changing the retained evidence. */
-export function hostedRepositoryUrlKey(value: string, github = false): string {
+export function hostedRepositoryUrlKey(
+  value: string,
+  github = false,
+  knownGitSuffix = false,
+): string {
   const url = value.replace(
     /^(https?:\/\/)([^/?#]+)\/([^?#]*)/iu,
     (_, scheme: string, authority: string, path: string) =>
       scheme + hostedHttpAuthority(authority) + "/" + hostedHttpPath(path),
   );
-  return github ? cloudRepositoryUrlKey(url) : repositoryUrlKey(url);
+  if (github) return cloudRepositoryUrlKey(url);
+  // An arbitrary Git server can serve different repositories at /repo and /repo.git.
+  return repositoryUrlKey(
+    url,
+    knownGitSuffix || isPublicGitHost(URL.parse(url)?.hostname ?? ""),
+  );
 }
 
 /** An independently identified GitHub repository can establish its SSH alias and casing. */

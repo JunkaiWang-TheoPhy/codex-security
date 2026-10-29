@@ -83,6 +83,11 @@ test(transportTest, async () => {
       },
       transport,
     );
+  for (const token of ["synthetic\rline", "synthetic\0line"])
+    await expect(semgrep(token)).rejects.toThrow("NUL or line break");
+  snykOptions.token = "synthetic\0line";
+  await expect(snyk()).rejects.toThrow("NUL or line break");
+  delete snykOptions.token;
   await expect(snyk()).rejects.toThrow("injected transport");
   await expect(semgrep()).rejects.toThrow("injected transport");
 
