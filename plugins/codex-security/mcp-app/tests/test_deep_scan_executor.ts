@@ -125,7 +125,6 @@ try {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
     await check(t, testWorkerRuntimeSettings);
-    await check(t, testReportOnlyComparison);
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(
       t,
@@ -142,6 +141,7 @@ try {
         }),
       "cyber access settings",
     );
+    await check(t, testReportOnlyComparison);
     if (process.platform !== "win32") {
       await check(
         t,
