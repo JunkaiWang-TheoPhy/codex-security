@@ -123,6 +123,12 @@ test.each([
 );
 
 test.each([
+  ["ssh://git@[github.com]", true],
+  ["ssh://git@[github.com]:22", true],
+  ["ssh://git@[github.com:22]", true],
+  ["ssh://git@[ssh.github.com]:443", true],
+  ["ssh://git@[github.com]:2222", false],
+  ["ssh://other@[github.com]", false],
   ["ssh://g%69t@%67ithub.com", true],
   ["ssh://git%40github.com", true],
   ["ssh://g%69t%40%67ithub.com%3A22", true],
@@ -201,10 +207,49 @@ test("recognizes bracketed IPv6 SCP authorities on a verified Enterprise host", 
   const expanded = "git@[2001:0db8:0:0:0:0:0:1]:org/repo";
   expect(parseGitRemote(expanded)?.url.hostname).toBe("[2001:db8::1]");
   expect(normalizeHostedGitRepositoryUrl(expanded, source, true)).toBe(source);
+  expect(
+    normalizeHostedGitRepositoryUrl(
+      "ssh://git@[2001:db8::1]:22/org/repo",
+      source,
+      true,
+    ),
+  ).toBe(source);
   expect(normalizeHostedGitRepositoryUrl(remote, source, false)).toBe(remote);
   for (const other of [
     "other@[2001:db8::1]:org/repo",
     "git@[2001:db8::2]:org/repo",
   ])
     expect(normalizeHostedGitRepositoryUrl(other, source, true)).toBe(other);
+});
+
+test.each([
+  ["https://0x7f000001", "https://127.0.0.1", true],
+  ["https://[::1]:443", "https://[0:0:0:0:0:0:0:1]", false],
+  [
+    "https://bücher.example.test:8443",
+    "https://xn--bcher-kva.example.test:08443",
+    false,
+  ],
+  ["https://bücher.example.test", "http://xn--bcher-kva.example.test", false],
+  [
+    "https://user@bücher.example.test",
+    "https://xn--bcher-kva.example.test",
+    false,
+  ],
+  [
+    "https://%62ücher.example.test",
+    "https://xn--bcher-kva.example.test",
+    false,
+  ],
+  [
+    "https://b\tücher.example.test",
+    "https://xn--bcher-kva.example.test",
+    false,
+  ],
+  ["https://[2001:db8::1]", "https://[2001:db8::2]", false],
+] as const)("compares HTTP authorities %j and %j", (first, second, matches) => {
+  expect(
+    hostedRepositoryUrlKey(first + "/org/repo") ===
+      hostedRepositoryUrlKey(second + "/org/repo"),
+  ).toBe(matches);
 });

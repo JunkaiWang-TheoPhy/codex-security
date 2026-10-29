@@ -8,24 +8,40 @@ export interface GitRemote {
 // Git treats a colon followed by "//" as the start of a URL transport.
 const scpRemote = /^(?:([^@/:\s?#]+)@)?(\[[^\]]+\]|[^@/:\s?#]+):(?!\/\/)(.+)$/u;
 
-/** Git recognizes SCP when its colon precedes any slash, except for helpers and drive paths. */
-export function isGitScpRemote(remote: string): boolean {
+/** A native file URL or an unambiguous local path. */
+export function isLocalGitRemote(remote: string): boolean {
+  if (remote.includes("://")) return remote.startsWith("file://");
+  const colon = remote.indexOf(":");
+  return colon < 0 || remote.slice(0, colon).includes("/");
+}
+
+export function isWindowsGitDrive(remote: string): boolean {
+  // Git for Windows accepts one character or up to four consecutive non-ASCII bytes before a drive colon.
   return (
+    process.platform === "win32" &&
     !remote.includes("://") &&
-    /^[^/:]+:/u.test(remote) &&
-    !/^(?:[a-z][a-z0-9+.-]*::|[a-z]:[\\/])/iu.test(remote)
+    /^(?:.|[\u0080-\u07ff]{2}):(?!:)/su.test(remote)
   );
 }
 
-function scpAuthority(host: string): URL | null {
-  if (/[\/\\?#@\s]/u.test(host)) return null;
-  // Git also accepts brackets around a DNS name or a DNS name and SSH port.
+function isGitScpRemote(remote: string): boolean {
   return (
-    URL.parse(`ssh://${host}`) ??
-    (host.startsWith("[") && host.endsWith("]")
-      ? URL.parse(`ssh://${host.slice(1, -1)}`)
-      : null)
+    !isLocalGitRemote(remote) &&
+    !isWindowsGitDrive(remote) &&
+    !remote.includes("://") &&
+    !/^[a-z\d][a-z\d+.-]*::/iu.test(remote)
   );
+}
+
+function sshAuthority(host: string): URL | null {
+  if (/[\/\\?#@\s]/u.test(host)) return null;
+  const parsed = URL.parse(`ssh://${host}`);
+  if (parsed) return parsed;
+  // Git accepts brackets around DNS names, with an SSH port inside or after the brackets.
+  const bracketed = /^\[([^\]]+)\](:\d*)?$/u.exec(host);
+  return bracketed
+    ? URL.parse(`ssh://${bracketed[1]}${bracketed[2] ?? ""}`)
+    : null;
 }
 
 /** Parse transport syntax only; callers decide which hosts and credentials are allowed. */
@@ -40,7 +56,7 @@ export function parseGitRemote(remote: string): GitRemote | undefined {
   }
   const scp = isGitScpRemote(remote) && scpRemote.exec(remote);
   if (!scp) return undefined;
-  const url = scpAuthority(scp[2]!);
+  const url = sshAuthority(scp[2]!);
   if (!url?.hostname) throw new TypeError("Invalid Git SCP authority.");
   if (scp[1]) url.username = scp[1];
   return {
@@ -173,7 +189,7 @@ function normalizeGitSshAlias(
   if (isGitScpRemote(repository)) {
     const scp = scpRemote.exec(repository);
     if (!scp?.[1]) return repository;
-    const authority = scpAuthority(scp[2]!);
+    const authority = sshAuthority(scp[2]!);
     return authority
       ? hostedAlias(authority, scp[1], scp[3]!, true)
       : repository;
@@ -184,13 +200,13 @@ function normalizeGitSshAlias(
   );
   if (ssh && !/[\t\r\n]/u.test(repository)) {
     const authority = gitTransportBytes(ssh[1]!, false);
-    if (!/^[^@:]+@[^@]+$/u.test(authority) || /[/\\%?#\s]/u.test(authority))
-      return repository;
-    const url = URL.parse(`ssh://${authority}/`);
+    const login = /^([^@:]+)@([^@]+)$/u.exec(authority);
+    if (!login || /[/\\%?#\s]/u.test(authority)) return repository;
+    const url = sshAuthority(login[2]!);
     if (url)
       return hostedAlias(
         url,
-        url.username,
+        login[1]!,
         "/" + repository.slice(ssh[0].length),
         false,
       );

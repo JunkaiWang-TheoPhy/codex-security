@@ -65,12 +65,22 @@ export function cloudRepositoryUrlKey(value: string): string {
   return repositoryUrlKey(value).toLowerCase();
 }
 
-/** Compare hosted HTTP path spellings without changing the retained evidence. */
+function hostedHttpAuthority(authority: string): string {
+  if (/[%@\\\s]/u.test(authority)) return authority;
+  const hostname = URL.parse(`https://${authority}/`)?.hostname;
+  // Hostname serialization handles IP literals and IDNA. The connector distinguishes explicit ports.
+  const port = /:\d*$/u.exec(authority)?.[0] ?? "";
+  return hostname ? hostname + port : authority;
+}
+
+/** Compare hosted HTTP repository spellings without changing the retained evidence. */
 export function hostedRepositoryUrlKey(value: string, github = false): string {
   const url = value.replace(
-    /^(https?:\/\/[^/?#]+\/)([^?#]*)/iu,
-    (_, origin: string, path: string) =>
-      origin +
+    /^(https?:\/\/)([^/?#]+)\/([^?#]*)/iu,
+    (_, scheme: string, authority: string, path: string) =>
+      scheme +
+      hostedHttpAuthority(authority) +
+      "/" +
       path
         .split("/")
         .map((segment) => {

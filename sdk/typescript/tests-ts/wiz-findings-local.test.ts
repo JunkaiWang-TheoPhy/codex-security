@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -115,7 +116,9 @@ test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
 );
 
 test("Wiz CSV imports into SQLite and updates the same source finding", async () => {
-  const fixture = await localFindingsFixture({ remote: repositoryUrl });
+  const fixture = await localFindingsFixture({
+    remote: "ext::ssh git@github.com %S example/other.git",
+  });
   try {
     const file = join(fixture.root, "wiz.csv");
     const options = {
@@ -125,6 +128,24 @@ test("Wiz CSV imports into SQLite and updates the same source finding", async ()
     };
     const dependencies = { environment: fixture.environment };
     await writeFile(file, csvReport(row));
+    await expect(
+      prepareLocalExternalImport(file, options, dependencies),
+    ).rejects.toThrow("does not match");
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", fixture.repository, ...args]);
+    git("remote", "set-url", "origin", repositoryUrl);
+    git("config", "remote.origin.vcs", "example");
+    await expect(
+      prepareLocalExternalImport(file, options, dependencies),
+    ).rejects.toThrow("does not match");
+    git("remote", "set-url", "origin", `http::${repositoryUrl}`);
+    await prepareLocalExternalImport(file, options, dependencies);
+    git("config", "remote.origin.vcs", "https");
+    git("remote", "set-url", "origin", `example::${repositoryUrl}`);
+    await expect(
+      prepareLocalExternalImport(file, options, dependencies),
+    ).rejects.toThrow("does not match");
+    git("remote", "add", "upstream", repositoryUrl);
     const prepared = await prepareLocalExternalImport(
       file,
       options,

@@ -310,14 +310,25 @@ test("replays only the repository names observed for each collected split projec
 });
 
 test.each([
-  ["my-repo", "my%2Drepo", true],
-  ["my%2Drepo", "my-repo", true],
-  ["nested/repo", "nested%2Frepo", false],
-  ["my-repo", "my%252Drepo", false],
+  ["github.com/example/my-repo", "github.com/example/my%2Drepo", true],
+  ["github.com/example/my%2Drepo", "github.com/example/my-repo", true],
+  ["github.com/example/nested/repo", "github.com/example/nested%2Frepo", false],
+  ["github.com/example/my-repo", "github.com/example/my%252Drepo", false],
+  [
+    "[2001:db8::1]:8443/org/repo",
+    "[2001:0db8:0:0:0:0:0:1]:8443/org/repo",
+    true,
+  ],
+  ["bücher.example.test/Org/Repo", "xn--bcher-kva.example.test/Org/Repo", true],
+  [
+    "bücher.example.test/Org/Repo",
+    "xn--bcher-kva.example.test:443/Org/Repo",
+    false,
+  ],
 ] as const)(
-  "compares HTTP repository paths %s and %s (matches=%s)",
+  "compares HTTP repositories %s and %s (matches=%s)",
   async (native, path, matches) => {
-    const base = "https://github.com/example/";
+    const base = "https://";
     const project = { ...platformProject, url: base + native };
     const url = base + path;
     const finding = { ...platformFinding(1), repository: { url } };

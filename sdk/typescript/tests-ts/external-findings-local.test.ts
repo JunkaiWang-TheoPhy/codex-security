@@ -1812,13 +1812,17 @@ describe("local normalized scanner findings", () => {
   );
 
   test.each([
-    "C:\\repos\\source",
-    "C:/repos/source",
-    "/synthetic/repos/source",
-    "file:///C:/repos/source",
-  ])(
-    "ignores local remote %s while enforcing any network remote",
-    async (remote) => {
+    ["C:\\repos\\source", process.platform === "win32"],
+    ["C:/repos/source", process.platform === "win32"],
+    ["C:repos/source", process.platform === "win32"],
+    ["a:repos/source?.git", false],
+    ["//server/share/source", true],
+    ["./synthetic:source", true],
+    ["/synthetic/repos/source", true],
+    ["file:///C:/repos/source", true],
+  ] as const)(
+    "checks configured remote %s according to Git's platform path rules",
+    async (remote, local) => {
       const { repository, stateDirectory, environment } = await fixture({
         remote,
       });
@@ -1826,11 +1830,13 @@ describe("local normalized scanner findings", () => {
         environment,
         sourceRepositories: [{ url: "https://github.com/example/project" }],
       };
-      await prepareNormalizedLocalImport(
+      const preparation = prepareNormalizedLocalImport(
         input(),
         { repository, ...source },
         dependencies,
       );
+      if (local) await preparation;
+      else await expect(preparation).rejects.toThrow("does not match");
       execFileSync("git", [
         "-C",
         repository,

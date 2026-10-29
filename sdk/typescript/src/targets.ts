@@ -787,6 +787,9 @@ export async function gitOutput(
     isolatedGitEnvironment(
       args[0] === "rev-parse" ||
         args[0] === "config" ||
+        (args[0] === "fetch-pack" &&
+          args[1] === "--diag-url" &&
+          args.length === 3) ||
         args[0] === "ls-files" ||
         (args[0] === "remote" &&
           (args.length === 1 ||

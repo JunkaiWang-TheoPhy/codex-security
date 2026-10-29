@@ -623,6 +623,35 @@ test.each([
   },
 );
 
+test.each([
+  ["[2001:db8::1]", "[2001:0db8:0:0:0:0:0:1]"],
+  ["xn--bcher-kva.example.test", "bücher.example.test"],
+])(
+  "Snyk retains the original HTTP authorities %s and %s",
+  (declared, native) => {
+    const sourceRepositoryUrl = `https://${declared}/Group/Repo`;
+    const input = {
+      ...envelope(),
+      sourceRepositoryUrl,
+      project: project({
+        origin: "gitlab",
+        remote: `https://${native}/Group/Repo`,
+      }),
+    };
+    const saved = normalizeSnykIssues(input);
+    expect(saved.sourceRepositoryUrl).toBe(sourceRepositoryUrl);
+    expect(saved.findings[0]!.evidence.source_data).toMatchObject({
+      project: input.project,
+    });
+    expect(() =>
+      normalizeSnykIssues({
+        ...input,
+        sourceRepositoryUrl: sourceRepositoryUrl.toLowerCase(),
+      }),
+    ).toThrow("target URL");
+  },
+);
+
 test("matches GitHub Enterprise SSH clone URLs to the selected HTTPS repository", () => {
   const source = "https://scm.example.test/Org/project";
   const check = (

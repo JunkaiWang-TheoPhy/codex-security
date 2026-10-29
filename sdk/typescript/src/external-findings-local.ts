@@ -39,7 +39,8 @@ import {
   gitPathToHttpPath,
   gitTransportBytes,
   isGitHubCloudHost,
-  isGitScpRemote,
+  isLocalGitRemote,
+  isWindowsGitDrive,
   normalizeHostedGitRepositoryUrl,
   parseGitRemote,
 } from "./git-remote.js";
@@ -145,7 +146,6 @@ function remoteRepository(
   bound: boolean,
   key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey,
 ): { key: string; account?: string; homeRelative?: boolean } | undefined {
-  if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   const transport = bound
     ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
     : null;
@@ -446,21 +446,27 @@ async function requireMatchingRepository(
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  const readGit = (args: readonly string[]) =>
-    abortable(
+  const readGit = (args: readonly string[], raw = false) => {
+    const command = [
+      repository,
+      args,
+      signal,
+      { LC_ALL: "C" },
+      undefined,
+    ] as const;
+    return abortable(
       () =>
-        gitOutput(
-          repository,
-          args,
-          signal,
-          { LC_ALL: "C" },
-          undefined,
-          "utf8",
-          gitProtectedRoots,
-          environment,
-        ),
+        raw
+          ? gitOutput(
+              ...command,
+              "buffer",
+              gitProtectedRoots,
+              environment,
+            ).then((output) => output.toString("utf8").replace(/\n$/u, ""))
+          : gitOutput(...command, "utf8", gitProtectedRoots, environment),
       signal,
     );
+  };
   let remoteNames: string;
   try {
     remoteNames = await readGit(["remote"]);
@@ -482,11 +488,75 @@ async function requireMatchingRepository(
       return;
     throw error;
   }
+  if (!remoteNames) return;
+  const remoteConfig = (
+    await readGit([
+      "config",
+      "--null",
+      "--get-regexp",
+      "^remote\\..*\\.(url|vcs)$",
+    ]).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === 1)
+        return "";
+      throw error;
+    })
+  ).split("\0");
   const remotes: string[] = [];
+  let hasUnverifiedRemote = false;
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
-    remotes.push(...urls.split(/\r?\n/u));
+    const vcsKey = `remote.${name}.vcs\n`;
+    const configuredHelper = remoteConfig
+      .findLast((entry) => entry.startsWith(vcsKey))
+      ?.slice(vcsKey.length);
+    const urls = (
+      await readGit(["remote", "get-url", "--all", "--", name], true)
+    ).split("\n");
+    // Git prints rewritten URLs one per line. A newline within a URL cannot establish another remote.
+    const count = remoteConfig.filter((entry) =>
+      entry.startsWith(`remote.${name}.url\n`),
+    ).length;
+    if (urls.length !== (count || 1)) {
+      hasUnverifiedRemote = true;
+      continue;
+    }
+    for (const configured of urls) {
+      // Explicit helper:: takes precedence over remote.<name>.vcs.
+      const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(configured);
+      const helper = explicit?.[1] ?? configuredHelper;
+      const url = explicit ? configured.slice(explicit[0].length) : configured;
+      if (helper === undefined && isLocalGitRemote(url)) continue;
+      const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1];
+      const curl = /^(?:https?|ftps?):$/iu.test(transport ?? "");
+      const recognized =
+        helper === undefined
+          ? !url.includes("://") ||
+            (transport && Object.hasOwn(gitTransportPorts, transport))
+          : curl && /^(?:https?|ftps?)$/u.test(helper);
+      // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
+      if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
+        hasUnverifiedRemote = true;
+        continue;
+      }
+      if (isWindowsGitDrive(url) && !url.startsWith("-")) {
+        // Git's Windows path validity rules decide between a drive and an SSH host.
+        // Diagnostic mode opens no repository. gitOutput disables all transports before SSH setup.
+        try {
+          await readGit(["fetch-pack", "--diag-url", url]);
+          continue;
+        } catch (error) {
+          if (!(
+            error instanceof Error &&
+            "stderr" in error &&
+            typeof error.stderr === "string" &&
+            error.stderr.trimEnd() === "fatal: transport 'ssh' not allowed"
+          ))
+            throw error;
+        }
+      }
+      remotes.push(url);
+    }
   }
+  if (!hasUnverifiedRemote && !remotes.length) return;
   if (hosted) {
     const platform = hosted.platform ?? provider;
     const key = (url: string) =>
@@ -495,17 +565,8 @@ async function requireMatchingRepository(
     const httpKey = http.test(hosted.url)
       ? remoteRepository(hosted.url, platform, true, key)?.key
       : undefined;
-    let hasNetworkRemote = false;
-    for (const configured of remotes) {
-      // Git's built-in curl helpers take the network URL after the first "::".
-      const helperUrl = /^(?:https?|ftps?)::(.+)$/su.exec(configured)?.[1];
-      const remote =
-        helperUrl && /^(?:https?|ftps?):\/\//iu.test(helperUrl)
-          ? helperUrl
-          : configured;
+    for (const remote of remotes) {
       const parsed = remoteRepository(remote, platform, true, key);
-      // A Git SSH address can still name a remote when its host cannot be represented as a URL.
-      hasNetworkRemote ||= Boolean(parsed) || isGitScpRemote(remote);
       if (!parsed) continue;
       // Git's HTTP credentials and default port don't change the checkout repository.
       if (
@@ -515,11 +576,9 @@ async function requireMatchingRepository(
       )
         return;
     }
-    if (hasNetworkRemote)
-      throw new CodexSecurityError(
-        `Imported repository ${JSON.stringify(hosted.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
-      );
-    return;
+    throw new CodexSecurityError(
+      `Imported repository ${JSON.stringify(hosted.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+    );
   }
   const identity = (value: string, platform: Provider) =>
     remoteRepository(value, platform, provider === "inspector");
@@ -540,7 +599,6 @@ async function requireMatchingRepository(
     const targets = remotes.flatMap(
       (remote) => identity(remote, sourceProvider) ?? [],
     );
-    if (!targets.length) continue;
     const target = identity(source.url, sourceProvider);
     if (
       !target ||
