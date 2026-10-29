@@ -6,8 +6,8 @@ an illustrative finding; it is **not a recorded model run**. Finding counts,
 severity, evidence, and coverage must come from your own saved results.
 
 The app is deliberately insecure. Use only its synthetic data on loopback, and
-keep the [QA guide](qa/README.md) outside the scan input. Ten seeded scenarios do
-not guarantee ten findings. The behavior tests establish the sample's behavior,
+keep the [QA guide](qa/README.md) outside the scan input. Nine seeded scenarios do
+not guarantee nine findings. The behavior tests establish the sample's behavior,
 not scanner recall.
 
 ## 1. Prepare a standalone copy

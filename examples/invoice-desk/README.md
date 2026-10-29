@@ -4,7 +4,7 @@ This is a deliberately insecure, self-contained application for Codex Security
 QA. All people, workspaces, invoices, and credentials are synthetic. Run it only
 locally; do not deploy it or supply real data or credentials.
 
-The application has **ten seeded finding scenarios**. It looks and behaves like
+The application has **nine seeded finding scenarios**. It looks and behaves like
 an ordinary invoice application, with no vulnerability labels, answer keys,
 sample banners, or test-mode branches in its application code. This README and
 the nested [QA guide](qa/README.md) explain the sample and its expected findings.
@@ -45,10 +45,10 @@ node --test examples/invoice-desk/qa/app.test.mjs
 ```
 
 The tests start their own loopback servers on available ports and clean them up.
-They exercise all ten seeded behaviors, ordinary application workflows, and
+They exercise all nine seeded behaviors, ordinary application workflows, and
 secure controls. **Passing scenario tests mean the intended weaknesses remain
 present.** They do not mean the application is secure or that a scanner found
-ten issues. The repository's Invoice Desk workflow runs this suite in CI without
+nine issues. The repository's Invoice Desk workflow runs this suite in CI without
 installing dependencies.
 
 ## CI and OpenAI scans
@@ -147,7 +147,7 @@ alerts or post PR comments.
 
 Findings are report-only. Execution and required-reporting errors fail the job, with
 available reports retained. A successful job means the scan completed; it does
-not establish that the application is secure or that all ten scenarios were
+not establish that the application is secure or that all nine scenarios were
 found. Compare distinct root causes with the QA manifest and review extra
 findings and duplicates separately. There is no exact-count or recall gate yet.
 
@@ -178,12 +178,12 @@ token use. Then select **Actions → Invoice Desk OpenAI scan → Run workflow**
 `main`, enter an open PR's number in `pr_number` and its exact current head SHA in
 `source_sha`, and verify that the reports identify that source SHA.
 
-Review actual findings against the ten root causes in the QA manifest. Record
+Review actual findings against the nine root causes in the QA manifest. Record
 matched cases, misses, uncertain cases, duplicates, and additional findings;
 confirm secret exposure is matched by the crossed credential boundary. Start
 with report-only recall and cost measurements. Consider a regression gate only
 after repeated completed scans establish normal variation. The initial CI gate
-is operational completion, not zero vulnerabilities or exactly ten reports.
+is operational completion, not zero vulnerabilities or exactly nine reports.
 
 ## Scan without including the answer key
 
@@ -217,6 +217,6 @@ a separate server running; the HTTP suite independently verifies runtime behavio
 
 Review returned findings against the [manifest](qa/expected-findings.json).
 Count distinct matched root causes, missed cases, unexpected findings, and
-duplicates. Ten scenarios are a ground-truth design target, not a guaranteed raw
+duplicates. Nine scenarios are a ground-truth design target, not a guaranteed raw
 finding count from every model run. The fixed seed accounts, loopback HTTP, and
 in-memory data are declared harness assumptions, not additional target findings.

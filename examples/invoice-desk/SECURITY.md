@@ -88,8 +88,9 @@ expired session is checked. Cookies use `HttpOnly` and `SameSite=Strict`.
 The router applies a common session gate after its public and bearer-authenticated
 routes. Invoice lists and most invoice operations check workspace ownership;
 approval and import-policy updates check the administrator role. These checks
-are useful controls, but their coverage and the integrity of the values they
-trust require separate review. [Ownership and roles](app/invoices.mjs#L10),
+are useful controls, and self-service profile updates change only the display
+name so the role remains server-owned. Their coverage still requires separate
+review. [Ownership and roles](app/invoices.mjs#L10),
 [import policy](app/imports.mjs#L12).
 
 JSON writes require a JSON object, amounts receive positive-integer validation,
@@ -102,8 +103,8 @@ use `textContent`. An escaping helper protects only values passed through it.
 ## 3. Threat scenarios and intended protections
 
 These are review scenarios and repair directions for a secure implementation.
-The sample deliberately retains the seeded weaknesses for QA. The
-[expected-findings manifest](qa/expected-findings.json) identifies the ten root
+The sample deliberately retains the remaining seeded weaknesses for QA. The
+[expected-findings manifest](qa/expected-findings.json) identifies the nine root
 causes; the [HTTP harness](qa/app.test.mjs) records the behaviors it checks.
 Neither this model nor the number of rows establishes a scanner's detection score.
 
@@ -117,10 +118,9 @@ Neither this model nor the number of rows establishes a scanner's detection scor
 | Source workspace to destination owner: an invoice copy carries the source connector's authority.    | Keep authentication credentials separate from recipient-visible delivery data and bind any connector authorization to its intended destination. | [Delivery and inbox](app/integrations.mjs#L26)                                            |
 | Workspace to shared policy state: one administrator changes another workspace's import limit.       | Each workspace owns independent mutable policy state, including nested objects.                                                                 | [Policy construction](app/store.mjs#L8), [policy update](app/imports.mjs#L12)             |
 | Validated document to persisted record: authorization and storage use different workspace metadata. | Derive stored ownership from the authenticated workspace and reject conflicting ownership fields.                                               | [Import authorization](app/imports.mjs#L21), [stored ownership](app/imports.mjs#L50)      |
-| Member to administrator: a self-service profile edit changes authorization attributes.              | Allow only intended profile fields to change and keep role assignment outside self-service profile updates.                                     | [Profile update](app/accounts.mjs#L49), [role check](app/invoices.mjs#L10)                |
 | Stored note to another user's browser: note content becomes active HTML.                            | Encode note content for its rendering context; if formatting is supported, use an explicit safe formatting policy.                              | [Comments](app/invoices.mjs#L84), [invoice rendering](app/views.mjs#L71)                  |
 
-Availability also needs review beyond those ten cases. The parser buffers a
+Availability also needs review beyond those nine cases. The parser buffers a
 complete request body, login performs synchronous password derivation, and the
 store has no application-defined collection limits. Assess the caller's reach
 and the resource consumed before assigning impact; this model sets no arbitrary

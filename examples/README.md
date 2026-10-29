@@ -24,7 +24,7 @@ Examples and templates for using Codex Security:
 
 - [Invoice Desk walkthrough](invoice-desk/walkthrough.md): scan a standalone
   synthetic invoice app, inspect saved findings and coverage, explicitly request
-  a patch, and verify the original boundary. The app has ten seeded scenarios
+  a patch, and verify the original boundary. The app has nine seeded scenarios
   and no dependencies or external services. Its
   [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs behavior tests,
   manual PR evaluations, and scheduled OpenAI baselines. Guides and expected

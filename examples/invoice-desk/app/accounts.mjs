@@ -47,6 +47,6 @@ export function signOut(store, cookie = "") {
 }
 
 export function updateProfile(user, fields) {
-  Object.assign(user.profile, fields);
+  if (Object.hasOwn(fields, "name")) user.profile.name = fields.name;
   return publicUser(user);
 }

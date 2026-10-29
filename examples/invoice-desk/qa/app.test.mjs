@@ -266,9 +266,20 @@ scenario("ID-008", async (t) => {
   );
 });
 
-scenario("ID-009", async (t) => {
+test("profile updates preserve server-owned roles", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
+  const profile = await alex("/api/profile", {
+    method: "PATCH",
+    body: { name: "Alex Updated", role: "admin" },
+  });
+  assert.equal(profile.status, 200);
+  assert.equal(profile.body.profile.name, "Alex Updated");
+  assert.equal(profile.body.profile.role, "member");
+  assert.deepEqual((await alex("/api/me")).body.profile, {
+    name: "Alex Updated",
+    role: "member",
+  });
   assert.equal(
     (
       await alex("/api/invoices/inv-north-1/approve", {
@@ -278,20 +289,14 @@ scenario("ID-009", async (t) => {
     ).status,
     403,
   );
-  const profile = await alex("/api/profile", {
-    method: "PATCH",
-    body: { name: "Alex", role: "admin" },
-  });
-  assert.equal(profile.status, 200);
-  assert.equal((await alex("/api/me")).body.profile.role, "admin");
   assert.equal(
     (
-      await alex("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
+      await alex("/api/import-policy", {
+        method: "PATCH",
+        body: { maxAmountCents: 200_000 },
       })
     ).status,
-    200,
+    403,
   );
 });
 
@@ -323,15 +328,15 @@ scenario("ID-010", async (t) => {
   );
 });
 
-test("manifest accounts for all ten separately exercised scenarios", () => {
-  assert.equal(manifest.findings.length, 10);
+test("manifest accounts for all nine separately exercised scenarios", () => {
+  assert.equal(manifest.findings.length, 9);
   assert.deepEqual(
     new Set(manifest.findings.map((finding) => finding.id)),
     registered,
   );
   assert.equal(
     new Set(manifest.findings.map((finding) => finding.category)).size,
-    10,
+    9,
   );
 });
 
@@ -547,7 +552,10 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const alex = await first.login("alex");
   const jules = await first.login("jules");
   const token = (await alex("/api/support-report")).body.connector.accessToken;
-  await alex("/api/profile", { method: "PATCH", body: { role: "admin" } });
+  await alex("/api/profile", {
+    method: "PATCH",
+    body: { name: "Alex Updated" },
+  });
   await alex("/api/invoices/inv-north-1", {
     method: "PATCH",
     body: { amountCents: 1 },
@@ -558,7 +566,10 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   });
   const second = await app(t);
   const fresh = await second.login("alex");
-  assert.equal((await fresh("/api/me")).body.profile.role, "member");
+  assert.deepEqual((await fresh("/api/me")).body.profile, {
+    name: "Alex",
+    role: "member",
+  });
   assert.equal(
     (await fresh("/api/invoices/inv-north-1")).body.amountCents,
     48_500,
