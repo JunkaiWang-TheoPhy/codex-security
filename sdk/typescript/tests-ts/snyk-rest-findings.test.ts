@@ -106,7 +106,15 @@ test("preserves exact Snyk metadata and distinguishes numeric titles from text t
   const digits = "9007199254740993";
   const source = project();
   Object.assign(source.relationships.target.data, {
-    meta: { integration_data: { build: digits, capacity: "1e400" } },
+    meta: {
+      integration_data: {
+        build: digits,
+        capacity: "1e400",
+        ratio: "0.1234567890123456789",
+        minimum: "1e-400",
+        threshold: 0.125,
+      },
+    },
   });
   const quoted = issue({ key: "quoted", title: digits });
   const rows = [
@@ -115,7 +123,8 @@ test("preserves exact Snyk metadata and distinguishes numeric titles from text t
   ];
   const wire = (value: unknown) =>
     JSON.stringify(value)
-      .replace(/"(build|capacity)":"([^"]+)"/gu, '"$1":$2')
+      .replace(/"(build|capacity|ratio|minimum)":"([^"]+)"/gu, '"$1":$2')
+      .replace('"threshold":0.125', '"threshold":1.250000000000000000e-1')
       .replace('"numeric-title"', digits);
   const report = await transport(
     new Response(wire(document(source))),

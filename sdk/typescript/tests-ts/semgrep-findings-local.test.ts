@@ -149,6 +149,24 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
   );
   expect((await readSemgrepFindings(fixture.file)).excluded).toHaveLength(1);
 
+  for (const field of ["line", "end_line"]) {
+    await writeFile(
+      fixture.file,
+      small.replace(
+        new RegExp(`"${field}":\\d+`, "u"),
+        `"${field}":1.00000000000000001`,
+      ),
+    );
+    expect((await readSemgrepFindings(fixture.file)).excluded).toHaveLength(1);
+  }
+  await writeFile(
+    fixture.file,
+    small.replace('"findingCount":1', '"findingCount":0.99999999999999999'),
+  );
+  await expect(readSemgrepFindings(fixture.file)).rejects.toThrow(
+    "Incomplete Semgrep Platform export",
+  );
+
   const amount = "-9.007199254740993E+15";
   const exponential = platformReport([
     { ...platformFinding(1), measurements: [amount] },

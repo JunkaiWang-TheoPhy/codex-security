@@ -11,8 +11,9 @@ see
 
 ## Numeric fields in hosted exports
 
-The Snyk REST and Semgrep Platform collectors store numeric tokens that would
-lose precision in JavaScript as exact text. The optional `numericFields` object
+The Snyk REST and Semgrep Platform collectors store unsafe integers and any
+number whose decimal value would change when written back to JSON as exact text.
+For example, `1e-400` retains its value and `1.0` stays a JSON number. The optional `numericFields` object
 mirrors the affected fields and array indices and repeats their numeric text.
 Keep it with the export. The reader uses it to validate a numeric ID as a number
 and a quoted title as text, even when they contain the same digits. Earlier v1

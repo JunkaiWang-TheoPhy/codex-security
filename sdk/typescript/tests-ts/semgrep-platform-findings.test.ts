@@ -728,15 +728,25 @@ test("keeps message-only findings and preserves ambiguous hosted paths as native
   }
 });
 
-test("keeps a long rule message in the Cloud description and native evidence", () => {
+test("keeps a long rule message in the Cloud description and native evidence", async () => {
   const message = "é".repeat(257);
-  const finding = { ...platformFinding(42), rule: { message } };
+  const id = "9.223372036854775807e18";
+  const finding = { ...platformFinding(42), id, rule: { message } };
+  const page = JSON.stringify({ findings: [finding] }).replace(
+    `"id":"${id}"`,
+    `"id":${id}`,
+  );
+  const captured = await collectPages(new Response(page));
   for (const product of ["sast", "ai_sast", "sca"] as const) {
-    const report = platformReport([finding], product);
-    expect(
-      normalizeSemgrepPlatformFindings(report).findings[0]?.evidence,
-    ).toMatchObject({
-      title: "Semgrep finding 42",
+    const report = { ...JSON.parse(JSON.stringify(captured)), product };
+    const current = normalizeSemgrepPlatformFindings(report).findings[0]!;
+    const legacy = normalizeSemgrepPlatformFindings(
+      platformReport([finding], product),
+    ).findings[0]!;
+    expect(current.source_finding_id).toBe(legacy.source_finding_id);
+    expect(legacy.evidence.title).toBe(`Semgrep finding ${id}`);
+    expect(current.evidence).toMatchObject({
+      title: "Semgrep finding 9223372036854775807",
       description: message,
       source_data: { finding },
     });

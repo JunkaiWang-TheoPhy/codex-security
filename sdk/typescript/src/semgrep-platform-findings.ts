@@ -30,7 +30,7 @@ import {
   array,
   normalizeRecords,
   positiveInt64,
-  hostedId,
+  hostedNumber,
   hostedWireValue,
   type HostedNumericFields,
   restoreHostedNumbers,
@@ -87,7 +87,7 @@ function productType(value: unknown): Product {
 function platformId(
   record: Record<string, unknown>,
 ): number | string | undefined {
-  const value = hostedId(record);
+  const value = hostedNumber(record, "id");
   if (typeof value === "string") {
     const id = positiveInt64(value);
     if (id !== undefined)
@@ -420,7 +420,7 @@ export function normalizePlatformReport(
   const ref = requiredText(input["ref"], "Semgrep ref");
   const product = productType(input["product"]);
   const findings = array(input["findings"], "Semgrep Platform findings");
-  if (input["findingCount"] !== findings.length)
+  if (hostedNumber(input, "findingCount") !== findings.length)
     throw new Error(
       "Incomplete Semgrep Platform export: finding count does not match.",
     );
@@ -435,17 +435,18 @@ export function normalizePlatformReport(
       const path = hostedRepositoryPath(location["file_path"]);
       const line =
         path && location["line"] != null
-          ? position(location["line"], "Semgrep starting line")
+          ? position(hostedNumber(location, "line"), "Semgrep starting line")
           : null;
       const rule = record(finding["rule"] ?? {}, "Semgrep rule");
       const name = text(rule["name"]) ?? text(finding["rule_name"]);
       const description =
         text(rule["message"]) ?? text(finding["rule_message"]);
+      // Retain fallback title bytes from exports that stored the ID as text.
       const messageTitle =
         target === "cloud" &&
         description &&
         Buffer.byteLength(description) > DEFAULT_CLOUD_STRING_BYTES
-          ? `Semgrep finding ${finding["id"]}`
+          ? `Semgrep finding ${text(finding["id"]) ?? platformId(finding)}`
           : description;
       let productEvidence;
       if (product === "sca") {
@@ -506,7 +507,10 @@ export function normalizePlatformReport(
             code: {
               end_line:
                 line !== null && location["end_line"] != null
-                  ? position(location["end_line"], "Semgrep ending line")
+                  ? position(
+                      hostedNumber(location, "end_line"),
+                      "Semgrep ending line",
+                    )
                   : null,
             },
           },

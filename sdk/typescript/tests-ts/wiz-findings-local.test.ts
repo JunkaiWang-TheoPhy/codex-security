@@ -100,7 +100,10 @@ test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
 );
 
 test("Wiz CSV imports into SQLite and updates the same source finding", async () => {
-  const source = { provider: "wiz" as const, sourceKey: "example-project:main" };
+  const source = {
+    provider: "wiz" as const,
+    sourceKey: "example-project:main",
+  };
   await using fixture = await localReportFixture("wiz.csv", source, {
     remote: "ext::ssh git@github.com %S example/other.git",
   });

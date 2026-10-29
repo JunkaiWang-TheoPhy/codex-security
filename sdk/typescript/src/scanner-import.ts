@@ -97,22 +97,31 @@ export function decodeScannerJson(bytes: ArrayBuffer | Uint8Array): string {
   }
 }
 
-/** Canonical decimal digits of a positive int64 JSON number without rounding it. */
-export function positiveInt64(source: string): string | undefined {
-  const parts = /^(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(source);
+const decimalToken = /^-?(0|[1-9]\d*)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu;
+
+/** Compare decimal magnitudes without expanding scientific exponents. */
+function decimalMagnitude(source: string) {
+  const parts = decimalToken.exec(source);
   if (!parts) return;
   const fraction = parts[2] ?? "";
   const digits = (parts[1]! + fraction).replace(/^0+/u, "");
-  const length = digits.length + Number(parts[3] ?? 0) - fraction.length;
-  if (
-    !digits ||
-    length < 1 ||
-    length > 19 ||
-    /[1-9]/u.test(digits.slice(length))
-  )
-    return;
-  const id = digits.slice(0, length).padEnd(length, "0");
-  if (length < 19 || id <= "9223372036854775807") return id;
+  const point = digits.length
+    ? digits.length - fraction.length + Number(parts[3] ?? 0)
+    : 0;
+  let end = digits.length;
+  while (end > 0 && digits[end - 1] === "0") end--;
+  return { digits: digits.slice(0, end), point };
+}
+
+/** Canonical decimal digits of a positive int64 JSON number without rounding it. */
+export function positiveInt64(source: string): string | undefined {
+  if (source.startsWith("-")) return;
+  const magnitude = decimalMagnitude(source);
+  if (!magnitude) return;
+  const { digits, point } = magnitude;
+  if (!digits || point < digits.length || point > 19) return;
+  const id = digits.padEnd(point, "0");
+  if (point < 19 || id <= "9223372036854775807") return id;
 }
 
 /** Sparse witness for original JSON numbers encoded as exact text in hosted exports. */
@@ -121,17 +130,20 @@ export interface HostedNumericFields {
 }
 const numberFields = new WeakMap<object, HostedNumericFields>();
 
-function exactNumber(key: string, value: number, token?: string): boolean {
-  return (
+function exactNumberText(value: number, source?: string): string | undefined {
+  const token = requiredText(source, "Exact scanner numeric value");
+  if (
     !Number.isFinite(value) ||
-    (Number.isInteger(value) &&
-      (!Number.isSafeInteger(value) ||
-        (key === "id" &&
-          value > 0 &&
-          token !== undefined &&
-          token !== String(value) &&
-          !positiveInt64(token))))
-  );
+    (Number.isInteger(value) && !Number.isSafeInteger(value))
+  )
+    return token;
+  const serialized = String(value);
+  if (token !== serialized) {
+    const original = decimalMagnitude(token)!;
+    const rounded = decimalMagnitude(serialized)!;
+    if (original.point !== rounded.point || original.digits !== rounded.digits)
+      return token;
+  }
 }
 
 export function parseHostedScannerJson(source: string): unknown {
@@ -144,10 +156,9 @@ export function parseHostedScannerJson(source: string): unknown {
       value: unknown,
       context?: { source?: string },
     ) {
-      const token = context?.source;
       const field =
-        typeof value === "number" && exactNumber(key, value, token)
-          ? requiredText(token, "Exact scanner numeric value")
+        typeof value === "number"
+          ? exactNumberText(value, context?.source)
           : value && typeof value === "object"
             ? numberFields.get(value)
             : undefined;
@@ -162,9 +173,12 @@ export function parseHostedScannerJson(source: string): unknown {
   );
 }
 
-/** Semgrep's int64 IDs can also be supplied as text in saved exports. */
-export function hostedId(record: Record<string, unknown>): unknown {
-  return numberFields.get(record)?.["id"] ?? record["id"];
+/** Use the exact token when a rounded value could pass an integer check. */
+export function hostedNumber(
+  record: Record<string, unknown>,
+  key: string,
+): unknown {
+  return numberFields.get(record)?.[key] ?? record[key];
 }
 
 function mapNumbers(data: unknown, fields: unknown, encode: boolean): object {
@@ -185,8 +199,8 @@ function mapNumbers(data: unknown, fields: unknown, encode: boolean): object {
       if (
         !encode &&
         (values[key] !== field ||
-          !/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/iu.test(field) ||
-          !exactNumber(key, Number(field), field))
+          !decimalToken.test(field) ||
+          !exactNumberText(Number(field), field))
       )
         throw new Error("Invalid exact scanner number.");
       values[key] = encode ? field : Number(field);
@@ -226,9 +240,9 @@ export function restoreHostedNumbers(
 }
 
 // Sixteen mantissa digits may lose precision even if the parsed integer is safe.
-// A positive exponent can also overflow. A match inside a string only costs a parse.
+// Scientific notation can overflow or underflow. A match inside a string only costs a parse.
 const possiblyUnsafeJsonNumber =
-  /(?:\[|[:,])\s*-?(?:(?:\d\.?){16}|\d+(?:\.\d+)?e\+?\d)/iu;
+  /(?:\[|[:,])\s*-?(?:(?:\d\.?){16}|\d+(?:\.\d+)?e[+-]?\d)/iu;
 
 export async function readScannerJson(
   path: string,
