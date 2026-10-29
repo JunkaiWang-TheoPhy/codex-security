@@ -2,6 +2,7 @@ import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import type { HostedExternalFindings } from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import {
   listLocalExternalFindings,
@@ -33,16 +34,19 @@ const repositoryUrl = "https://github.com/example/project";
 const formats = ["JSON", "SARIF"] as const;
 
 async function platformCheckout(remote: string, sourceKey = "platform") {
-  const fixture = await localFindingsFixture({ remote });
+  const fixture = await localReportFixture(
+    "semgrep.json",
+    { provider: "semgrep", sourceKey },
+    { remote },
+  );
   return {
-    file: join(fixture.root, "semgrep.json"),
-    options: {
-      repository: fixture.repository,
-      provider: "semgrep" as const,
-      sourceKey,
-    },
-    dependencies: { environment: fixture.environment },
-    [Symbol.asyncDispose]: fixture.dispose,
+    ...fixture,
+    prepareNormalized: (input: HostedExternalFindings) =>
+      prepareNormalizedLocalImport(
+        input,
+        fixture.options,
+        fixture.dependencies,
+      ),
   };
 }
 
@@ -70,13 +74,9 @@ test("a retained Platform row binds mixed SARIF provenance in either order", asy
     [...platform, ...legacy.findings],
   ]) {
     const input = { read: findings.length, findings, excluded: [] };
-    await expect(
-      prepareNormalizedLocalImport(
-        input,
-        fixture.options,
-        fixture.dependencies,
-      ),
-    ).rejects.toThrow("does not match");
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+      "does not match",
+    );
     expect(
       (
         await prepareNormalizedLocalImport(input, fixture.options, {
@@ -111,7 +111,7 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
       [["created", "unchanged", "updated"][index]!]: 1,
     });
   }
-  const records = await listLocalExternalFindings(options, dependencies);
+  const records = await fixture.read();
   expect(records).toHaveLength(1);
   expect(records[0]).toMatchObject({
     version: 2,
@@ -125,11 +125,7 @@ test("a saved Platform collection replays and updates unassessed findings in SQL
   const row = mapped.findings[0]!;
   expect(row.source_finding_id).not.toBe(records[0]!.sourceFindingId);
   row.source_finding_id = records[0]!.sourceFindingId;
-  const migration = await prepareNormalizedLocalImport(
-    mapped,
-    options,
-    dependencies,
-  );
+  const migration = await fixture.prepareNormalized(mapped);
   const saved = await migration.import();
   expect(saved.counts.updated).toBe(1);
   expect(saved.findings[0]?.evidence.source_data?.["project"]).toEqual(
@@ -160,19 +156,11 @@ test("replays numeric int64 Platform finding IDs from a file while preserving na
     { finding: { id: ids[0], metadata: { ratio } } },
     { finding: { id: ids[1] } },
   ]);
-  const prepared = await prepareLocalExternalImport(
-    fixture.file,
-    fixture.options,
-    fixture.dependencies,
-  );
+  const prepared = await fixture.prepare();
   expect((await prepared.import()).counts.created).toBe(2);
   // Changing one vendor fraction to the same quoted digits updates only that finding.
   await writeFile(fixture.file, quoted);
-  const changed = await prepareLocalExternalImport(
-    fixture.file,
-    fixture.options,
-    fixture.dependencies,
-  );
+  const changed = await fixture.prepare();
   expect((await changed.import()).counts).toMatchObject({
     updated: 1,
     unchanged: 1,
@@ -254,15 +242,10 @@ test("replays native SSH evidence and URL-less labels from the selected Semgrep 
     repositoryAliases: [alias],
     findings: rows,
   });
-  const { file, options, dependencies } = fixture;
-  await writeFile(file, JSON.stringify(collected));
-  const prepared = await prepareLocalExternalImport(
-    file,
-    options,
-    dependencies,
-  );
+  await fixture.writeJson(collected);
+  const prepared = await fixture.prepare();
   expect((await prepared.import()).counts.created).toBe(2);
-  const stored = await listLocalExternalFindings(options, dependencies);
+  const stored = await fixture.read();
   expect(stored.map((entry) => entry.evidence.source_data)).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
@@ -286,14 +269,13 @@ test("replays native SSH evidence and URL-less labels from the selected Semgrep 
     ...rows[1],
     repository: { url: repositoryUrl, name: "other-module" },
   };
-  await expect(
-    prepareNormalizedLocalImport(normalized, options, dependencies),
-  ).rejects.toThrow("matching source repository");
+  await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+    "matching source repository",
+  );
   // Historical normalized evidence without captured labels accepted a matching repository URL.
   delete evidence["repositoryAliases"];
   expect(
-    (await prepareNormalizedLocalImport(normalized, options, dependencies))
-      .preview.findings,
+    (await fixture.prepareNormalized(normalized)).preview.findings,
   ).toHaveLength(2);
   for (const url of [
     "git@github.com:other/project.git",
@@ -334,12 +316,8 @@ test.each([
     };
     const report = await collectProject(project, [finding], url);
     await using fixture = await platformCheckout(remote);
-    await writeFile(fixture.file, JSON.stringify(report));
-    const prepared = await prepareLocalExternalImport(
-      fixture.file,
-      fixture.options,
-      fixture.dependencies,
-    );
+    await fixture.writeJson(report);
+    const prepared = await fixture.prepare();
     expect(prepared.preview.findings[0]?.evidence.source_data).toMatchObject({
       project,
       finding,
@@ -357,7 +335,7 @@ test("local file and normalized imports retain the repository references selecte
     ...platformReport([]),
     project: { ...platformProject, url },
   };
-  await writeFile(fixture.file, JSON.stringify(report));
+  await fixture.writeJson(report);
   const reference = { url, platform: "github" as const };
   const dependencies = {
     ...fixture.dependencies,
@@ -394,7 +372,7 @@ test("a saved Semgrep .git alias on a custom host retains the selected repositor
   const report = await collectProject(project, [finding], mapping);
   expect(report.sourceRepositoryUrl).toBe(mapping);
   await using fixture = await platformCheckout(project.url);
-  await writeFile(fixture.file, JSON.stringify(report));
+  await fixture.writeJson(report);
   for (const sourceRepositoryUrl of [undefined, mapping, project.url])
     await expect(
       readSemgrepFindings(fixture.file, { sourceRepositoryUrl }),
@@ -409,13 +387,9 @@ test("a saved Semgrep .git alias on a custom host retains the selected repositor
     sourceRepositoryUrl: mapping,
     finding,
   });
-  await expect(
-    prepareNormalizedLocalImport(
-      expected,
-      fixture.options,
-      fixture.dependencies,
-    ),
-  ).rejects.toThrow("does not match");
+  await expect(fixture.prepareNormalized(expected)).rejects.toThrow(
+    "does not match",
+  );
   const prepared = await prepareLocalExternalImport(
     fixture.file,
     fixture.options,
@@ -433,13 +407,9 @@ test("a saved Semgrep .git alias on a custom host retains the selected repositor
   expect(remapped.findings).toEqual(
     normalizeSemgrepPlatformFindings(legacy).findings,
   );
-  await expect(
-    prepareNormalizedLocalImport(
-      remapped,
-      fixture.options,
-      fixture.dependencies,
-    ),
-  ).rejects.toThrow("does not match");
+  await expect(fixture.prepareNormalized(remapped)).rejects.toThrow(
+    "does not match",
+  );
 });
 
 test("hosted Semgrep honors an explicit Enterprise repository binding", async () => {
@@ -488,7 +458,7 @@ test("hosted Semgrep honors an explicit Enterprise repository binding", async ()
     findings: [row],
   });
   expect(() => normalizeSemgrepPlatformFindings(collected)).toThrow();
-  await writeFile(fixture.file, JSON.stringify(collected));
+  await fixture.writeJson(collected);
   const prepareFile = (source?: { url: string; platform?: "github" }) =>
     prepareLocalExternalImport(
       fixture.file,
@@ -547,17 +517,10 @@ test.each([
   "an empty Platform report rejects a checkout whose remote is %s",
   async (remote) => {
     await using fixture = await platformCheckout(remote);
-    const { file, options, dependencies } = fixture;
-    await writeFile(file, JSON.stringify(platformReport([])));
+    await fixture.writeJson(platformReport([]));
+    await expect(fixture.prepare()).rejects.toThrow("does not match");
     await expect(
-      prepareLocalExternalImport(file, options, dependencies),
-    ).rejects.toThrow("does not match");
-    await expect(
-      prepareNormalizedLocalImport(
-        await readSemgrepFindings(file),
-        options,
-        dependencies,
-      ),
+      fixture.prepareNormalized(await readSemgrepFindings(fixture.file)),
     ).rejects.toThrow("does not match");
   },
 );
@@ -614,10 +577,9 @@ test.each([
       project: { ...report.project, url },
     });
     const { options, dependencies } = fixture;
-    expect(
-      (await prepareNormalizedLocalImport(input, options, dependencies)).preview
-        .findings,
-    ).toEqual([]);
+    expect((await fixture.prepareNormalized(input)).preview.findings).toEqual(
+      [],
+    );
     await expect(
       prepareNormalizedLocalImport(input, options, {
         ...dependencies,
@@ -639,20 +601,15 @@ test("checks scanner repository links independently of Git checkout URLs", async
     { ...empty, sourceRepositoryUrl: ambiguous },
     { ...projected, sourceRepositoryPlatform: "other" as const },
   ])
-    await expect(
-      prepareNormalizedLocalImport(
-        report,
-        checkout.options,
-        checkout.dependencies,
-      ),
-    ).rejects.toThrow(/repository/i);
+    await expect(checkout.prepareNormalized(report)).rejects.toThrow(
+      /repository/i,
+    );
 
   await using transport = await platformCheckout(ambiguous);
-  const prepared = await prepareNormalizedLocalImport(
-    { ...empty, sourceRepositoryUrl: canonical },
-    transport.options,
-    transport.dependencies,
-  );
+  const prepared = await transport.prepareNormalized({
+    ...empty,
+    sourceRepositoryUrl: canonical,
+  });
   expect(prepared.preview.findings).toEqual([]);
 });
 
@@ -667,16 +624,12 @@ test.each([
   "compares the Git checkout %s with the scanner link %s",
   async (checkout, source, matches) => {
     await using f = await platformCheckout(gitlabUrl + checkout);
-    const prepared = prepareNormalizedLocalImport(
-      {
-        read: 0,
-        findings: [],
-        excluded: [],
-        sourceRepositoryUrl: gitlabUrl + source,
-      },
-      f.options,
-      f.dependencies,
-    );
+    const prepared = f.prepareNormalized({
+      read: 0,
+      findings: [],
+      excluded: [],
+      sourceRepositoryUrl: gitlabUrl + source,
+    });
     if (matches) expect((await prepared).preview.findings).toEqual([]);
     else await expect(prepared).rejects.toThrow("does not match");
   },
@@ -686,20 +639,11 @@ test("hosted HTTP sources reject raw control bytes and preserve percent escapes"
   const url = repositoryUrl + "\x01";
   await using f = await platformCheckout(repositoryUrl);
   const raw = platformReport([]);
-  await writeFile(
-    f.file,
-    JSON.stringify({ ...raw, project: { ...raw.project, url } }),
-  );
-  await expect(
-    prepareLocalExternalImport(f.file, f.options, f.dependencies),
-  ).rejects.toThrow("percent-encode");
+  await f.writeJson({ ...raw, project: { ...raw.project, url } });
+  await expect(f.prepare()).rejects.toThrow("percent-encode");
   const input = normalizeSemgrepPlatformFindings(raw);
   await expect(
-    prepareNormalizedLocalImport(
-      { ...input, sourceRepositoryUrl: url },
-      f.options,
-      f.dependencies,
-    ),
+    f.prepareNormalized({ ...input, sourceRepositoryUrl: url }),
   ).rejects.toThrow("percent-encode");
   const encoded = repositoryUrl + "%01";
   expect(
@@ -727,11 +671,7 @@ test("a local Git path may contain non-UTF-8 bytes unless it is a helper argumen
         Buffer.from("mirror\n"),
       ]),
     );
-    const prepared = prepareNormalizedLocalImport(
-      input,
-      f.options,
-      f.dependencies,
-    );
+    const prepared = f.prepareNormalized(input);
     if (forced)
       await expect(prepared).rejects.toThrow(
         "does not match a configured remote",
@@ -747,11 +687,12 @@ test("undecodable Git names and URLs cannot match a replacement character", asyn
   const prefix = "https://github.com/example/";
   const url = prefix + "%EF%BF%BD";
   const prepare = () =>
-    prepareNormalizedLocalImport(
-      { read: 0, findings: [], excluded: [], sourceRepositoryUrl: url },
-      f.options,
-      f.dependencies,
-    );
+    f.prepareNormalized({
+      read: 0,
+      findings: [],
+      excluded: [],
+      sourceRepositoryUrl: url,
+    });
   const section = (name: Buffer, path: Buffer) =>
     Buffer.concat([
       Buffer.from('\n[remote "'),

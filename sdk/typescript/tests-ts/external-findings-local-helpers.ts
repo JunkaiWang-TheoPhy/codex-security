@@ -50,11 +50,9 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
   };
 }
 
-export async function localReportFixture(
-  filename: string,
-  source: Omit<ExternalPublicationOptions, "repository">,
-  checkout: { remote?: string } = {},
-) {
+export async function localReportFixture<
+  Source extends Omit<ExternalPublicationOptions, "repository">,
+>(filename: string, source: Source, checkout: { remote?: string } = {}) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);
   const options = { ...source, repository: fixture.repository };
@@ -62,9 +60,13 @@ export async function localReportFixture(
   return {
     ...fixture,
     file,
+    options,
+    dependencies,
     sourceKey: source.sourceKey,
     writeJson: (report: unknown) => writeFile(file, JSON.stringify(report)),
-    prepare: (overrides: Pick<typeof source, "sourceRepositoryUrl"> = {}) =>
+    prepare: (
+      overrides: Pick<ExternalPublicationOptions, "sourceRepositoryUrl"> = {},
+    ) =>
       prepareLocalExternalImport(
         file,
         { ...options, ...overrides },
