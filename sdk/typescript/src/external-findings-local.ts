@@ -153,8 +153,11 @@ function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
-  key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey,
+  hostedKey?: (url: string) => string,
 ): { key: string; account?: string; homeRelative?: boolean } | undefined {
+  const key =
+    hostedKey ??
+    (provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey);
   const transport = bound
     ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
     : null;
@@ -176,7 +179,8 @@ function remoteRepository(
   }
   if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
-  const { url, path, scpStyle } = remote;
+  const { url, scpStyle } = remote;
+  let path = remote.path;
   const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
@@ -197,7 +201,10 @@ function remoteRepository(
       const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
         value,
       );
-      if (!raw || /\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+      if (!raw) return { key: "\0" + value };
+      // The hosted HTTP key normalizes the raw Git path. URL.pathname escapes literal braces.
+      if (hostedKey) path = (raw[1] ?? "").slice(1);
+      else if (/\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
         return { key: "\0" + value };
     }
     const suffix = /[?#].*$/su.exec(value)?.[0] ?? "";
@@ -580,9 +587,18 @@ async function requireMatchingRepository(
       lines.length > 1 &&
       configured.slice(-lines.length).some((url) => url.includes("\n"))
     ) {
-      const literals = configured.slice(configured.lastIndexOf("") + 1);
-      // NUL-delimited config proves these boundaries if no rewrite can move a newline.
-      if (!multilineRewrite && literals.join("\n") === output) urls = literals;
+      // Ordinary insteadOf prefixes preserve the number of lines in each URL.
+      // Git emits either the full list or the suffix after the last empty URL.
+      const afterReset = configured.lastIndexOf("") + 1;
+      const records: string[] = [];
+      let end = lines.length;
+      for (let i = configured.length - 1; i >= 0 && end > 0; i--) {
+        const start = end - configured[i]!.split("\n").length;
+        if (start < 0 || (start === 0 && i !== 0 && i !== afterReset)) break;
+        records.push(lines.slice(start, end).join("\n"));
+        end = start;
+      }
+      if (!multilineRewrite && end === 0) urls = records.reverse();
       else {
         hasUnverifiedRemote = true;
         urls = [await readGit(["remote", "get-url", "--", name])];

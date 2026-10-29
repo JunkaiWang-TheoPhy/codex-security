@@ -330,7 +330,6 @@ test.each([
   "example::foreign\nhttps://github.com/example/project",
   "https://github.com/example/project\r",
   "https://github.com/ex\tample/project",
-  "HTTPS://github.com/example/project",
   ...(process.platform === "win32" ? [] : ["a:/example/foreign.git"]),
   "git@[github.com]:elsewhere/project.git",
   "git@[github.com:2222]:example/project.git",
@@ -433,6 +432,31 @@ test.each([
 );
 
 const gitlabUrl = "https://gitlab.com/Group/My-Repo";
+test.each([
+  ["{1}", "%7B1%7D"],
+  ["%7B1%7D", "{1}"],
+])(
+  "a hosted checkout ending in %s distinguishes literal HTTP path bytes",
+  async (suffix, other) => {
+    await using f = await platformCheckout(gitlabUrl + suffix);
+    const prepare = (path: string) =>
+      prepareNormalizedLocalImport(
+        {
+          read: 0,
+          findings: [],
+          excluded: [],
+          sourceRepositoryUrl: gitlabUrl + path,
+        },
+        f.options,
+        f.dependencies,
+      );
+    expect((await prepare(suffix)).preview.findings).toEqual([]);
+    await expect(prepare(other)).rejects.toThrow(
+      "does not match a configured remote",
+    );
+  },
+);
+
 test("hosted HTTP sources reject raw control bytes and preserve percent escapes", async () => {
   const url = repositoryUrl + "\x01";
   await using f = await platformCheckout(repositoryUrl);

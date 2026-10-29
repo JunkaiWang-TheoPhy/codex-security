@@ -10,6 +10,7 @@ import {
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
+  gitTransportBytes,
   isKnownGitHost,
   isPublicGitHost,
   normalizeHostedGitRepositoryUrl,
@@ -211,7 +212,11 @@ function checkOrganization(
 }
 
 // Snyk CLI renders HTTPS and SSH Git remotes as HTTP, preserving explicit ports.
-function matchesCliRepository(remote: string, source: string) {
+function matchesCliRepository(
+  remote: string,
+  source: string,
+  product: Scope["product"],
+) {
   const parts = /^http:\/\/([^/]+)(\/.*)$/iu.exec(remote);
   if (!parts) return false;
   const authority = parts[1]!.toLowerCase();
@@ -226,6 +231,14 @@ function matchesCliRepository(remote: string, source: string) {
     (publicSshHost && sshAuthority === `${hostname}:22`);
   // The CLI drops the SSH login, so a private user's home-relative path can look like an HTTP URL.
   if (!publicWebHost && !sshEndpoint) return false;
+  if (product === "open-source" && isPublicGitHost(authority)) {
+    // Snyk monitor can put a git+ssh or ssh+git port into the first path component.
+    const prefix = /^\/([\t-\r ]*\+?\d*)\//u.exec(
+      gitTransportBytes(path, false),
+    )?.[1];
+    const port = Number(prefix);
+    if (prefix === "" || (port > 0 && port <= 65535)) return false;
+  }
   // HTTP resolves literal dot segments, while SSH sends them to the repository service.
   if ((publicSshHost || sshEndpoint) && /\/\.{1,2}(?:\/|$)/u.test(path))
     return false;
@@ -262,7 +275,7 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
   );
   const matches =
     origin === "cli" && /^http:\/\//iu.test(url)
-      ? matchesCliRepository(url, source)
+      ? matchesCliRepository(url, source, selected.product)
       : hostedRepositoryUrlKey(normalized, enterprise) === source;
   if (/[?#]/u.test(url) || !matches)
     throw new Error(

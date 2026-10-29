@@ -950,6 +950,7 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["altssh.gitlab.com:443/Group%2Frepo.git", "gitlab.com/Group/repo"],
     ["altssh.bitbucket.org:443/Group%2Frepo.git", "bitbucket.org/Group/repo"],
     ["gitlab.com:8443/Group/repo.git", "gitlab.com:8443/Group/repo"],
+    ["gitlab.com/123456/Team/project", "gitlab.com/123456/Team/project"],
     ["gitlab.com/Team/project.git", "gitlab.com/Team/project"],
     ["bitbucket.org/Team/project", "bitbucket.org/Team/project"],
     ["example.ghe.com/Org/repo.git", "example.ghe.com/org/repo"],
@@ -972,6 +973,9 @@ test("matches the HTTP target spelling emitted by Snyk CLI for public Git remote
     ["github.com/example/other", github],
     ["github.com/example/old/../repository", github],
     ["gitlab.com:22/Group/./project", "gitlab.com:22/Group/project"],
+    ["gitlab.com/22/Group/project.git", "gitlab.com/22/Group/project"],
+    ["gitlab.com/22/Group/project.git", "gitlab.com/Group/project"],
+    ["gitlab.com/%30%32%32%2FGroup/project", "gitlab.com/022%2FGroup/project"],
     ["github.com:80/example/repository", github],
     ["github.com:443/example/repository", github],
     ["github.com:2222/example/repository", github],
@@ -1033,6 +1037,27 @@ test("compares native HTTP repository paths and preserves ambiguous Snyk CLI spe
     "http://" + dotted,
   );
   expect(() => check(dotted, dotted, "cli")).toThrow("target URL");
+  const numeric = "gitlab.com/22/Group/project";
+  expect(() => check(numeric, numeric, "cli")).toThrow("target URL");
+  for (const origin of ["gitlab", "api"])
+    expect(check(numeric, numeric, origin).sourceRepositoryUrl).toBe(
+      "http://" + numeric,
+    );
+  const codeUrl = "http://" + numeric;
+  expect(
+    normalizeSnykIssues({
+      ...snykRestFixture("code", { sourceRepositoryUrl: codeUrl }),
+      project: project({ manager: "sast", origin: "cli", remote: codeUrl }),
+    }).sourceRepositoryUrl,
+  ).toBe(codeUrl);
+  const override = "https://" + numeric;
+  expect(
+    normalizeSnykIssues({
+      ...envelope(),
+      sourceRepositoryUrl: override,
+      project: project({ origin: "cli", remote: override }),
+    }).sourceRepositoryUrl,
+  ).toBe(override);
   expect(() =>
     check("gitlab.com/Group/old\t/../my-project", plain, "gitlab"),
   ).toThrow("percent-encode");

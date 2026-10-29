@@ -184,7 +184,9 @@ recover:
 - **`savedSubmission` identifies an existing checkpoint:** rerun the same
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
-  but persisting a later receipt failed.
+  but persisting a later receipt failed. If an upgrade accepts additional rows
+  from the same file, its preview is a new selection. Resume the original
+  selection first using the earlier version or the saved normalized SDK input.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

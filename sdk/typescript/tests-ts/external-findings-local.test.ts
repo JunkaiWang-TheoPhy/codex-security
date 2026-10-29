@@ -1705,6 +1705,12 @@ describe("local normalized scanner findings", () => {
       };
       for (const args of [
         ["config", `--${scope}`, "url.https://github.com/.insteadOf", "gh:"],
+        [
+          "config",
+          "--add",
+          "remote.origin.url",
+          "opaque::part\nhttps://github.com/example/other\npart",
+        ],
         ["config", "--add", "remote.origin.url", "gh:example/secondary.git"],
         ["remote", "add", "upstream", "gh:example/library.git"],
       ]) {

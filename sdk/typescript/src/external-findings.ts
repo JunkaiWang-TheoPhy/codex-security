@@ -95,8 +95,10 @@ export function snapshotExternalFindings(
     read,
     findings,
     excluded,
-    ...("sourceRepositoryUrl" in input && { sourceRepositoryUrl }),
-    ...("sourceRepositoryPlatform" in input && { sourceRepositoryPlatform }),
+    ...((sourceRepositoryUrl !== undefined ||
+      "sourceRepositoryUrl" in input) && { sourceRepositoryUrl }),
+    ...((sourceRepositoryPlatform !== undefined ||
+      "sourceRepositoryPlatform" in input) && { sourceRepositoryPlatform }),
   });
   // Report metadata may alias evidence that receives Cloud defaults.
   if (report !== undefined) current.report = structuredClone(report);

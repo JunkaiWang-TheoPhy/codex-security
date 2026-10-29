@@ -1350,7 +1350,9 @@ test("local and Cloud preparations snapshot a class report's repository accessor
       return platform;
     }
   }
-  const input = new ImportedReport();
+  const input = new Proxy(new ImportedReport(), {
+    has: (target, key) => Object.hasOwn(target, key),
+  });
   const localResult = prepareNormalizedLocalImport(
     input,
     { ...settings, repository: local.repository },
