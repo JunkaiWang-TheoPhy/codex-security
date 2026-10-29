@@ -6,6 +6,7 @@
 
 - update SDK and MCP parser dependencies ([#2141](https://github.com/openai/codex-security/pull/2141))
 - do not split surrogate pairs in truncated report text ([#2133](https://github.com/openai/codex-security/pull/2133))
+- update vulnerable triage dependencies ([#2142](https://github.com/openai/codex-security/pull/2142))
 
 <!-- release-section: highlights:end -->
 
