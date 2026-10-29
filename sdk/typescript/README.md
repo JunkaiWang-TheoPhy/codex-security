@@ -724,7 +724,9 @@ records remain stored, and unknown evidence fields are not inferred.
 
 Normalized Snyk and Semgrep reports can declare a `sourceRepositoryUrl`, even
 when the report is empty. Local and Cloud imports check it against retained
-repository evidence. Use `sourceRepositoryPlatform: "other"` for case-sensitive
+repository evidence. Preserve `snykRestContext` when combining normalized Snyk
+findings so an empty hosted project can still verify its repository.
+Use `sourceRepositoryPlatform: "other"` for case-sensitive
 paths on a custom host. If the checkout uses an opaque Git remote helper,
 configure a separate matching remote that the importer can verify without running the helper.
 

@@ -191,7 +191,7 @@ export function snykRepositoryClaims(
 
 /** Retain each Snyk repository claim's authority when combining normalized findings. */
 export function snykRepositoryScope(input: HostedExternalFindings) {
-  const project = snykRestReportRepository(input.report);
+  const project = snykRestReportRepository(input.snykRestContext);
   const projects: ReturnType<typeof snykRestFindingRepository>[] = project
     ? [project]
     : [];

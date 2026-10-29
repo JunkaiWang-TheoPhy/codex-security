@@ -157,6 +157,8 @@ function projectContext(
 ) {
   const original = record(value, "Semgrep project");
   const { name, url: nativeUrl } = original;
+  if (nativeUrl != null && typeof nativeUrl !== "string")
+    throw new Error("Semgrep project repository URL must be text.");
   const project: Project = {
     id: requiredId(original, "Semgrep project ID"),
     name: requiredText(name, "Semgrep project name"),

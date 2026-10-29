@@ -13,6 +13,7 @@ import {
 } from "../src/snyk-rest-findings.js";
 import {
   normalizeSnykInput,
+  normalizeSnykJson,
   readSnykFindings,
   snykRepositoryClaims,
 } from "../src/snyk-findings.js";
@@ -26,7 +27,7 @@ import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
-import { snykPluginExport } from "./support/snyk-import-fixtures.js";
+import { snykJson, snykPluginExport } from "./support/snyk-import-fixtures.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import {
   organizationId,
@@ -642,6 +643,26 @@ test("accepts a custom-host .git alias only when the Snyk integration establishe
       normalizeSnykIssues(report(origin, url + ".git")).findings,
     ).toHaveLength(1);
   expect(normalizeSnykIssues(report("api", url)).findings).toHaveLength(1);
+});
+
+test("a Snyk integration label cannot alias distinct Azure repository names", async () => {
+  const url = "https://dev.azure.com/example/project/_git/library";
+  await using checkout = await snykCheckout(url);
+  for (const origin of ["github-enterprise", "gitlab"]) {
+    const report = {
+      ...envelope(),
+      sourceRepositoryUrl: url + ".git",
+      project: project({ origin, remote: url + ".git" }),
+    };
+    expect(() =>
+      normalizeSnykIssues({ ...report, sourceRepositoryUrl: url }),
+    ).toThrow("target URL");
+    const exact = normalizeSnykIssues(report);
+    expect(exact.sourceRepositoryPlatform).toBe("other");
+    await expect(checkout.prepareNormalized(exact)).rejects.toThrow(
+      "does not match",
+    );
+  }
 });
 
 test.each([
@@ -1333,7 +1354,7 @@ test.each([
   ["empty", [], false],
   ["all excluded", [issue({ status: "unknown" })], true],
 ] as const)(
-  "retains GitLab target proof in an %s report",
+  "retains GitLab and GitHub Enterprise project proof in an %s report",
   async (_, issues, reverse) => {
     const bare = "https://scm.example.test/Team/repo";
     const sourceRepositoryUrl = reverse ? bare + ".git" : bare;
@@ -1357,8 +1378,24 @@ test.each([
     expect(
       (await fixture.prepareNormalized(normalized)).preview.findings,
     ).toHaveLength(0);
-    delete normalized.report;
+    delete normalized.snykRestContext;
     await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+      "does not match",
+    );
+
+    report.project.attributes.origin = "github-enterprise";
+    const mixed = normalizeSnykIssues(report, "local");
+    const sibling = normalizeSnykJson(snykJson(), "local");
+    mixed.read += sibling.read;
+    mixed.findings.push(...sibling.findings);
+
+    const scp = "git@scm.example.test:team/";
+    await using ssh = await snykCheckout(scp + "REPO.git");
+    await using other = await snykCheckout(scp + "other.git");
+    expect((await ssh.prepareNormalized(mixed)).preview.findings).toHaveLength(
+      1,
+    );
+    await expect(other.prepareNormalized(mixed)).rejects.toThrow(
       "does not match",
     );
   },

@@ -266,6 +266,12 @@ test("keeps an operator mapping separate from a URL-less project and its short r
     project,
     sourceRepositoryUrl: platformProject.url,
   });
+  expect(() =>
+    normalizeSemgrepPlatformFindings({
+      ...report,
+      project: { ...project, url: {} },
+    }),
+  ).toThrow("Semgrep project repository URL must be text.");
   const { findings } = normalizeSemgrepPlatformFindings(report);
   expect(findings[0]?.evidence).toMatchObject({
     details: { repository: { url: platformProject.url } },

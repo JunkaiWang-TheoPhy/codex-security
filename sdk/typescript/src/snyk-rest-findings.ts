@@ -9,7 +9,11 @@ import {
 } from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { normalizeHostedGitRepositoryUrl } from "./git-remote.js";
+import {
+  isGitHubCloudHost,
+  isKnownGitHost,
+  normalizeHostedGitRepositoryUrl,
+} from "./git-remote.js";
 import {
   checkSnykTokenOrigin,
   hostedScannerHttp,
@@ -222,16 +226,21 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk CLI HTTP target URL cannot verify a repository. Set an explicit HTTPS URL with snyk monitor --remote-repo-url and collect the resulting project.",
     );
+  const host = new URL(selected.sourceRepositoryUrl).hostname;
+  const customHost = !isKnownGitHost(host);
+  const github =
+    origin.startsWith("github") && (customHost || isGitHubCloudHost(host));
+  const enterprise =
+    github &&
+    (origin === "github-enterprise" || origin === "github-server-app");
+  const gitlab = origin === "gitlab" && (customHost || host === "gitlab.com");
   const normalized = /^https?:\/\//iu.test(url)
     ? hostedRepositoryUrl(url, "Snyk target URL")
     : normalizeHostedGitRepositoryUrl(
         url,
         selected.sourceRepositoryUrl,
-        origin.startsWith("github"),
+        github,
       );
-  const enterprise =
-    origin === "github-enterprise" || origin === "github-server-app";
-  const gitlab = origin === "gitlab";
   const key = (value: string) =>
     hostedRepositoryUrlKey(value, enterprise, gitlab);
   if (
@@ -241,7 +250,11 @@ function checkRemote(remote: unknown, selected: Scope, origin: string) {
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
-  if (enterprise || gitlab) return normalized;
+  return {
+    github,
+    gitlab,
+    nativeUrl: enterprise || gitlab ? normalized : undefined,
+  };
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -504,11 +517,13 @@ function savedContext(document: Resource) {
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];
-  const nativeUrl = checkTarget(target, selected, context);
+  const remote = checkTarget(target, selected, context);
+  const nativeUrl = remote?.nativeUrl;
+  const github = remote?.github ?? context.origin.startsWith("github");
   const platform: HostedExternalFindings["sourceRepositoryPlatform"] =
-    nativeUrl && context.origin.startsWith("github")
+    nativeUrl && github
       ? "github"
-      : context.scm && !context.origin.startsWith("github")
+      : context.scm && !github
         ? "other"
         : undefined;
   return {
@@ -522,7 +537,7 @@ function savedContext(document: Resource) {
     repository: {
       url: selected.sourceRepositoryUrl,
       platform,
-      ...(nativeUrl && context.origin === "gitlab" && { gitlab: true }),
+      ...(remote?.gitlab && { gitlab: true }),
       ...(nativeUrl &&
         nativeUrl !== selected.sourceRepositoryUrl && { nativeUrl }),
     },
@@ -541,8 +556,7 @@ export function snykRestFindingRepository(sourceData: Resource): {
 }
 
 /** Project evidence retained when no finding can carry it. */
-export function snykRestReportRepository(report: Resource | undefined) {
-  const context = report?.["snyk_rest_context"];
+export function snykRestReportRepository(context: Resource | undefined) {
   return context === undefined
     ? undefined
     : savedContext(record(context, "Snyk report project context")).repository;
@@ -734,8 +748,8 @@ export function normalizeSnykIssues(
       sourceRepositoryPlatform: repository.platform,
     }),
     ...(!result.findings.length &&
-      repository.gitlab && {
-        report: { snyk_rest_context: source },
+      (repository.gitlab || repository.platform === "github") && {
+        snykRestContext: source,
       }),
   };
 }

@@ -3,7 +3,6 @@ import {
   validateHostedRepositoryUrl,
 } from "./hosted-scanner-http.js";
 import { CodexSecurityError } from "./errors.js";
-import { isRecord } from "./record.js";
 import { requiredText } from "./scanner-import.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import type {
@@ -46,6 +45,8 @@ export interface HostedExternalFindings extends ExternalFindings {
   sourceRepositoryUrl?: string;
   /** "other" requires exact repository path casing on custom hosts. */
   sourceRepositoryPlatform?: "github" | "other";
+  /** Native project and target that verify an empty Snyk REST report. */
+  snykRestContext?: Record<string, unknown>;
 }
 
 export type NormalizedFindingsFor<P extends Provider> = P extends
@@ -88,6 +89,7 @@ export function snapshotExternalFindings(
     report,
     sourceRepositoryUrl,
     sourceRepositoryPlatform,
+    snykRestContext,
     ...rest
   } = input;
   if (
@@ -98,6 +100,10 @@ export function snapshotExternalFindings(
   )
     throw new CodexSecurityError(
       "Normalized report repository declarations require the Snyk or Semgrep provider.",
+    );
+  if (snykRestContext !== undefined && provider !== "snyk")
+    throw new CodexSecurityError(
+      "Retained snyk evidence requires the snyk provider.",
     );
   if (typeof sourceRepositoryUrl === "string") {
     const label = "Source repository URL";
@@ -110,6 +116,7 @@ export function snapshotExternalFindings(
     read,
     findings,
     excluded,
+    ...(snykRestContext !== undefined && { snykRestContext }),
     ...((sourceRepositoryUrl !== undefined ||
       "sourceRepositoryUrl" in input) && { sourceRepositoryUrl }),
     ...((sourceRepositoryPlatform !== undefined ||
@@ -117,9 +124,6 @@ export function snapshotExternalFindings(
   });
   // Report metadata may alias evidence that receives Cloud defaults.
   if (report !== undefined) current.report = structuredClone(report);
-  const context = current.report?.["snyk_rest_context"];
-  if (isRecord(context) && context["format"] === HOSTED_FINDINGS_FORMATS.snyk)
-    checkHostedFindingProvider(provider, context);
   return current;
 }
 

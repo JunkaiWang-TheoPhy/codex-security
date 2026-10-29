@@ -101,7 +101,7 @@ export async function readExternalFindings(
         ? snykRepositoryClaims(findings.findings[0]!.evidence.source_data).some(
             (source) => source.gitlab,
           )
-        : snykRestReportRepository(findings.report)?.gitlab;
+        : snykRestReportRepository(findings.snykRestContext)?.gitlab;
       const key = (url: string) => hostedRepositoryUrlKey(url, github, gitlab);
       if (key(findings.sourceRepositoryUrl) !== key(declared))
         throw new Error(
