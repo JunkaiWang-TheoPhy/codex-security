@@ -1451,6 +1451,39 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
       prepareNormalizedExternalPublication(input, selected, correct.deps),
     ).rejects.toThrow(/context|STATIC/);
   }
+  const partial = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+  const finding = partial.findings[0]!;
+  delete finding.evidence.source_data!["applicationUrl"];
+  const foreignUrl = "https://github.com/example/other";
+  const foreign = await fixture(undefined, foreignUrl);
+  finding.evidence.details!.repository!.url = foreignUrl;
+  await expect(
+    prepareNormalizedExternalPublication(
+      partial,
+      { ...selected, provider: "wiz" },
+      foreign.deps,
+    ),
+  ).rejects.toThrow(/requires the veracode provider/i);
+  finding.source_finding_id = "sdk-id";
+  finding.evidence.details!.repository!.url = selected.sourceRepositoryUrl;
+  await expect(
+    prepareNormalizedExternalPublication(partial, selected, correct.deps),
+  ).rejects.toThrow(/retained application/i);
+  finding.evidence.source_data = {
+    sourceRepositoryUrl: selected.sourceRepositoryUrl,
+    applicationUrl:
+      "https://scanner.example.test/appsec/v1/applications/dashboard",
+    row: { status: "ready" },
+  };
+  expect(
+    (
+      await prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        correct.deps,
+      )
+    ).preview.findings,
+  ).toHaveLength(1);
   const mixed = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
   const sdkFinding = structuredClone(mixed.findings[0]!);
   sdkFinding.source_finding_id = "sdk-id";

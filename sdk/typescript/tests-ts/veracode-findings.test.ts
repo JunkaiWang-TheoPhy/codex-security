@@ -202,6 +202,19 @@ test("matches row filters and equivalent HAL list and boolean selections", () =>
   expect(normalize(page).findings).toHaveLength(2);
 });
 
+test("a CWE-filtered capture retains static findings alongside unsupported manual findings", () => {
+  const row = veracodePolicyRow();
+  const page = veracodePolicyPage([row, row]);
+  page._links.self.href = page._links.self.href.replace(
+    "scan_type=STATIC",
+    "cwe=79",
+  );
+  const manual = { ...row, scan_type: "MANUAL", finding_details: { cwe: 79 } };
+  const report = normalize({ ...page, _embedded: { findings: [row, manual] } });
+  expect(report.findings).toHaveLength(1);
+  expect(report.excluded).toHaveLength(1);
+});
+
 test("checks explicit score, annotation and new-finding selections before retaining a row", () => {
   const row = veracodePolicyRow();
   const native = {

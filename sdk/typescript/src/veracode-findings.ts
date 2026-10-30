@@ -23,7 +23,7 @@ const count = z.int().nonnegative();
 const positive = z.int().positive();
 const cvssScore = z
   .union([z.string().trim().min(1), z.number()])
-  .pipe(z.coerce.number().min(0).max(10));
+  .pipe(z.coerce.number<string | number>().min(0).max(10));
 const scores = ["severity", "cvss"] as const;
 const pageMetadata = z.object({
   total_elements: count,
@@ -118,13 +118,30 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
   ]);
 }
 
-function hasVeracodeEvidence(data: unknown): boolean {
+const nativeId = /^veracode-static-policy:[a-f0-9]{64}$/u;
+
+function hasVeracodeRow(row: unknown): boolean {
   return (
-    isRecord(data) &&
+    isRecord(row) &&
+    "context_guid" in row &&
+    "context_type" in row &&
+    "scan_type" in row &&
+    "issue_id" in row
+  );
+}
+
+function hasVeracodeEvidence(data: unknown, id: string): boolean {
+  if (!isRecord(data)) return false;
+  const application =
     typeof data["applicationUrl"] === "string" &&
-    applicationPath.test(URL.parse(data["applicationUrl"])?.pathname ?? "") &&
-    "sourceRepositoryUrl" in data &&
-    isRecord(data["row"])
+    applicationPath.test(URL.parse(data["applicationUrl"])?.pathname ?? "");
+  const repository = "sourceRepositoryUrl" in data;
+  const row = hasVeracodeRow(data["row"]);
+  if (application && repository && row) return true;
+  // A native ID corroborates a partial envelope. Other providers also retain raw vendor rows.
+  return (
+    nativeId.test(id) &&
+    ((application && repository) || (row && (application || repository)))
   );
 }
 
@@ -135,8 +152,8 @@ function retainedRepository(
 ): { url: string; scope?: string } | undefined {
   const data = isRecord(sourceData) ? sourceData : {};
   const native =
-    hasVeracodeEvidence(data) ||
-    /^veracode-static-policy:[a-f0-9]{64}$/u.test(id);
+    nativeId.test(id) ||
+    hasVeracodeRow(isRecord(data["row"]) ? data["row"] : data);
   if (!native && !("sourceRepositoryUrl" in data)) return;
   const url = declaredScannerRepositoryUrl(
     data["sourceRepositoryUrl"],
@@ -389,7 +406,7 @@ function readReport(input: unknown) {
           ["cwe", cwes],
           ["finding_category", categories],
         ] as const) {
-          if (!ids) continue;
+          if (!ids || row["scan_type"] !== "STATIC") continue;
           const entry = record(details[field], `Veracode ${field}`);
           const id = integer(entry["id"], `${field} ID`);
           if (!ids.includes(String(id)))
