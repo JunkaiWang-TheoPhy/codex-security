@@ -60,6 +60,18 @@ function findingSeverity(finding: JsonObject): string {
   ).toUpperCase();
 }
 
+function repositoryCell(value: string): string {
+  let text = "";
+  let columns = 0;
+  for (const { segment } of GRAPHEME_SEGMENTER.segment(value)) {
+    const segmentWidth = stringWidth(segment);
+    if (columns + segmentWidth > 18) break;
+    text += segment;
+    columns += segmentWidth;
+  }
+  return text + " ".repeat(18 - columns);
+}
+
 export function renderScanHistory(
   result: JsonObject,
   command: HistoryCommand,
@@ -242,7 +254,7 @@ export function renderScanHistory(
       const scanRepository = basename(clean(scan["targetPath"]));
       if (wide) {
         lines.push(
-          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${scanRepository.slice(0, 18).padEnd(18)}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
+          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${repositoryCell(scanRepository)}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
         );
       } else {
         lines.push(

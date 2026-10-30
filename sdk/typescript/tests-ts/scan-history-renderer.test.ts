@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import stringWidth from "string-width";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
@@ -376,6 +377,61 @@ describe("scan history renderer", () => {
       expect(output).toContain(scans[0]!.scanId);
       expect(output).toContain(scans[1]!.scanId);
       if (columns >= 96) expect(output).toContain("REPOSITORY");
+    }
+  });
+
+  test.each([
+    ["short ASCII", "service", "service"],
+    ["long ASCII", "a".repeat(24), "a".repeat(18)],
+    ["short Chinese", "中文工程", "中文工程"],
+    ["long Chinese", "中文工程".repeat(6), "中文工程中文工程中"],
+    ["combining marks", "e\u0301".repeat(20), "e\u0301".repeat(18)],
+    ["emoji at the edge", "a".repeat(17) + "🚀", "a".repeat(17)],
+    ["emoji that fits", "a".repeat(16) + "🚀", "a".repeat(16) + "🚀"],
+    ["joined emoji", "a".repeat(16) + "👩‍💻-service", "a".repeat(16) + "👩‍💻"],
+    ["wide character at the edge", "a".repeat(17) + "中", "a".repeat(17)],
+  ])("aligns the repository column for %s", (_name, repository, expected) => {
+    const scans = [repository, "control"].map((name, index) => ({
+      scanId: `${index + 1}`.repeat(36),
+      targetPath: `/synthetic/${name}`,
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 7,
+      startedAt: "2026-07-24T12:00:00Z",
+    }));
+
+    for (const color of [false, true]) {
+      const output = stripVTControlCharacters(
+        renderScanHistory({ scans }, "list", { columns: 120, color }),
+      );
+      const lines = output.split("\n");
+      const header = lines.find((line) => line.includes("REPOSITORY"))!;
+      for (const [index, name] of [expected, "control"].entries()) {
+        const row = lines.find((line) =>
+          line.startsWith(`  ${scans[index]!.scanId}`),
+        )!;
+        const findingsStart = row.indexOf("7        ✓ COMPLETE");
+        const repositoryCell = row.slice(
+          header.indexOf("REPOSITORY"),
+          findingsStart - 1,
+        );
+        expect(row.isWellFormed()).toBe(true);
+        expect(repositoryCell.trimEnd()).toBe(name);
+        expect(stringWidth(repositoryCell)).toBe(18);
+        expect(stringWidth(row.slice(0, findingsStart))).toBe(
+          header.indexOf("FINDINGS"),
+        );
+        expect(stringWidth(row.slice(0, row.indexOf("✓ COMPLETE")))).toBe(
+          header.indexOf("STATUS"),
+        );
+      }
+
+      const narrow = stripVTControlCharacters(
+        renderScanHistory({ scans }, "list", { columns: 72, color }),
+      );
+      expect(
+        narrow.split("\n").find((line) => line.startsWith("    2026-07-24")),
+      ).toContain(repository);
     }
   });
 
