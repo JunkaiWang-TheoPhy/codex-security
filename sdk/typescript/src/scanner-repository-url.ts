@@ -53,7 +53,7 @@ export function declaredScannerRepositoryUrl(
 /** A native application or project version maps to one source repository per report. */
 export function repositoryScopeValidator(
   scanner: { provider: Provider; label: string; scope: string },
-  hasEvidence: (data: unknown, id: string) => boolean,
+  hasEvidence: (data: unknown) => boolean,
   retainedRepository: (
     data: unknown,
     id: string,
@@ -67,11 +67,7 @@ export function repositoryScopeValidator(
   ): Map<string, ExternalSourceRepository> => {
     const repositories = new Map<string, ExternalSourceRepository>();
     if (provider !== scanner.provider) {
-      if (
-        findings.some(({ evidence, source_finding_id }) =>
-          hasEvidence(evidence.source_data, source_finding_id),
-        )
-      )
+      if (findings.some(({ evidence }) => hasEvidence(evidence.source_data)))
         throw new CodexSecurityError(
           `Retained ${scanner.label} evidence requires the ${scanner.provider} provider.`,
         );

@@ -218,6 +218,7 @@ for (const provider of ["wiz", "snyk"] as const) {
 test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
   const report = {
     id: "vendor-report-1",
+    row: veracodePolicyRow(),
     name: "CVE-2026-0001",
     detailedName: "example-package",
     version: "1.2.3",
@@ -239,7 +240,7 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
   await writeFile(
     f.file,
     gzipSync(
-      [report, { ...report, id: "vendor-report-2" }]
+      [report, { ...report, id: `veracode-static-policy:${"a".repeat(64)}` }]
         .map((record) => JSON.stringify(record))
         .join("\n"),
     ),
@@ -1221,58 +1222,80 @@ test("a normalized Inspector retry checks its typed repository without native ev
   expect(f.posts).toHaveLength(1);
 });
 
-test("resumes a saved Wiz request containing Black Duck evidence from before provider checks", async () => {
-  const f = await fixture();
-  const row = normalized();
-  const finding = {
-    source_finding_id: row.source_finding_id,
-    evidence: validateExternalEvidence({
-      ...row.evidence,
-      source_data: { format: "blackduck-bom-6" },
-    }),
-  };
-  const input = { read: 1, excluded: [], findings: [finding] };
-  const prepare = () =>
-    prepareNormalizedExternalPublication(input, options, f.deps);
-
-  // The previous publisher accepted this opaque Wiz evidence. Keep its checkpoint
-  // filename and digests so this exercises recovery across the provider change.
-  const directory = join(
-    f.environment.CODEX_SECURITY_STATE_DIR,
-    "external-finding-publications",
-  );
-  const filename =
-    "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json";
-  const digest =
-    "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346";
-  const request = {
-    request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
-    repository: {
-      id: options.repository,
-      repo_connector_id: "github",
-      environment_id: f.state.environmentId,
-      reset_marker: f.state.marker,
+test.each([
+  {
+    selected: options,
+    data: { format: "blackduck-bom-6" },
+    requiredProvider: "blackduck",
+    filename:
+      "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json",
+    digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
+  },
+  {
+    selected: { ...options, provider: "inspector" as const },
+    data: {
+      sourceRepositoryUrl: inspectorRepositoryUrl,
+      applicationUrl: veracodePolicyPage()._links.application.href,
+      row: veracodePolicyRow(),
     },
-    source: { provider: options.provider, source_key: options.sourceKey },
-    items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
-  };
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(directory, filename),
-    JSON.stringify({
-      accountId: "synthetic-account",
-      requests: [request],
-      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
-    }),
-    { mode: 0o600 },
-  );
+    requiredProvider: "veracode",
+    filename:
+      "7d21ed6ce9acbc4bf00c5c7d7ed02b8e7937e92efa796e6218d57273eb9ce2f4.pending.json",
+    digest: "13b472f7b050ef94705eed1fb4487b206386130f988d3ee6f87824f02f4d79f0",
+  },
+])(
+  "resumes a saved $selected.provider request from before $requiredProvider checks",
+  async ({ selected, data, requiredProvider, filename, digest }) => {
+    const f = await fixture();
+    const row = normalized();
+    const finding = {
+      source_finding_id: row.source_finding_id,
+      evidence: validateExternalEvidence({
+        ...row.evidence,
+        source_data: data,
+      }),
+    };
+    const input = { read: 1, excluded: [], findings: [finding] };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(input, selected, f.deps);
 
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).counts.created).toBe(1);
-  expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
-  await expect(prepare()).rejects.toThrow("requires the blackduck provider");
-});
+    // The previous publisher accepted this opaque evidence. Keep its checkpoint
+    // filename and digests so this exercises recovery across the provider change.
+    const directory = join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "external-finding-publications",
+    );
+    const request = {
+      request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
+      repository: {
+        id: selected.repository,
+        repo_connector_id: "github",
+        environment_id: f.state.environmentId,
+        reset_marker: f.state.marker,
+      },
+      source: { provider: selected.provider, source_key: selected.sourceKey },
+      items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
+    };
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(directory, filename),
+      JSON.stringify({
+        accountId: "synthetic-account",
+        requests: [request],
+        inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+      }),
+      { mode: 0o600 },
+    );
+
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).counts.created).toBe(1);
+    expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
+    await expect(prepare()).rejects.toThrow(
+      `requires the ${requiredProvider} provider`,
+    );
+  },
+);
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
@@ -1400,6 +1423,17 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
       correct.deps,
     ),
   ).rejects.toThrow(/requires the veracode provider/i);
+  for (const row of [
+    { ...veracodePolicyRow(), context_type: "SANDBOX" },
+    { ...veracodePolicyRow(), scan_type: "DYNAMIC" },
+  ]) {
+    const input = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
+    input.findings[0]!.source_finding_id = "sdk-id";
+    input.findings[0]!.evidence.source_data!["row"] = row;
+    await expect(
+      prepareNormalizedExternalPublication(input, selected, correct.deps),
+    ).rejects.toThrow(/context|STATIC/);
+  }
   const mixed = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
   const sdkFinding = structuredClone(mixed.findings[0]!);
   sdkFinding.source_finding_id = "sdk-id";

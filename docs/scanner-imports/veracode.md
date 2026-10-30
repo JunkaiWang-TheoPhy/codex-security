@@ -39,8 +39,11 @@ jq -s '.' "$out/pages.stream" > "$out/policy-findings.json"
 ```
 
 Collect every page from the configured API host and keep each page intact.
-Document any filter such as `violates_policy=true` and use it on every page.
-If the backlog changes during pagination, collect it again.
+Apply any Findings API filters when downloading the pages and use the same
+selection throughout. The importer checks page counts, application scope and
+the selection reported in the HAL links. Its preview includes the returned
+rows with their original evidence, including any annotations. If the backlog
+changes during pagination, collect it again.
 
 ## Preview and import
 

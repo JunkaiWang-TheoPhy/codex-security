@@ -21,6 +21,10 @@ import {
 
 const count = z.int().nonnegative();
 const positive = z.int().positive();
+const cvssScore = z
+  .union([z.string().trim().min(1), z.number()])
+  .pipe(z.coerce.number().min(0).max(10));
+const scores = ["severity", "cvss"] as const;
 const pageMetadata = z.object({
   total_elements: count,
   number: count,
@@ -113,15 +117,12 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
   ]);
 }
 
-function hasVeracodeEvidence(data: unknown, id: string): boolean {
-  if (/^veracode-static-policy:[a-f0-9]{64}$/u.test(id)) return true;
-  if (!isRecord(data)) return false;
-  const row = isRecord(data["row"]) ? data["row"] : data;
+function hasVeracodeEvidence(data: unknown): boolean {
   return (
-    row["context_type"] === "APPLICATION" &&
-    row["scan_type"] === "STATIC" &&
-    applicationGuid.safeParse(row["context_guid"]).success &&
-    positive.safeParse(row["issue_id"]).success
+    isRecord(data) &&
+    "applicationUrl" in data &&
+    "sourceRepositoryUrl" in data &&
+    "row" in data
   );
 }
 
@@ -131,7 +132,9 @@ function retainedRepository(
   target: ExternalImportTarget,
 ): { url: string; scope?: string } | undefined {
   const data = isRecord(sourceData) ? sourceData : {};
-  const native = hasVeracodeEvidence(data, id);
+  const native =
+    hasVeracodeEvidence(data) ||
+    /^veracode-static-policy:[a-f0-9]{64}$/u.test(id);
   if (!native && !("sourceRepositoryUrl" in data)) return;
   const url = declaredScannerRepositoryUrl(
     data["sourceRepositoryUrl"],
@@ -179,6 +182,8 @@ function selection(
   const scans = query.getAll("scan_type");
   if (
     query.has("context") ||
+    query.has("sca_dep_mode") ||
+    query.has("sca_scan_mode") ||
     scans.length > 1 ||
     scans.some((type) => type !== "STATIC")
   )
@@ -192,14 +197,32 @@ function selection(
     "include_exp_date",
   ]) {
     const flags = query.getAll(key);
-    if (flags.length === 1 && /^(true|false)$/iu.test(flags[0]!))
-      query.set(key, flags[0]!.toLowerCase());
-    else if (key === "violates_policy" && flags.length)
-      throw new Error("Invalid Veracode violates_policy selection.");
+    if (!flags.length) continue;
+    if (flags.length !== 1 || !/^(true|false)$/iu.test(flags[0]!))
+      throw new Error(`Invalid Veracode ${key} selection.`);
+    query.set(key, flags[0]!.toLowerCase());
   }
   for (const key of ["cwe", "finding_category"]) {
-    const ids = query.getAll(key).flatMap((value) => value.split(","));
+    const ids = query
+      .getAll(key)
+      .flatMap((value) =>
+        value.split(",").map((id) => id.replace(/^0+(?=\d)/u, "")),
+      );
     if (ids.length) query.set(key, [...new Set(ids)].sort().join(","));
+  }
+  for (const field of scores) {
+    for (const key of [field, `${field}_gte`]) {
+      const values = query.getAll(key);
+      if (!values.length) continue;
+      const value = values[0]!;
+      const score =
+        field === "severity"
+          ? /^[0-5]$/u.test(value) && Number(value)
+          : cvssScore.safeParse(value).data;
+      if (values.length !== 1 || typeof score !== "number")
+        throw new Error(`Invalid Veracode ${key} selection.`);
+      query.set(key, String(score));
+    }
   }
   // Collection self links may omit pagination. Navigation uses the API defaults.
   for (const [key, expected, defaultValue] of [
@@ -307,14 +330,6 @@ function readPage(input: unknown) {
   return { rows, scope, query, filter, number, size, total, pages };
 }
 
-function severitySelection(query: URLSearchParams, key: string): number | null {
-  const values = query.getAll(key);
-  if (!values.length) return null;
-  if (values.length !== 1 || !/^[0-5]$/u.test(values[0]!))
-    throw new Error(`Invalid Veracode ${key} selection.`);
-  return Number(values[0]);
-}
-
 function readReport(input: unknown) {
   const pages = (Array.isArray(input) ? input : [input])
     .map(readPage)
@@ -336,8 +351,9 @@ function readReport(input: unknown) {
       "Supply every Veracode page exactly once with stable totals, selection, origin and application context.",
     );
   const { scope, query } = first;
-  const exactSeverity = severitySelection(query, "severity");
-  const minimumSeverity = severitySelection(query, "severity_gte");
+  const selectedScores = scores.filter(
+    (field) => query.has(field) || query.has(`${field}_gte`),
+  );
   const staticOnly = query.has("scan_type");
   const violates = query.get("violates_policy");
   const newOnly = query.get("new") === "true";
@@ -351,11 +367,18 @@ function readReport(input: unknown) {
       requireApplication(row, scope);
       if (
         newOnly &&
-        record(row["finding_status"], "Veracode finding_status")["new"] ===
-          false
+        record(row["finding_status"], "Veracode finding_status")["new"] !== true
       )
         throw new Error("Veracode finding contradicts the new selection.");
-      if (cwes || categories) {
+      if (
+        query.get("include_annot") === "false" &&
+        Array.isArray(row["annotations"]) &&
+        row["annotations"].length
+      )
+        throw new Error(
+          "Veracode finding contradicts the include_annot selection.",
+        );
+      if (cwes || categories || selectedScores.length) {
         const details = record(
           row["finding_details"],
           "Veracode finding_details",
@@ -364,31 +387,30 @@ function readReport(input: unknown) {
           ["cwe", cwes],
           ["finding_category", categories],
         ] as const) {
-          const entry = details[field];
+          if (!ids) continue;
+          const entry = record(details[field], `Veracode ${field}`);
+          const id = integer(entry["id"], `${field} ID`);
+          if (!ids.includes(String(id)))
+            throw new Error(
+              `Veracode finding contradicts the ${field} selection.`,
+            );
+        }
+        for (const field of selectedScores) {
+          const score =
+            field === "severity"
+              ? integer(details[field], field)
+              : cvssScore.safeParse(details[field]).data;
+          const exact = query.get(field);
+          const minimum = query.get(`${field}_gte`);
           if (
-            ids &&
-            isRecord(entry) &&
-            typeof entry["id"] === "number" &&
-            !ids.includes(String(entry["id"]))
+            score === undefined ||
+            (exact !== null && score !== Number(exact)) ||
+            (minimum !== null && score < Number(minimum))
           )
             throw new Error(
               `Veracode finding contradicts the ${field} selection.`,
             );
         }
-      }
-      if (exactSeverity !== null || minimumSeverity !== null) {
-        const details = record(
-          row["finding_details"],
-          "Veracode finding_details",
-        );
-        const severity = integer(details["severity"], "severity");
-        if (
-          (exactSeverity !== null && severity !== exactSeverity) ||
-          (minimumSeverity !== null && severity < minimumSeverity)
-        )
-          throw new Error(
-            "Veracode finding contradicts the severity selection.",
-          );
       }
       if (staticOnly && row["scan_type"] !== "STATIC")
         throw new Error(

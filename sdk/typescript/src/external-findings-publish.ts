@@ -753,11 +753,6 @@ async function preparePublicationInput(
       findings,
       "cloud",
     );
-    const veracode = veracodeReportRepositories(
-      options.provider,
-      findings,
-      "cloud",
-    );
     const binding = inspectorReportRepository(
       options.provider,
       findings,
@@ -775,7 +770,14 @@ async function preparePublicationInput(
     }
     if (binding) requireDestination(binding.findingId, binding.url);
     for (const [id, source] of blackDuck) requireDestination(id, source.url);
-    for (const [id, source] of veracode) requireDestination(id, source.url);
+    if (!saved || options.provider === "veracode") {
+      const veracode = veracodeReportRepositories(
+        options.provider,
+        findings,
+        "cloud",
+      );
+      for (const [id, source] of veracode) requireDestination(id, source.url);
+    }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const urls = [

@@ -175,7 +175,7 @@ test("matches row filters and equivalent HAL list and boolean selections", () =>
       if (rel === "application") continue;
       link.href +=
         rel === "self"
-          ? "&cwe=79,89&finding_category=4,20&include_annot=TRUE"
+          ? "&cwe=079,89&finding_category=04,20&include_annot=TRUE"
           : "&cwe=89&cwe=79&finding_category=20,4&include_annot=true";
     }
   }
@@ -200,6 +200,49 @@ test("matches row filters and equivalent HAL list and boolean selections", () =>
   ]);
   page._links.self.href += "&new=false";
   expect(normalize(page).findings).toHaveLength(2);
+});
+
+test("checks explicit score, annotation and new-finding selections before retaining a row", () => {
+  const row = veracodePolicyRow();
+  const native = {
+    ...row,
+    finding_details: { ...row.finding_details, cvss: "9.1" },
+    annotations: [{ comment: "Example annotation" }],
+    finding_status: { ...row.finding_status, new: "false" },
+  };
+  const page = veracodePolicyPage([native]);
+  const self = page._links.self.href;
+  for (const [query, reason] of [
+    ["cvss_gte=9.2", "cvss"],
+    ["cvss=9", "cvss"],
+    ["include_annot=false", "include_annot"],
+    ["new=true", "new"],
+    ["new=false&new=true", "new"],
+  ] as const) {
+    page._links.self.href = self + "&" + query;
+    expect(() => normalize(page)).toThrow(reason);
+  }
+  page._links.self.href = self + "&cvss=9.10&include_annot=true";
+  expect(
+    normalize({
+      ...page,
+      _links: {
+        ...page._links,
+        first: { href: self + "&cvss=9.1&include_annot=TRUE" },
+      },
+    }).findings,
+  ).toHaveLength(1);
+  page._links.self.href = self + "&finding_category=4";
+  const wrong = {
+    ...native,
+    finding_details: {
+      ...native.finding_details,
+      finding_category: { id: "20", name: "Other" },
+    },
+  };
+  expect(() =>
+    normalize({ ...page, _embedded: { findings: [wrong] } }),
+  ).toThrow(/finding_category/);
 });
 
 test("accepts a scoped native empty page but rejects errors, summaries, Pipeline and raw row arrays", () => {
@@ -268,6 +311,8 @@ test("never widens the app, host, sandbox or requested engine, including through
     self.replace("STATIC", "SCA"),
     self + `&context=${row.context_guid}`,
     self + "&scan_type=DAST",
+    self + "&sca_dep_mode=DIRECT",
+    self + "&sca_scan_mode=UPLOAD",
     self.replace("page=0", "page=1"),
     self.replace("size=20", "size=1"),
     self.replace("/findings", "/summary"),
