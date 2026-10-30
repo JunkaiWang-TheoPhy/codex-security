@@ -22,8 +22,8 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import { blackDuckReportRepositories } from "./blackduck-findings.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
+import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -246,6 +246,50 @@ function matchingRemote(
       right.account === undefined ||
       left.account === right.account)
   );
+}
+
+function localRepositoryPlatform(
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  bound: boolean,
+) {
+  const githubKey = (url: string) =>
+    remoteRepository(url, "github", bound)?.key;
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = githubKey(source.url);
+      return key === undefined ? [] : [key];
+    }),
+  );
+  return (source: ExternalSourceRepository): Provider => {
+    if (source.platform === "github") return "github";
+    if (githubRepositories.size === 0) return provider;
+    const key = githubKey(source.url);
+    return key !== undefined && githubRepositories.has(key)
+      ? "github"
+      : provider;
+  };
+}
+
+function sameScannerRepositories(
+  urls: Iterable<string>,
+  platformFor: (source: ExternalSourceRepository) => Provider,
+): boolean {
+  let known: RemoteRepositoryIdentity | undefined;
+  for (const url of urls) {
+    const remote = remoteRepository(url, platformFor({ url }), true) ?? {
+      key: url,
+    };
+    if (known && !matchingRemote(known, remote)) return false;
+    // HTTPS does not specify the login or path interpretation carried by SSH.
+    known = {
+      key: remote.key,
+      account: remote.account ?? known?.account,
+      homeRelative: remote.homeRelative ?? known?.homeRelative,
+    };
+  }
+  return true;
 }
 
 async function bareMetadataRoots(
@@ -493,33 +537,17 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const identity = (url: string, platform: Provider) =>
-    remoteRepository(
-      url,
-      platform,
-      provider === "inspector" ||
-        provider === "blackduck" ||
-        provider === "veracode",
-    );
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = identity(source.url, "github")?.key;
-      return key === undefined ? [] : [key];
-    }),
-  );
+  const bound =
+    provider === "inspector" ||
+    provider === "blackduck" ||
+    provider === "veracode";
+  const platformFor = localRepositoryPlatform(provider, sources, bound);
   for (const source of sources) {
-    const githubKey = identity(source.url, "github")?.key;
-    const sourceProvider =
-      source.platform === "github" ||
-      (githubKey !== undefined && githubRepositories.has(githubKey))
-        ? "github"
-        : provider;
-    const targets = remotes.flatMap(
-      (remote) => identity(remote, sourceProvider) ?? [],
-    );
+    const platform = platformFor(source);
+    const identity = (url: string) => remoteRepository(url, platform, bound);
+    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
     if (!targets.length) continue;
-    const target = identity(source.url, sourceProvider);
+    const target = identity(source.url);
     if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
@@ -639,35 +667,20 @@ export async function prepareLocalImport(
     options.repository,
     dependencies,
   );
-  function sameScannerRepositories(urls: Iterable<string>): boolean {
-    let known: RemoteRepositoryIdentity | undefined;
-    for (const url of urls) {
-      const remote = remoteRepository(url, options.provider, true) ?? {
-        key: url,
-      };
-      if (known && !matchingRemote(known, remote)) return false;
-      // HTTPS does not specify the login or path interpretation carried by SSH.
-      known = {
-        key: remote.key,
-        account: remote.account ?? known?.account,
-        homeRelative: remote.homeRelative ?? known?.homeRelative,
-      };
-    }
-    return true;
-  }
   const sources = new Map<string, ExternalSourceRepository>();
-  const blackDuck = blackDuckReportRepositories(
+  const platformFor = localRepositoryPlatform(
     options.provider,
-    current.findings,
-    "local",
-    sameScannerRepositories,
+    dependencies.sourceRepositories ?? [],
+    true,
   );
-  const veracode = veracodeReportRepositories(
-    options.provider,
-    current.findings,
-    "local",
-    sameScannerRepositories,
-  );
+  const bound = [
+    blackDuckReportRepositories,
+    veracodeReportRepositories,
+  ].flatMap((repositories) => [
+    ...repositories(options.provider, current.findings, "local", (urls) =>
+      sameScannerRepositories(urls, platformFor),
+    ).values(),
+  ]);
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
@@ -690,8 +703,7 @@ export async function prepareLocalImport(
   }
   for (const source of [
     ...(inspector ? [inspector] : []),
-    ...blackDuck.values(),
-    ...veracode.values(),
+    ...bound,
     ...(dependencies.sourceRepositories ?? []),
   ]) {
     // A reader's platform must not loosen an operator-supplied Inspector map.
