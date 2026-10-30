@@ -1331,14 +1331,30 @@ describe("npm package tar listings", () => {
       const contractPath = join(root, "plugin contract.json");
       const logPath = join(root, "tar calls.jsonl");
       const adjacentTarMarker = join(root, "archive tar ran");
+      const pluginFiles = Array.from(
+        { length: 180 },
+        (_, i) =>
+          `fixtures/long-package-member-name-for-the-windows-command-line-${i}.txt`,
+      );
       const tarBytes = packageTar({
         compatibleLayout: true,
         rootDirectoryMode: 0o555,
         readmeMode: 0,
+        additionalRecords: pluginFiles.map((path) =>
+          tarRecord(Buffer.alloc(0), {
+            name: `package/_bundled_plugin/${path}`,
+          }),
+        ),
       });
       const archiveContents = gzipSync(tarBytes, { level: 0 });
       writeFileSync(archivePath, archiveContents);
-      writeFileSync(contractPath, JSON.stringify(pluginContract));
+      writeFileSync(
+        contractPath,
+        JSON.stringify({
+          ...pluginContract,
+          shippedExact: [...pluginContract.shippedExact, ...pluginFiles],
+        }),
+      );
 
       const environment: NodeJS.ProcessEnv = { ...process.env };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
@@ -1454,6 +1470,7 @@ process.exit(result.status ?? 1);
         "-",
         "-C",
       ]);
+      expect(calls[2]!.args.join(" ").length).toBeLessThan(32_767);
 
       environment["TAR_PROXY_FAIL_EXTRACT"] = "true";
       const failed = await checkPackage(

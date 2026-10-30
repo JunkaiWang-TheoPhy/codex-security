@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import { readFile, realpath, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -86,9 +86,8 @@ test.each([undefined, "0", "1"])(
       Response.json({
         hash_used: "sha256",
         dynamic_configs: {
-          [createHash("sha256")
-            .update("codex_security_default_severity_rubric")
-            .digest("base64")]: { value: policy },
+          [hash("sha256", "codex_security_default_severity_rubric", "base64")]:
+            { value: policy },
         },
       }),
     );
@@ -107,9 +106,7 @@ test.each([undefined, "0", "1"])(
         enabled === "1"
           ? {
               ...policy,
-              sha256: createHash("sha256")
-                .update(policy.markdown)
-                .digest("hex"),
+              sha256: hash("sha256", policy.markdown),
             }
           : rubricSource.bundledSeverityRubric;
       expect(result.status).toBe("completed");
@@ -130,9 +127,8 @@ test.each(["0", "1"])(
       Response.json({
         hash_used: "sha256",
         dynamic_configs: {
-          [createHash("sha256")
-            .update("codex_security_default_severity_rubric")
-            .digest("base64")]: { value: policy },
+          [hash("sha256", "codex_security_default_severity_rubric", "base64")]:
+            { value: policy },
         },
       }),
     );
@@ -173,9 +169,7 @@ test.each(["0", "1"])(
         enabled === "1"
           ? {
               ...policy,
-              sha256: createHash("sha256")
-                .update(policy.markdown)
-                .digest("hex"),
+              sha256: hash("sha256", policy.markdown),
             }
           : rubricSource.bundledSeverityRubric;
       expect(requests).toHaveLength(1);
@@ -529,9 +523,7 @@ test.each(sealedScopes)(
     if (normalized.length > 1) expect(report).not.toContain("service-c");
     for (const artifact of result.artifacts) {
       const data = await readFile(join(result.outputDirectory, artifact.path));
-      expect(artifact.sha256).toBe(
-        createHash("sha256").update(data).digest("hex"),
-      );
+      expect(artifact.sha256).toBe(hash("sha256", data));
       expect(artifact.bytes).toBe(data.byteLength);
     }
     const artifactPaths = result.artifacts.map((artifact) => artifact.path);

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mock } from "node:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +16,6 @@ import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
-import type * as RubricSource from "../../../../sdk/typescript/src/severity-rubric.js";
 
 export async function testDeepScanContextSnapshots({
   CodexSdkWorkerExecutor,
@@ -33,15 +31,12 @@ export async function testDeepScanContextSnapshots({
     WorkbenchDeepScanStore,
     DeepScanWorkerRunner,
     createDeepScanArtifacts,
-    getDefaultSeverityRubric,
-    severityRubricInstructions,
   } = (await importModule({
     stdin: {
       contents: [
         'export { WorkbenchDeepScanStore } from "./store.ts";',
         'export { DeepScanWorkerRunner } from "./worker-runner.ts";',
         'export { createDeepScanArtifacts } from "./artifacts.ts";',
-        `export { getDefaultSeverityRubric, severityRubricInstructions } from ${JSON.stringify(path.join(pluginRoot, "../../sdk/typescript/src/severity-rubric.ts"))};`,
       ].join("\n"),
       resolveDir: path.join(pluginRoot, "mcp-app/src/deep-scan"),
     },
@@ -50,8 +45,6 @@ export async function testDeepScanContextSnapshots({
     WorkbenchDeepScanStore: typeof Store;
     DeepScanWorkerRunner: typeof Runner;
     createDeepScanArtifacts: typeof Artifacts;
-    getDefaultSeverityRubric: typeof RubricSource.getDefaultSeverityRubric;
-    severityRubricInstructions: typeof RubricSource.severityRubricInstructions;
   };
   const fixture = await fakeCodexFixture();
   // Concurrent children record their input in their own working directories.
@@ -71,18 +64,6 @@ export async function testDeepScanContextSnapshots({
   const previousDeepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
   const rubricSetting = "CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC";
   const previousRubricSetting = process.env[rubricSetting];
-  const fetchRubric = mock.method(globalThis, "fetch", async () =>
-    Response.json({
-      hash_used: "sha256",
-      dynamic_configs: {
-        [createHash("sha256")
-          .update("codex_security_default_severity_rubric")
-          .digest("base64")]: {
-          value: { markdown: "# Synthetic severity policy\n", revision: 17 },
-        },
-      },
-    }),
-  );
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   const environment = {
     ...process.env,
@@ -92,31 +73,37 @@ export async function testDeepScanContextSnapshots({
   try {
     const contexts: {
       userContext?: string;
-      severityRubric?: RubricSource.SeverityRubricSnapshot;
-      remoteSetting?: "1" | "0";
+      initialRemoteRubricSetting?: "1" | "0";
     }[] = [{ userContext: "Review authentication only." }, {}];
-    for (const remoteSetting of ["1", "0"] as const) {
-      const severityRubric = await getDefaultSeverityRubric({
-        environment: { [rubricSetting]: remoteSetting },
-      });
+    for (const { initialRemoteRubricSetting, markdown, revision } of [
+      {
+        initialRemoteRubricSetting: "1",
+        markdown: "# Hosted policy\n",
+        revision: 17,
+      },
+      {
+        initialRemoteRubricSetting: "0",
+        markdown: "# Bundled policy\n",
+        revision: 1,
+      },
+    ] as const) {
       contexts.push({
-        userContext: severityRubricInstructions(severityRubric),
-        severityRubric,
-        remoteSetting,
+        userContext: JSON.stringify({
+          severityRubric: {
+            markdown,
+            revision,
+            sha256: createHash("sha256").update(markdown).digest("hex"),
+          },
+        }),
+        initialRemoteRubricSetting,
       });
     }
-    assert.equal(fetchRubric.mock.calls.length, 1);
-    assert.equal(contexts.at(-2)?.severityRubric?.revision, 17);
-    assert.notEqual(
-      contexts.at(-2)?.severityRubric?.sha256,
-      contexts.at(-1)?.severityRubric?.sha256,
-    );
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const outcomes = await Promise.allSettled(
       contexts.map(
-        async ({ userContext, severityRubric, remoteSetting }, index) => {
+        async ({ userContext, initialRemoteRubricSetting }, index) => {
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
           const maxTimeHours = 1.5 + index;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
@@ -180,10 +167,10 @@ export async function testDeepScanContextSnapshots({
           const executor = {
             async run(request: CodexWorkerRequest) {
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfig;
-              if (remoteSetting !== undefined)
+              if (initialRemoteRubricSetting !== undefined)
                 process.env[rubricSetting] = request.resumeThreadId
-                  ? remoteSetting
-                  : remoteSetting === "1"
+                  ? initialRemoteRubricSetting
+                  : initialRemoteRubricSetting === "1"
                     ? "0"
                     : "1";
               const result = await sdk.run(request);
@@ -283,14 +270,14 @@ export async function testDeepScanContextSnapshots({
             const resumed = invocations[offset + 1]!;
             assert.equal(fresh.invocation.argv.includes("resume"), false);
             assert.equal(resumed.invocation.argv.includes("resume"), true);
-            if (remoteSetting !== undefined) {
+            if (initialRemoteRubricSetting !== undefined) {
               assert.equal(
                 fresh.invocation.runtimeEnvironment[rubricSetting],
-                remoteSetting === "1" ? "0" : "1",
+                initialRemoteRubricSetting === "1" ? "0" : "1",
               );
               assert.equal(
                 resumed.invocation.runtimeEnvironment[rubricSetting],
-                remoteSetting,
+                initialRemoteRubricSetting,
               );
             }
             for (const { invocation } of [fresh, resumed]) {
@@ -313,12 +300,6 @@ export async function testDeepScanContextSnapshots({
             if (fresh.kind === "discovery") {
               assert.equal(context.userContext, userContext ?? null);
               assert.equal(context.scanId, run.scanId);
-              if (severityRubric !== undefined)
-                assert.deepEqual(
-                  JSON.parse(context.userContext.split("\n").at(-1))
-                    .severityRubric,
-                  severityRubric,
-                );
             } else {
               assert.equal(Object.hasOwn(context, "userContext"), false);
               assert.deepEqual(context.claimedWorkerIds, [
@@ -349,9 +330,7 @@ export async function testDeepScanContextSnapshots({
     for (const outcome of outcomes) {
       if (outcome.status === "rejected") throw outcome.reason;
     }
-    assert.equal(fetchRubric.mock.calls.length, 1);
   } finally {
-    fetchRubric.mock.restore();
     if (previousRubricSetting === undefined) delete process.env[rubricSetting];
     else process.env[rubricSetting] = previousRubricSetting;
     if (previousPath === undefined) delete process.env.CODEX_CLI_PATH;
