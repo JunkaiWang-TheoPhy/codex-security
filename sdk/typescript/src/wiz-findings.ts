@@ -540,7 +540,7 @@ async function readFindingInput(path: string): Promise<FindingInput> {
           records: csv.map((value) => ({ value, kind: "sca_csv" })),
           repositories: new Map(),
         };
-      payload = parseJsonOrJsonl(contents);
+      payload = parseJsonOrJsonl(contents, path);
     }
     return records(payload);
   } catch (cause) {

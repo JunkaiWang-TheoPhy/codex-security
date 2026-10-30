@@ -55,6 +55,15 @@ export function normalizeEndorFindings(
         "The Endor list response has another page. Supply a complete export or an explicitly selected array.",
       );
     }
+    // Endor can omit the empty repeated objects field, leaving only pagination.
+    if (
+      list["objects"] === undefined &&
+      (Object.keys(list).some((key) => key !== "response") ||
+        Object.keys(response).some(
+          (key) => key !== "next_page_id" && key !== "next_page_token",
+        ))
+    )
+      throw new Error("Expected Endor list.objects in the finding export.");
   }
   const values = list
     ? optionalArray(list["objects"], "Endor list.objects")

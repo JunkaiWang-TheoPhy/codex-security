@@ -155,13 +155,13 @@ export function normalizeSnykFindingsExport(
     "Snyk collection scans",
   )) {
     const scan = record(entry, "Snyk collection scan");
+    if (!parsed.read && scan["outcome"] === "succeeded")
+      requireEmptyIssueCount(scan["issueCount"], "Snyk plugin issueCount");
     if (scan["category"] !== "sca") continue;
     if (scan["outcome"] !== "succeeded")
       throw new Error(
         `Snyk plugin SCA scan did not succeed (outcome: ${String(scan["outcome"])}).${scan["error"] ? " " + JSON.stringify(scan["error"]) : ""}`,
       );
-    if (!parsed.read)
-      requireEmptyIssueCount(scan["issueCount"], "Snyk plugin SCA issueCount");
     successfulSca = true;
   }
   if (!parsed.read && !successfulSca)

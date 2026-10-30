@@ -126,7 +126,7 @@ import {
   EXTERNAL_FINDINGS_READERS,
 } from "./external-findings-read.js";
 import {
-  hasScannerDiagnostics,
+  hasNoExternalRecords,
   isEmptyExternalReport,
   type ExternalFindings,
 } from "./external-findings.js";
@@ -3752,22 +3752,12 @@ export async function main(
                   renderedOutput = "Dry run complete. No findings stored.\n";
                 return { ...preview, dryRun: true };
               }
-              if (!preview.read && hasScannerDiagnostics(preview))
-                throw new NoPublishableFindingsError(preview);
-              if (isEmptyExternalReport(preview)) {
-                controller.signal.throwIfAborted();
+              if (hasNoExternalRecords(preview)) {
+                const result = await prepared.import();
                 if (humanSummary)
                   renderedOutput =
                     "The report contains no findings. Nothing was stored.\n";
-                return {
-                  repository: preview.repository,
-                  ...(preview.report && { report: preview.report }),
-                  read: 0,
-                  ready: 0,
-                  excluded: [],
-                  findings: [],
-                  counts: { created: 0, updated: 0, unchanged: 0 },
-                };
+                return { ...result };
               }
               if (!(await confirmImport(preview, showPreview))) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";

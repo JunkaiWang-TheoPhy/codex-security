@@ -37,7 +37,8 @@ import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
-  isEmptyExternalReport,
+  NoPublishableFindingsError,
+  reportForJson,
   snapshotImportOptions,
   type ExternalFindings,
   type ExternalPublicationInput,
@@ -58,6 +59,8 @@ import type {
   ImportRepository,
   SourceReportSummary,
 } from "./external-import-models.js";
+
+export { NoPublishableFindingsError } from "./external-findings.js";
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
@@ -126,18 +129,6 @@ export class ExternalPublicationError extends CodexSecurityError {
     cause: unknown,
   ) {
     super(message, { cause });
-  }
-}
-
-/** No upload can be prepared. The selection retains every reader exclusion. */
-export class NoPublishableFindingsError extends CodexSecurityError {
-  constructor(public readonly selection: ExternalFindings) {
-    const diagnostics = reportForJson(selection.report)?.["errors"];
-    super(
-      isEmptyExternalReport(selection)
-        ? "No supported findings are ready to publish: the report is empty."
-        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
-    );
   }
 }
 
@@ -223,15 +214,6 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
     if (error.code === "ENOENT") return undefined;
     throw error;
   });
-}
-
-function reportForJson(report: ExternalFindings["report"]) {
-  const errors = report?.["errors"];
-  if (!Array.isArray(errors)) return report;
-  const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { message: entry.message } : entry,
-  );
-  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 async function writeAtomicJson(path: string, value: unknown): Promise<void> {

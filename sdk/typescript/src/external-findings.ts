@@ -31,13 +31,33 @@ export function hasScannerDiagnostics(input: ExternalFindings): boolean {
   return Array.isArray(errors) && errors.length > 0;
 }
 
+export function hasNoExternalRecords(input: ExternalFindings): boolean {
+  return input.read === 0 && !input.findings.length && !input.excluded.length;
+}
+
 export function isEmptyExternalReport(input: ExternalFindings): boolean {
-  return (
-    input.read === 0 &&
-    !input.findings.length &&
-    !input.excluded.length &&
-    !hasScannerDiagnostics(input)
+  return hasNoExternalRecords(input) && !hasScannerDiagnostics(input);
+}
+
+/** No findings can be imported. The selection retains every reader exclusion and diagnostic. */
+export class NoPublishableFindingsError extends CodexSecurityError {
+  constructor(public readonly selection: ExternalFindings) {
+    const diagnostics = reportForJson(selection.report)?.["errors"];
+    super(
+      isEmptyExternalReport(selection)
+        ? "No supported findings are ready to publish: the report is empty."
+        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
+    );
+  }
+}
+
+export function reportForJson(report: ExternalFindings["report"]) {
+  const errors = report?.["errors"];
+  if (!Array.isArray(errors)) return report;
+  const json = JSON.stringify(errors, (_key, entry: unknown) =>
+    entry instanceof Error ? { message: entry.message } : entry,
   );
+  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 /** @internal Keep earlier provider projections only for immutable request replay. */

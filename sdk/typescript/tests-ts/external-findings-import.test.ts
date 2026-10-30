@@ -133,6 +133,41 @@ test("cancels preparation while the source file read is pending", async () => {
   await expect(access(fixture.stateDirectory)).rejects.toThrow();
 });
 
+test("an empty Semgrep file still binds the declared source to the local checkout", async () => {
+  await using fixture = await localFindingsFixture({
+    remote: "https://github.com/example/project",
+  });
+  const file = join(fixture.root, "semgrep.json");
+  await writeFile(
+    file,
+    JSON.stringify({ version: "1.100.0", results: [], errors: [] }),
+  );
+  const options = {
+    repository: fixture.repository,
+    provider: "semgrep" as const,
+    sourceKey: "example/main",
+  };
+  const dependencies = { environment: fixture.environment };
+  await expect(
+    prepareLocalExternalImport(
+      file,
+      { ...options, sourceRepositoryUrl: "https://github.com/example/other" },
+      dependencies,
+    ),
+  ).rejects.toThrow("does not match a configured remote");
+  const prepared = await prepareLocalExternalImport(
+    file,
+    { ...options, sourceRepositoryUrl: "https://github.com/example/project" },
+    dependencies,
+  );
+  expect((await prepared.import()).counts).toEqual({
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+  });
+  await expect(access(fixture.stateDirectory)).rejects.toThrow();
+});
+
 test("Wiz JSON imports retain parsed evidence through SQLite readback and updates", async () => {
   await using fixture = await localFindingsFixture();
   const file = join(fixture.root, "wiz.json");

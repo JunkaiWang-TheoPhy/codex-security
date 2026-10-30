@@ -44,6 +44,22 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
     findings: [],
     excluded: [],
   });
+  for (const list of [{}, { response: { next_page_token: 0 } }]) {
+    expect(normalizeEndorFindings({ list })).toEqual(
+      normalizeEndorFindings([]),
+    );
+  }
+});
+
+test("an Endor response with no objects and unrecognized list data is not an empty export", () => {
+  for (const list of [
+    { items: [endorFinding()] },
+    { response: { total_size: 13 } },
+  ]) {
+    expect(() => normalizeEndorFindings({ list })).toThrow(
+      "Endor list.objects",
+    );
+  }
 });
 
 test.each(["sast_data", "ai_sast_data"])(

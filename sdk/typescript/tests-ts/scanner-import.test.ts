@@ -90,11 +90,39 @@ test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
         { level: "note", message: { text: "Synthetic scan note" } },
       ],
     };
-    expect(
-      successfulSarifInvocations({ invocations: [invocation] }, "Example"),
-    ).toEqual([invocation]);
+    const run = { invocations: [invocation], conversion: { invocation } };
+    expect(successfulSarifInvocations(run, "Example")).toEqual([invocation]);
   },
 );
+
+test("malformed SARIF notifications cannot hide a scanner error", () => {
+  for (const [notifications, message] of [
+    [{ level: "error" }, "must be an array"],
+    [[null], "must be an object"],
+  ] as const) {
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: notifications,
+    };
+    const run = { invocations: [invocation] };
+    expect(() => successfulSarifInvocations(run, "Example")).toThrow(message);
+  }
+});
+
+test("SARIF validates converter failures separately from scanner invocations", () => {
+  const converted = (invocation: unknown) =>
+    successfulSarifInvocations({ conversion: { invocation } }, "Example");
+  expect(() => converted({ executionSuccessful: false })).toThrow(
+    "unsuccessful invocation",
+  );
+  const failedConversion = {
+    executionSuccessful: true,
+    toolExecutionNotifications: [
+      { level: "error", message: { text: "Synthetic conversion failure" } },
+    ],
+  };
+  expect(() => converted(failedConversion)).toThrow("scan error notifications");
+});
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {
   expect(relativePath("schema:prod.json")).toBe("schema:prod.json");

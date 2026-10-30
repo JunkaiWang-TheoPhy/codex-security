@@ -25,36 +25,39 @@ export function successfulSarifInvocations(
   run: Record<string, unknown>,
   producer: string,
 ): Record<string, unknown>[] {
-  return optionalArray(run["invocations"], `${producer} invocations`).map(
-    (value) => {
-      const invocation = record(value, `${producer} invocation`);
-      const successful = invocation["executionSuccessful"];
-      if (successful === false)
-        throw new Error(
-          `${producer} SARIF contains an unsuccessful invocation.`,
-        );
-      if (successful !== true)
-        throw new Error(
-          `${producer} SARIF executionSuccessful must be a boolean.`,
-        );
-      for (const property of [
-        "toolExecutionNotifications",
-        "toolConfigurationNotifications",
-      ]) {
-        const notifications = invocation[property];
-        if (
-          Array.isArray(notifications) &&
-          notifications.some(
-            (notification) =>
-              isRecord(notification) && notification["level"] === "error",
-          )
-        )
+  function validateInvocation(value: unknown): Record<string, unknown> {
+    const invocation = record(value, `${producer} invocation`);
+    const successful = invocation["executionSuccessful"];
+    if (successful === false)
+      throw new Error(`${producer} SARIF contains an unsuccessful invocation.`);
+    if (successful !== true)
+      throw new Error(
+        `${producer} SARIF executionSuccessful must be a boolean.`,
+      );
+    for (const property of [
+      "toolExecutionNotifications",
+      "toolConfigurationNotifications",
+    ]) {
+      const notifications = optionalArray(
+        invocation[property],
+        `${producer} ${property}`,
+      );
+      for (const entry of notifications) {
+        if (record(entry, `${producer} notification`)["level"] === "error")
           throw new Error(
             `${producer} SARIF contains scan error notifications.`,
           );
       }
-      return invocation;
-    },
+    }
+    return invocation;
+  }
+  if (run["conversion"] !== undefined) {
+    const conversion = record(run["conversion"], `${producer} conversion`);
+    if (conversion["invocation"] !== undefined)
+      validateInvocation(conversion["invocation"]);
+  }
+  return optionalArray(run["invocations"], `${producer} invocations`).map(
+    validateInvocation,
   );
 }
 
@@ -102,14 +105,13 @@ export async function readScannerText(path: string): Promise<string> {
   return strictUtf8.decode(await readScannerBytes(path));
 }
 
-export function parseJsonOrJsonl(contents: string): unknown {
+export function parseJsonOrJsonl(contents: string, path: string): unknown {
   try {
     return JSON.parse(contents);
-  } catch {
-    return contents
-      .split(/\r?\n/u)
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line));
+  } catch (error) {
+    const lines = contents.split(/\r?\n/u).filter((line) => line.trim());
+    if (!lines.length && /\.(?:json|csv)(?:\.gz)?$/iu.test(path)) throw error;
+    return lines.map((line) => JSON.parse(line));
   }
 }
 

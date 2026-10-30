@@ -156,13 +156,16 @@ export function normalizeSemgrepFindings(
     return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
+  const { results, paths: _paths, time: _time, ...context } = document;
+  const rows = array(results, "Semgrep results");
+  if (!rows.length && document["errors"] === undefined)
+    throw new Error("An empty Semgrep report must include its errors array.");
   if (optionalArray(document["errors"], "Semgrep errors").length)
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
-    array(results, "Semgrep results"),
+    rows,
     (value) =>
       projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
         origin: "Semgrep",

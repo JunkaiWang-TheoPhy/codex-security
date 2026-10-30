@@ -1758,9 +1758,10 @@ still checked, but no workbench database is created and all counts are zero.
 An unreadable or unsuccessful scan is not an empty import. If every record is
 excluded from Cloud, the command fails; JSON and JSONL include the full
 `excluded` array with each record's position, source ID if known, and reason.
-Each SARIF run must include a results array. Failed execution, error
-notifications, and malformed result collections stop the import. An empty Snyk plugin bundle must show a successful Open Source (SCA)
-scan; a failed or unrequested SCA scan is not evidence of zero vulnerabilities.
+A SARIF log may have an empty `runs` array. Every run it does contain must
+include a results array. Failed execution, error notifications, and malformed
+result collections stop the import. An empty Snyk plugin bundle must show a
+successful Open Source (SCA) scan.
 
 For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
 Failed and interrupted imports set the envelope's `ok` to `false`, with
@@ -1773,7 +1774,10 @@ Ctrl-C and SIGTERM retain exit codes 130 and 143. Interrupted JSON output preser
 `unacknowledged`. A lost response can mean unacknowledged findings were accepted;
 resume the saved submission rather than treating them as never uploaded. When
 available, `savedSubmission` identifies the checkpoint to resume by repeating the
-same command. Review `error` before retrying; a repository reset retires the old
+same command. If a newer CLI rejects an older scanner report during parsing,
+resume the saved submission with the CLI version that prepared it. Use the
+original file, state directory, account, and destination so the retry sends the
+approved request. Review `error` before retrying; a repository reset retires the old
 submission and requires fresh approval. Correct local exclusions or final source
 conflicts before preparing a new submission.
 
