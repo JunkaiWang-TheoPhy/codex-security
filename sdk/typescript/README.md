@@ -746,9 +746,12 @@ repository evidence. Preserve `snykRestContext` when combining normalized Snyk
 findings so an empty hosted project can still verify its repository.
 Use `sourceRepositoryPlatform: "other"` for case-sensitive
 paths on a custom host. Local import compares the configured fetch URLs after Git
-applies URL rewrites. It does this offline, regardless of SSH commands or installed
-transport helpers. If a custom helper takes an opaque argument, configure a
-separate remote with a matching URL.
+applies URL rewrites. In an HTTP(S) URL the scheme is case-insensitive, so
+`HTTPS://example.test/team/repo` and `https://example.test/team/repo` match.
+The comparison works offline, including in checkouts with custom SSH commands or
+no installed transport helper. An explicit Git helper name (`helper::argument`
+or `remote.<name>.vcs`) is case-sensitive. For an opaque helper argument,
+configure a separate remote with a matching URL.
 
 The Snyk REST and Semgrep Platform readers generate a `source_finding_id` for
 each occurrence within its scanner project. The normalized SDK uses the ID

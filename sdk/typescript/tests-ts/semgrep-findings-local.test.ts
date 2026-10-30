@@ -88,6 +88,28 @@ test("a retained Platform row binds mixed SARIF provenance in either order", asy
   }
 });
 
+test("a prepared Platform import retains its selected runner and signal", async () => {
+  await using fixture = await platformCheckout(repositoryUrl);
+  await fixture.writeJson(platformReport());
+  const dependencies = {
+    ...fixture.dependencies,
+    signal: new AbortController().signal,
+    runWorkbench: async () => {
+      throw new Error("original runner");
+    },
+  };
+  const prepared = await prepareLocalExternalImport(
+    fixture.file,
+    fixture.options,
+    dependencies,
+  );
+  dependencies.signal = AbortSignal.abort();
+  dependencies.runWorkbench = async () => {
+    throw new Error("replacement runner");
+  };
+  await expect(prepared.import()).rejects.toThrow("original runner");
+});
+
 test("a saved Platform collection replays and updates unassessed findings in SQLite", async () => {
   await using fixture = await platformCheckout(
     repositoryUrl,

@@ -11,6 +11,8 @@ import {
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
   normalizeSnykFindingsExport,
+  normalizeSemgrepSarif,
+  type SemgrepImportOptions,
   collectSnykIssues,
   collectSemgrepPlatformFindings,
   prepareNormalizedExternalPublication,
@@ -444,6 +446,15 @@ export async function importLocalFile(
 
 export function snykPluginFindings(bundle: unknown): ExternalFindings {
   return normalizeSnykFindingsExport(bundle);
+}
+
+export function semgrepSarifFindings(
+  report: unknown,
+  options: Parameters<typeof normalizeSemgrepSarif>[1],
+): ExternalFindings {
+  const declared: SemgrepImportOptions = options;
+  declared.sourceRepositoryUrl satisfies string;
+  return normalizeSemgrepSarif(report, declared);
 }
 
 export const hostedCollectors = {

@@ -24,6 +24,7 @@ import {
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
+import { validRfc3339DateTime } from "./timestamps.js";
 import {
   array,
   normalizeRecords,
@@ -690,7 +691,7 @@ export function normalizeSnykIssues(
       );
       const updated = Date.parse(updatedAt);
       if (
-        !/(?:z|[+-]\d{2}:\d{2})$/iu.test(updatedAt) ||
+        !validRfc3339DateTime(updatedAt) ||
         !Number.isFinite(updated) ||
         updated < 0
       )

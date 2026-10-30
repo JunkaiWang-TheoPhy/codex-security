@@ -1887,6 +1887,7 @@ describe("local normalized scanner findings", () => {
       ["", `example::foreign\n${sourceUrl}\nforeign`],
     ],
     [sourceUrl.replace("https:", "HTTPS:"), true, []],
+    ["HTTPS://github.com/example/foreign", false, []],
     [`HTTPS::${sourceUrl}`, false, []],
     ["ftp://github.com/example/project", true, []],
     ["ftp::ftp://github.com/example/project", false, []],

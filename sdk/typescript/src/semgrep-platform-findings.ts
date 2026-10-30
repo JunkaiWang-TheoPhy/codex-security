@@ -405,7 +405,7 @@ export function semgrepPlatformFindingRepository(
 
 export function normalizeSemgrepPlatformFindings(
   input: unknown,
-  options: string | SemgrepImportOptions = {},
+  options: string | Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): HostedExternalFindings & { sourceRepositoryUrl: string } {
   if (!isSemgrepPlatformReport(input))
@@ -419,7 +419,7 @@ export function normalizeSemgrepPlatformFindings(
 
 export function normalizePlatformReport(
   input: Record<string, unknown>,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions>,
   target: ExternalImportTarget,
   isGitHub: (url: string) => boolean = (url) =>
     isVerifiedGitHubRepository(url, options.sourceRepositories),

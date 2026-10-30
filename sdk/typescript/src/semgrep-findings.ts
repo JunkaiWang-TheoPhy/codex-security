@@ -40,12 +40,12 @@ import {
 
 export interface SemgrepImportOptions {
   /** Source repository declared by the caller; never inferred from the destination. */
-  sourceRepositoryUrl?: string;
+  sourceRepositoryUrl: string;
   /** Independently resolved sources used to verify GitHub Enterprise URLs in Platform reports. */
   sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
-function sourceRepository(options: SemgrepImportOptions): string {
+function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
@@ -159,7 +159,7 @@ function sarifIdentity(
 
 export function normalizeSemgrepFindings(
   input: unknown,
-  options: SemgrepImportOptions = {},
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): HostedExternalFindings {
   return normalizeSemgrepReport(input, options, target);
@@ -186,16 +186,16 @@ export function semgrepSarifSourceRepositories(
 /** @internal The file importer supplies its destination-specific repository comparison. */
 export function normalizeSemgrepReport(
   input: unknown,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions>,
   target: ExternalImportTarget,
   isGitHub?: (url: string) => boolean,
 ): HostedExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
     return normalizePlatformReport(document, options, target, isGitHub);
-  if (document["version"] === "2.1.0" && document["runs"] !== undefined)
-    return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
+  if (document["version"] === "2.1.0" && document["runs"] !== undefined)
+    return normalizeSarif(document, repositoryUrl, target);
   requiredText(document["version"], "Semgrep version");
   if (array(document["errors"] ?? [], "Semgrep errors").length)
     throw new Error(
@@ -223,7 +223,14 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
-  const document = record(input, "Semgrep SARIF");
+  return normalizeSarif(record(input, "Semgrep SARIF"), repositoryUrl, target);
+}
+
+function normalizeSarif(
+  document: Record<string, unknown>,
+  repositoryUrl: string,
+  target: ExternalImportTarget,
+): ExternalFindings {
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Semgrep SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
@@ -422,7 +429,10 @@ export function normalizeSemgrepSarif(
 
 export async function readSemgrepFindings(
   path: string,
-  { sourceRepositoryUrl, sourceRepositories }: SemgrepImportOptions = {},
+  {
+    sourceRepositoryUrl,
+    sourceRepositories,
+  }: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<HostedExternalFindings> {
   const options = {

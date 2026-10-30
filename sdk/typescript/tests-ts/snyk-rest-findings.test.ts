@@ -859,17 +859,19 @@ test("issue identity is stable across updates, resource IDs, pages and display n
   expect(new Set(scopes.map(id)).size).toBe(scopes.length);
 });
 
-test("normalizes Snyk updates only with an explicit time zone", () => {
+test("requires a valid zoned date-time for Snyk updates", () => {
   const report = envelope([
     issue({ key: "utc", updated_at: "2025-02-03T04:05:06Z" }),
     issue({ key: "offset", updated_at: "2025-02-02T20:05:06-08:00" }),
     issue({ key: "local", updated_at: "2025-02-03T04:05:06" }),
+    issue({ key: "trailing-z", updated_at: "2025-02-03Z" }),
+    issue({ key: "invalid-day", updated_at: "2025-02-30T04:05:06Z" }),
   ]);
   const output = normalizeSnykIssues(report);
   expect(
     output.findings.map(({ evidence }) => evidence.source_updated_at),
   ).toEqual([1738555506, 1738555506]);
-  expect(output.excluded).toMatchObject([{ position: 3 }]);
+  expect(output.excluded.map(({ position }) => position)).toEqual([3, 4, 5]);
 });
 
 test("duplicates, unsupported products and malformed records have explicit positional exclusions", () => {

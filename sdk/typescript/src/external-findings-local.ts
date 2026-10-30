@@ -622,8 +622,8 @@ async function requireMatchingRepository(
       }
       const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1] ?? "";
       const curl = /^(?:https?|ftps?):$/u.test(transport.toLowerCase());
-      // Match Git's configured URL without running or locating a transport.
-      // The standard curl helpers take a URL; custom helpers take opaque arguments.
+      // A configured URL has a case-insensitive scheme. An explicit Git helper
+      // has a case-sensitive name and only the standard curl names take URL arguments.
       const recognized = curl
         ? helper === undefined || /^(?:https?|ftps?)$/u.test(helper)
         : helper === undefined &&
