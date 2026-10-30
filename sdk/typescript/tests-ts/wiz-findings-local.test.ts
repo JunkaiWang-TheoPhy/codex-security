@@ -100,23 +100,31 @@ test.each(["CSV", "CSV gzip", "normalized JSONL", "normalized JSONL gzip"])(
   },
 );
 
-test("Wiz requires the installed HTTPS helper when a Git alias can handle the remote", async () => {
+test("Wiz verifies checkout-supplied HTTPS helpers and Git aliases against the installed helper", async () => {
   await using fixture = await localReportFixture(
     "wiz.csv",
     { provider: "wiz", sourceKey: "example-project:main" },
     { remote: repositoryUrl },
   );
   await writeFile(fixture.file, csvReport(row));
+  const helper =
+    "git-remote-https" + (process.platform === "win32" ? ".exe" : "");
+  const alternate = "git remote-ext origin 'git-upload-pack ../other.git'";
+  await writeFile(
+    join(fixture.repository, helper),
+    `#!/bin/sh\nexec ${alternate}\n`,
+    { mode: 0o755 },
+  );
+  Object.assign(fixture.environment, { GIT_EXEC_PATH: "." });
+  await expect(fixture.prepare()).rejects.toThrow("does not match");
   execFileSync("git", [
     "-C",
     fixture.repository,
     "config",
     "--file=.git/config",
     "alias.remote-https",
-    "!f() { git remote-ext origin 'git-upload-pack ../other.git'; }; f",
+    `!f() { ${alternate}; }; f`,
   ]);
-  const helper =
-    "git-remote-https" + (process.platform === "win32" ? ".exe" : "");
   const installed = execFileSync("git", ["--exec-path"], {
     encoding: "utf8",
     env: { ...fixture.environment, GIT_EXEC_PATH: undefined },

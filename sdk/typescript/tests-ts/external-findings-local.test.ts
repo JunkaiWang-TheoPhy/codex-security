@@ -2066,6 +2066,7 @@ describe("local normalized scanner findings", () => {
           { environment, sourceRepositories: [{ url: sourceUrl }] },
         );
       await prepare(url);
+      await prepare(`${scheme.toUpperCase()}://Git.Example.Test/Team/Repo`);
       for (const other of ["ftp", "ftps", "https"].filter(
         (candidate) => candidate !== scheme,
       ))

@@ -1283,6 +1283,11 @@ test.each(["open-source", "code"] as const)(
       });
       const unknownReport = withProject("github-enterprise", null);
       const unknown = normalizeSnykIssues(unknownReport, "local");
+      unknown.sourceRepositoryPlatform = "github";
+      unknown.snykRestContext = {
+        ...normalizedEmpty.snykRestContext,
+        project: unknownReport.project,
+      };
       await expect(fixture.prepareNormalized(unknown)).rejects.toThrow(
         /does not match a configured remote/,
       );
