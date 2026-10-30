@@ -1,5 +1,6 @@
 import { basename, relative } from "node:path";
 import stringWidth from "string-width";
+import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
 import {
   formatCoverageScopeParts,
@@ -18,9 +19,6 @@ type RendererOptions = {
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
-const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
 
 const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   resolved: { color: 32, icon: "✓" },
@@ -58,18 +56,6 @@ function findingSeverity(finding: JsonObject): string {
   return clean(
     typeof severity === "string" ? severity : (severity as JsonObject)["level"],
   ).toUpperCase();
-}
-
-function repositoryCell(value: string): string {
-  let text = "";
-  let columns = 0;
-  for (const { segment } of GRAPHEME_SEGMENTER.segment(value)) {
-    const segmentWidth = stringWidth(segment);
-    if (columns + segmentWidth > 18) break;
-    text += segment;
-    columns += segmentWidth;
-  }
-  return text + " ".repeat(18 - columns);
 }
 
 export function renderScanHistory(
@@ -118,7 +104,7 @@ export function renderScanHistory(
         line += " ";
         lineWidth += 1;
       }
-      for (const { segment } of GRAPHEME_SEGMENTER.segment(word)) {
+      for (const { segment } of graphemes.segment(word)) {
         const segmentWidth = stringWidth(segment);
         if (lineWidth + segmentWidth > available) {
           lines.push(`${prefix || " ".repeat(indent)}${line}`);
@@ -231,7 +217,7 @@ export function renderScanHistory(
     const multipleRepositories =
       options.repository === undefined &&
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
-    const wide = width >= (multipleRepositories ? 96 : 80);
+    const wide = width >= (multipleRepositories ? 97 : 80);
     lines.push(
       `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} findings`}`,
       "",
@@ -254,12 +240,12 @@ export function renderScanHistory(
       const scanRepository = basename(clean(scan["targetPath"]));
       if (wide) {
         lines.push(
-          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${repositoryCell(scanRepository)}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
+          `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${fitCell(scanRepository, 18, "")}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
         );
       } else {
         lines.push(
           `  ${clean(scan["scanId"])}`,
-          `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
+          `    ${started}${multipleRepositories ? `  ${accent("·")}  ${scanRepository}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
         );
       }
     }

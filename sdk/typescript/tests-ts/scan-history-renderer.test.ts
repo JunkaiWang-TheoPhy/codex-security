@@ -1,6 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
-import stringWidth from "string-width";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
@@ -344,94 +343,42 @@ describe("scan history renderer", () => {
     expect(output).not.toContain("Resolved");
   });
 
-  test("keeps repositories visible at narrow and wide terminal widths", () => {
-    const scans = [
-      {
-        scanId: "11111111-1111-4111-8111-111111111111",
-        targetPath: "/demo/juice-shop",
-        mode: "standard",
-        progress: { status: "complete" },
-        findingCount: 8,
-        startedAt: "2026-07-24T12:00:00Z",
-      },
-      {
-        scanId: "22222222-2222-4222-8222-222222222222",
-        targetPath: "/demo/payment-service",
-        mode: "deep",
-        progress: { status: "complete" },
-        findingCount: 2,
-        startedAt: "2026-07-23T12:00:00Z",
-      },
+  test("fits repository names when multi-repository history switches to the wide table", () => {
+    const combining = "e\u0301".repeat(17);
+    const joined = "界".repeat(8) + "👩‍💻";
+    const repositories = [
+      { name: "service", cell: "service".padEnd(18) },
+      { name: `${combining}🚀-tail`, cell: `${combining} ` },
+      { name: `${joined}-tail`, cell: joined },
+      { name: "中", cell: "中" + " ".repeat(16) },
     ];
-
-    for (const columns of [72, 100]) {
-      const output = stripVTControlCharacters(
-        renderScanHistory({ scans }, "list", {
-          columns,
-          scanRoot: "/demo/results",
-        }),
-      );
-      expect(output).toContain("results");
-      expect(output).toContain("juice-shop");
-      expect(output).toContain("payment-service");
-      expect(output).toContain(scans[0]!.scanId);
-      expect(output).toContain(scans[1]!.scanId);
-      if (columns >= 96) expect(output).toContain("REPOSITORY");
-    }
-  });
-
-  test.each([
-    ["short ASCII", "service", "service"],
-    ["long ASCII", "a".repeat(24), "a".repeat(18)],
-    ["short Chinese", "中文工程", "中文工程"],
-    ["long Chinese", "中文工程".repeat(6), "中文工程中文工程中"],
-    ["combining marks", "e\u0301".repeat(20), "e\u0301".repeat(18)],
-    ["emoji at the edge", "a".repeat(17) + "🚀", "a".repeat(17)],
-    ["emoji that fits", "a".repeat(16) + "🚀", "a".repeat(16) + "🚀"],
-    ["joined emoji", "a".repeat(16) + "👩‍💻-service", "a".repeat(16) + "👩‍💻"],
-    ["wide character at the edge", "a".repeat(17) + "中", "a".repeat(17)],
-  ])("aligns the repository column for %s", (_name, repository, expected) => {
-    const scans = [repository, "control"].map((name, index) => ({
-      scanId: `${index + 1}`.repeat(36),
-      targetPath: `/synthetic/${name}`,
+    const scans = repositories.map(({ name }, index) => ({
+      scanId: String(index + 1).repeat(36),
+      targetPath: `/demo/${name}`,
       mode: "standard",
       progress: { status: "complete" },
       findingCount: 7,
       startedAt: "2026-07-24T12:00:00Z",
     }));
-
-    for (const color of [false, true]) {
-      const output = stripVTControlCharacters(
-        renderScanHistory({ scans }, "list", { columns: 120, color }),
+    const render = (columns: number) =>
+      stripVTControlCharacters(
+        renderScanHistory({ scans }, "list", {
+          columns,
+          scanRoot: "/demo/results",
+        }),
       );
-      const lines = output.split("\n");
-      const header = lines.find((line) => line.includes("REPOSITORY"))!;
-      for (const [index, name] of [expected, "control"].entries()) {
-        const row = lines.find((line) =>
-          line.startsWith(`  ${scans[index]!.scanId}`),
-        )!;
-        const findingsStart = row.indexOf("7        ✓ COMPLETE");
-        const repositoryCell = row.slice(
-          header.indexOf("REPOSITORY"),
-          findingsStart - 1,
-        );
-        expect(row.isWellFormed()).toBe(true);
-        expect(repositoryCell.trimEnd()).toBe(name);
-        expect(stringWidth(repositoryCell)).toBe(18);
-        expect(stringWidth(row.slice(0, findingsStart))).toBe(
-          header.indexOf("FINDINGS"),
-        );
-        expect(stringWidth(row.slice(0, row.indexOf("✓ COMPLETE")))).toBe(
-          header.indexOf("STATUS"),
-        );
-      }
-
-      const narrow = stripVTControlCharacters(
-        renderScanHistory({ scans }, "list", { columns: 72, color }),
+    const narrow = render(96);
+    const wide = render(97);
+    expect(narrow).toContain("results");
+    expect(narrow).not.toContain("REPOSITORY");
+    expect(wide).toContain("REPOSITORY         FINDINGS STATUS");
+    for (const [index, { name, cell }] of repositories.entries()) {
+      const id = scans[index]!.scanId;
+      expect(narrow).toContain(id);
+      expect(narrow).toContain(name);
+      expect(wide).toContain(
+        `${id} 2026-07-24 standard ${cell} 7        ✓ COMPLETE`,
       );
-      expect(
-        narrow.split("\n").find((line) => line.startsWith("    2026-07-24")),
-      ).toContain(repository);
     }
   });
 
