@@ -12,7 +12,7 @@ import type {
   ExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
@@ -28,15 +28,16 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 const format = "blackduck-bom-6";
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
 
-export function hasBlackDuckEvidence(data: unknown): boolean {
+function hasBlackDuckEvidence(data: unknown): boolean {
   if (!isRecord(data)) return false;
-  const row = data["row"];
   return (
     data["format"] === format ||
-    ("vulnerabilityWithRemediation" in data && "componentVersion" in data) ||
-    (isRecord(row) &&
-      "vulnerabilityWithRemediation" in row &&
-      "componentVersion" in row)
+    [data, data["row"]].some(
+      (row) =>
+        isRecord(row) &&
+        typeof row["componentVersion"] === "string" &&
+        isRecord(row["vulnerabilityWithRemediation"]),
+    )
   );
 }
 
@@ -94,29 +95,25 @@ export function blackDuckReportRepositories(
     return repositories;
   }
   const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  let scope: string | undefined;
-  let repository: string | undefined;
+  const projects = new Set<string>();
+  const sources = new Set<string>();
   for (const { source_finding_id: id, evidence } of findings) {
     const retained = retainedRepository(evidence.source_data, id, target);
-    if (!retained) continue;
     const declared = evidence.details?.repository?.url;
-    if (retained.projectVersion) {
-      if (
-        scope &&
-        (scope !== retained.projectVersion || repository !== key(retained.url))
-      )
-        throw new Error(
-          "Black Duck occurrences must belong to the same project version and source repository.",
-        );
-      scope = retained.projectVersion;
-      repository = key(retained.url);
-    }
+    const url = retained?.url ?? declared;
+    if (url) sources.add(key(url));
+    if (!retained) continue;
     if (declared && key(declared) !== key(retained.url))
       throw new Error(
         "Retained scanner repository does not match the normalized evidence repository.",
       );
+    if (retained.projectVersion) projects.add(retained.projectVersion);
     repositories.set(id, { url: retained.url });
   }
+  if (projects.size > 1 || (projects.size === 1 && sources.size > 1))
+    throw new Error(
+      "Black Duck occurrences must belong to the same project version and source repository.",
+    );
   return repositories;
 }
 
@@ -312,7 +309,7 @@ const nameVersionForges = new Map([
 ]);
 
 function packageUrlName(ecosystem: string, parts: string[]) {
-  if (parts.includes("")) return;
+  if (parts.some((part) => !part || part.includes("/"))) return;
   if (ecosystem === "maven")
     return parts.length === 2 ? parts.join(":") : undefined;
   if (
@@ -329,7 +326,7 @@ function packageUrlName(ecosystem: string, parts: string[]) {
 function blackDuckPackages(row: Record<string, unknown>) {
   const version = text(row["componentVersionName"]);
   const purl =
-    /^pkg:([a-z][a-z0-9.+-]*)\/([^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
+    /^pkg:([a-z][a-z0-9.+-]*)\/((?:@[^/@?#]+\/)?[^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
       text(row["packageUrl"]) ?? "",
     );
   if (purl) {
@@ -415,7 +412,7 @@ export function normalizeBlackDuckFindings(
       "An empty Black Duck selection cannot identify a project version. Supply its complete collection envelope.",
     );
   const projectVersion = scope;
-  return normalizeRecords(
+  const result = normalizeRecords(
     rows,
     ({ row, vulnerability }) => {
       const advisory = requiredText(
@@ -448,8 +445,23 @@ export function normalizeBlackDuckFindings(
     },
     (entry) => occurrenceId(entry, projectVersion),
     target,
-    selected ? "exclude" : "reject",
   );
+  if (!selected) {
+    // normalizeRecords excludes every collision. An unidentified row can also
+    // repeat across pages, so compare its original JSON when it has no ID.
+    const seen = new Set<string>();
+    for (const excluded of result.excluded) {
+      const key =
+        excluded.source_finding_id ??
+        canonicalJson(items[excluded.position - 1]);
+      if (seen.has(key))
+        throw new CodexSecurityError(
+          "Duplicate row in a collection with a declared total; pages may overlap. Retrieve the complete export again.",
+        );
+      seen.add(key);
+    }
+  }
+  return result;
 }
 
 export async function readBlackDuckFindings(
