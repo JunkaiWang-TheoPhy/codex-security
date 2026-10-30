@@ -130,10 +130,11 @@ Each occurrence is identified by its project version, component version, origin,
 advisory source and advisory name. Reimporting updates the occurrence when its
 evidence changes. Rows absent from a later export remain open.
 
-Supported package URLs and origin coordinates supply the package identity. The
-importer retains the advisory name, any distinct related advisory and the native
-row, including its CWE, matched-files link and remediation status. It leaves the
-finding unassessed and does not infer a fix, Git revision or source location.
+Supported package URLs and origin coordinates supply the package identity.
+`advisory_ids` preserves the vendor’s `vulnerabilityName` and any distinct
+`relatedVulnerability` value verbatim, including Black Duck resource URLs.
+The native row retains its CWE, matched-files link and remediation status.
+Findings start unassessed, with no inferred fix, Git revision or source location.
 
 References: [official Python REST client](https://github.com/blackducksoftware/hub-rest-api-python),
 [vendor example of vulnerable BOM components](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json).

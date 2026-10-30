@@ -1222,14 +1222,24 @@ test("a normalized Inspector retry checks its typed repository without native ev
   expect(f.posts).toHaveLength(1);
 });
 
+const savedBlackDuckEvidence = {
+  data: { format: "blackduck-bom-6" },
+  requiredProvider: "blackduck",
+  digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
+};
+
 test.each([
   {
+    ...savedBlackDuckEvidence,
     selected: options,
-    data: { format: "blackduck-bom-6" },
-    requiredProvider: "blackduck",
     filename:
       "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json",
-    digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
+  },
+  {
+    ...savedBlackDuckEvidence,
+    selected: { ...options, provider: "inspector" as const },
+    filename:
+      "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10.pending.json",
   },
   {
     selected: { ...options, provider: "inspector" as const },
@@ -1247,6 +1257,10 @@ test.each([
   "resumes a saved $selected.provider request from before $requiredProvider checks",
   async ({ selected, data, requiredProvider, filename, digest }) => {
     const f = await fixture();
+    const environment: NodeJS.ProcessEnv = { ...f.environment };
+    // These persisted keys came from the default deployment.
+    delete environment["CODEX_SECURITY_CLOUD_BASE_URL"];
+    delete environment["CODEX_SECURITY_CLOUD_WEB_URL"];
     const row = normalized();
     const finding = {
       source_finding_id: row.source_finding_id,
@@ -1257,7 +1271,10 @@ test.each([
     };
     const input = { read: 1, excluded: [], findings: [finding] };
     const prepare = () =>
-      prepareNormalizedExternalPublication(input, selected, f.deps);
+      prepareNormalizedExternalPublication(input, selected, {
+        ...f.deps,
+        environment,
+      });
 
     // The previous publisher accepted this opaque evidence. Keep its checkpoint
     // filename and digests so this exercises recovery across the provider change.

@@ -64,6 +64,13 @@ export function repositoryScopeValidator(
     provider: Provider,
     findings: readonly ExternalFinding[],
     target: ExternalImportTarget,
+    sameRepositories: (urls: Iterable<string>) => boolean = (urls) =>
+      new Set(
+        Array.from(
+          urls,
+          target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey,
+        ),
+      ).size <= 1,
   ): Map<string, ExternalSourceRepository> => {
     const repositories = new Map<string, ExternalSourceRepository>();
     if (provider !== scanner.provider) {
@@ -73,26 +80,35 @@ export function repositoryScopeValidator(
         );
       return repositories;
     }
-    const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    const wholeReport = scanner.provider === "blackduck";
     const scopes = new Set<string>();
     const sources = new Set<string>();
     for (const { source_finding_id: id, evidence } of findings) {
       const retained = retainedRepository(evidence.source_data, id, target);
       const declared = evidence.details?.repository?.url;
       // A Black Duck BOM binds its entire report. A Veracode application binds its native rows.
-      if (scanner.provider === "blackduck" || retained?.scope) {
-        const url = retained?.url ?? declared;
-        if (url) sources.add(key(url));
+      if (wholeReport || retained?.scope) {
+        if (declared) sources.add(declared);
+        if (retained) sources.add(retained.url);
       }
       if (!retained) continue;
       if (retained.scope) scopes.add(retained.scope);
-      if (declared && key(declared) !== key(retained.url))
+      if (
+        declared &&
+        declared !== retained.url &&
+        !sameRepositories([declared, retained.url])
+      )
         throw new Error(
           "Retained scanner repository does not match the normalized evidence repository.",
         );
       repositories.set(id, { url: retained.url });
     }
-    if (scopes.size > 1 || (scopes.size === 1 && sources.size > 1))
+    if (
+      scopes.size > 1 ||
+      ((scopes.size > 0 || (wholeReport && target === "local")) &&
+        sources.size > 1 &&
+        !sameRepositories(sources))
+    )
       throw new Error(
         `${scanner.label} occurrences must belong to the same ${scanner.scope} and source repository.`,
       );

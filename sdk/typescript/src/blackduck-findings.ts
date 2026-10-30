@@ -22,18 +22,19 @@ import {
 } from "./scanner-repository-url.js";
 
 const format = "blackduck-bom-6";
+const componentVersionPath = /^components\/[^/]+\/versions\/[^/]+$/u;
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
 
 function hasBlackDuckEvidence(data: unknown): boolean {
   if (!isRecord(data)) return false;
   return (
     data["format"] === format ||
-    [data, data["row"]].some(
-      (row) =>
-        isRecord(row) &&
-        typeof row["componentVersion"] === "string" &&
-        isRecord(row["vulnerabilityWithRemediation"]),
-    )
+    [data, data["row"]].some((row) => {
+      if (!isRecord(row) || !isRecord(row["vulnerabilityWithRemediation"]))
+        return false;
+      const resource = parseApiResource(text(row["componentVersion"]));
+      return resource !== undefined && componentVersionPath.test(resource.path);
+    })
   );
 }
 
@@ -79,8 +80,8 @@ export const blackDuckReportRepositories = repositoryScopeValidator(
   retainedRepository,
 );
 
-function apiResource(href: unknown, label: string) {
-  const url = URL.parse(requiredText(href, label));
+function parseApiResource(href: string | null) {
+  const url = href && URL.parse(href);
   const parts = url && /^(.*\/api)\/(.+?)\/?$/u.exec(url.pathname);
   if (
     !url ||
@@ -90,14 +91,21 @@ function apiResource(href: unknown, label: string) {
     url.password ||
     url.hash
   )
-    throw new Error(
-      `Expected a credential-free Black Duck API URL for ${label}.`,
-    );
+    return;
   return {
     base: url.origin + parts[1],
     path: parts[2]!,
     query: url.searchParams,
   };
+}
+
+function apiResource(href: unknown, label: string) {
+  const resource = parseApiResource(requiredText(href, label));
+  if (!resource)
+    throw new Error(
+      `Expected a credential-free Black Duck API URL for ${label}.`,
+    );
+  return resource;
 }
 
 function links(meta: unknown): Record<string, unknown>[] {
@@ -170,9 +178,12 @@ function scopedRow(
 ) {
   const row = isRecord(value) ? value : {};
   const meta = row["_meta"];
-  const metadata = links(meta);
-  const matched = metadata
-    .filter((link) => link["rel"] === "matched-files")
+  const declared = isRecord(meta) ? meta["links"] : undefined;
+  const matched = (Array.isArray(declared) ? declared : [])
+    .filter(
+      (link): link is Record<string, unknown> =>
+        isRecord(link) && link["rel"] === "matched-files",
+    )
     .map((link) => projectReference(link["href"], "matched-files"));
   if (isRecord(meta) && meta["href"] !== undefined)
     matched.push(projectReference(meta["href"], "remediation"));
@@ -191,7 +202,6 @@ function scopedRow(
   return {
     row,
     matched,
-    metadata,
     scope,
     // Shape errors are row exclusions; project-scope errors abort the report.
     get vulnerability() {
@@ -203,13 +213,13 @@ function scopedRow(
 }
 
 function occurrenceId(
-  { row, vulnerability, matched, metadata }: ReturnType<typeof scopedRow>,
+  { row, vulnerability, matched }: ReturnType<typeof scopedRow>,
   projectVersion: string,
 ) {
   const resource = apiResource(row["componentVersion"], "componentVersion");
   const component = `${resource.base}/${resource.path}`;
   if (
-    !/^components\/[^/]+\/versions\/[^/]+$/u.test(resource.path) ||
+    !componentVersionPath.test(resource.path) ||
     resource.base !==
       projectVersion.slice(0, projectVersion.lastIndexOf("/projects/"))
   )
@@ -224,12 +234,12 @@ function occurrenceId(
       );
     if (reference.origin) origins.add(reference.origin);
   }
-  for (const link of metadata.filter(
+  for (const link of links(row["_meta"]).filter(
     (entry) => entry["rel"] === "vulnerabilities",
   )) {
     const reference = apiResource(link["href"], "vulnerabilities link");
     const match =
-      /^(components\/[^/]+\/versions\/[^/]+)\/origin\/([^/]+)\/vulnerabilities$/u.exec(
+      /^(components\/[^/]+\/versions\/[^/]+)(?:\/origin\/([^/]+))?\/vulnerabilities$/u.exec(
         reference.path,
       );
     if (!match) continue;
@@ -237,7 +247,7 @@ function occurrenceId(
       throw new Error(
         "Black Duck vulnerabilities link contradicts componentVersion.",
       );
-    origins.add(match[2]!);
+    if (match[2]) origins.add(match[2]);
   }
   const [origin] = origins;
   if (!origin || origins.size !== 1)
@@ -272,21 +282,45 @@ const nameVersionForges = new Map([
 
 function packageUrlName(ecosystem: string, parts: string[]) {
   if (parts.some((part) => !part || part.includes("/"))) return;
-  if (ecosystem === "maven")
-    return parts.length === 2 ? parts.join(":") : undefined;
+  if (ecosystem === "maven" || ecosystem === "composer")
+    return parts.length === 2
+      ? parts.join(ecosystem === "maven" ? ":" : "/")
+      : undefined;
   if (
     parts.length === 1 ||
     ecosystem === "golang" ||
     ecosystem === "generic" ||
-    (parts.length === 2 &&
-      (ecosystem === "composer" ||
-        (ecosystem === "npm" && parts[0]!.startsWith("@"))))
+    (parts.length === 2 && ecosystem === "npm" && parts[0]!.startsWith("@"))
   )
     return parts.join("/");
 }
 
+function originPackage(row: Record<string, unknown>) {
+  const origin = text(row["componentVersionOriginName"])?.toLowerCase();
+  const id = text(row["componentVersionOriginId"]) ?? "";
+  if (origin === "maven") {
+    const coordinate = /^([^:\s/]+:[^:\s/]+):([^:\s/]+)$/u.exec(id);
+    if (coordinate)
+      return {
+        name: coordinate[1]!,
+        ecosystem: origin,
+        installed_version: coordinate[2]!,
+      };
+  }
+  const ecosystem = nameVersionForges.get(origin ?? "");
+  if (ecosystem) {
+    const coordinate = /^(?:(@[^/\s]+)\/)?([^/\s]+)\/([^/\s]+)$/u.exec(id);
+    if (coordinate && (!coordinate[1] || ecosystem === "npm"))
+      return {
+        name: id.slice(0, id.lastIndexOf("/")),
+        ecosystem,
+        installed_version: coordinate[3]!,
+      };
+  }
+}
+
 function blackDuckPackages(row: Record<string, unknown>) {
-  const version = text(row["componentVersionName"]);
+  const origin = originPackage(row);
   const purl =
     /^pkg:([a-z][a-z0-9.+-]*)\/((?:@[^/@?#]+\/)?[^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
       text(row["packageUrl"]) ?? "",
@@ -298,45 +332,25 @@ function blackDuckPackages(row: Record<string, unknown>) {
         ecosystem,
         purl[2]!.split("/").map(decodeURIComponent),
       );
-      if (name)
+      if (name) {
+        if (!purl[3] && origin?.ecosystem === ecosystem && origin.name === name)
+          return [origin];
         return [
           {
             name,
             ecosystem,
-            installed_version: purl[3] ? decodeURIComponent(purl[3]) : version,
+            installed_version: purl[3]
+              ? decodeURIComponent(purl[3])
+              : text(row["componentVersionName"]),
           },
         ];
+      }
     } catch {
       // A malformed escape does not invalidate the native origin coordinate.
     }
   }
 
-  const origin = text(row["componentVersionOriginName"])?.toLowerCase();
-  const id = text(row["componentVersionOriginId"]) ?? "";
-  if (origin === "maven") {
-    const coordinate = /^([^:\s/]+:[^:\s/]+):([^:\s/]+)$/u.exec(id);
-    if (coordinate)
-      return [
-        {
-          name: coordinate[1]!,
-          ecosystem: origin,
-          installed_version: coordinate[2]!,
-        },
-      ];
-  }
-  const ecosystem = nameVersionForges.get(origin ?? "");
-  if (ecosystem) {
-    const coordinate = /^(?:(@[^/\s]+)\/)?([^/\s]+)\/([^/\s]+)$/u.exec(id);
-    if (coordinate && (!coordinate[1] || ecosystem === "npm"))
-      return [
-        {
-          name: id.slice(0, id.lastIndexOf("/")),
-          ecosystem,
-          installed_version: coordinate[3]!,
-        },
-      ];
-  }
-  return [];
+  return origin ? [origin] : [];
 }
 
 export function normalizeBlackDuckFindings(

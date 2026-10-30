@@ -40,6 +40,7 @@ const severityByScore = [
   "critical",
 ] as const;
 const applicationGuid = z.guid().toLowerCase();
+const applicationPath = /^\/appsec\/v1\/applications\/([^/]+)$/u;
 
 function integer(value: unknown, label: string, minimum = 0): number {
   const result = (minimum === 0 ? count : positive).safeParse(value);
@@ -80,7 +81,7 @@ function halUrl(value: unknown, label: string): URL {
 }
 
 function applicationScope(url: URL) {
-  const match = /^\/appsec\/v1\/applications\/([^/]+)$/u.exec(url.pathname);
+  const match = applicationPath.exec(url.pathname);
   if (!match || url.href.includes("?"))
     throw new Error(
       "Expected a Veracode application HAL URL without query parameters.",
@@ -120,9 +121,10 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
 function hasVeracodeEvidence(data: unknown): boolean {
   return (
     isRecord(data) &&
-    "applicationUrl" in data &&
+    typeof data["applicationUrl"] === "string" &&
+    applicationPath.test(URL.parse(data["applicationUrl"])?.pathname ?? "") &&
     "sourceRepositoryUrl" in data &&
-    "row" in data
+    isRecord(data["row"])
   );
 }
 
