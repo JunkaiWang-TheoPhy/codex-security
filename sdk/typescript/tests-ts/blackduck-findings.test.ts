@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -12,6 +11,7 @@ import {
   blackDuckBomReport,
   blackDuckBomRow,
 } from "./support/blackduck-import-fixtures.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const repository = "https://vcs.example.test/team/application";
 
@@ -470,32 +470,28 @@ test("normalized input cannot relabel one native occurrence with another finding
 });
 
 test("reads JSON and gzip by content and rejects a truncated collection in either target", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "blackduck-bom-"));
-  try {
-    const path = join(directory, "report");
-    const items = [blackDuckBomRow(), blackDuckBomRow("BDSA-2099-0002")];
-    const expected = normalizeBlackDuckFindings(items, repository);
-    for (const bytes of [
-      Buffer.from(JSON.stringify(items)),
-      gzipSync(JSON.stringify(items)),
-    ]) {
-      await writeFile(path, bytes);
-      for (const target of ["cloud", "local"] as const)
-        expect(await readBlackDuckFindings(path, repository, target)).toEqual(
-          expected,
-        );
-    }
-    await writeFile(
-      path,
-      JSON.stringify({ ...blackDuckBomReport(items), totalCount: 5 }),
-    );
+  await using directory = await scopedTemporaryDirectory("blackduck-bom-");
+  const path = join(directory.path, "report");
+  const items = [blackDuckBomRow(), blackDuckBomRow("BDSA-2099-0002")];
+  const expected = normalizeBlackDuckFindings(items, repository);
+  for (const bytes of [
+    Buffer.from(JSON.stringify(items)),
+    gzipSync(JSON.stringify(items)),
+  ]) {
+    await writeFile(path, bytes);
     for (const target of ["cloud", "local"] as const)
-      await expect(
-        readBlackDuckFindings(path, repository, target),
-      ).rejects.toThrow(/totalCount/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+      expect(await readBlackDuckFindings(path, repository, target)).toEqual(
+        expected,
+      );
   }
+  await writeFile(
+    path,
+    JSON.stringify({ ...blackDuckBomReport(items), totalCount: 5 }),
+  );
+  for (const target of ["cloud", "local"] as const)
+    await expect(
+      readBlackDuckFindings(path, repository, target),
+    ).rejects.toThrow(/totalCount/);
 });
 
 test("binds row remediation URLs to the project version, component version and origin", () => {

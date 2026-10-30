@@ -390,7 +390,7 @@ export function normalizeVeracodeFindings(
   const { scope, rows } = readReport(input);
   return normalizeRecords(
     rows,
-    (row, id) => {
+    (row) => {
       const details = record(
         row["finding_details"],
         "Veracode finding_details",
@@ -406,31 +406,28 @@ export function normalizeVeracodeFindings(
         severityByScore[integer(details["severity"], "severity")];
       if (!severity)
         throw new Error("Veracode severity must be on the native 0–5 scale.");
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: text(category?.["name"]) ?? text(cwe["name"]) ?? weakness,
-            severity,
-            description: text(row["description"]),
-            details: {
-              kind: "sast",
-              repository: { url: repository },
-              source_status: requiredText(
-                status["status"],
-                "Veracode finding status",
-              ),
-              weakness_ids: [weakness],
-            },
-            source_data: structuredClone({
-              sourceRepositoryUrl: repository,
-              applicationUrl: scope.applicationUrl,
-              row,
-            }),
+      return validateExternalEvidence(
+        {
+          title: text(category?.["name"]) ?? text(cwe["name"]) ?? weakness,
+          severity,
+          description: text(row["description"]),
+          details: {
+            kind: "sast",
+            repository: { url: repository },
+            source_status: requiredText(
+              status["status"],
+              "Veracode finding status",
+            ),
+            weakness_ids: [weakness],
           },
-          target,
-        ),
-      };
+          source_data: structuredClone({
+            sourceRepositoryUrl: repository,
+            applicationUrl: scope.applicationUrl,
+            row,
+          }),
+        },
+        target,
+      );
     },
     (row) => occurrenceId(row, scope),
     target,

@@ -220,6 +220,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
@@ -3976,7 +3977,7 @@ export async function main(
         githubAdvisory: z
           .array(
             optionValue("--github-advisory").regex(
-              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+              GHSA_ID,
               "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
             ),
           )
@@ -9521,7 +9522,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
@@ -10898,7 +10899,7 @@ function protectedRootErrorMessage(
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
+        ? "Choose an output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."

@@ -374,7 +374,7 @@ export function normalizeBlackDuckFindings(
   const projectVersion = scope;
   return normalizeRecords(
     rows,
-    ({ row, vulnerability }, id) => {
+    ({ row, vulnerability }) => {
       const advisory = requiredText(
         vulnerability["vulnerabilityName"],
         "Black Duck vulnerability name",
@@ -385,29 +385,23 @@ export function normalizeBlackDuckFindings(
       );
       const severity = text(vulnerability["severity"])?.toLowerCase();
       const related = text(vulnerability["relatedVulnerability"]);
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: `${advisory} in ${name}`,
-            description: text(vulnerability["description"]),
-            severity:
-              FailureSeveritySchema.safeParse(severity).data ?? "unknown",
-            advisory_ids:
-              related && related !== advisory
-                ? [advisory, related]
-                : [advisory],
-            packages: blackDuckPackages(row),
-            source_data: {
-              format,
-              sourceRepositoryUrl: repository,
-              projectVersionUrl: projectVersion,
-              row: structuredClone(row),
-            },
+      return validateExternalEvidence(
+        {
+          title: `${advisory} in ${name}`,
+          description: text(vulnerability["description"]),
+          severity: FailureSeveritySchema.safeParse(severity).data ?? "unknown",
+          advisory_ids:
+            related && related !== advisory ? [advisory, related] : [advisory],
+          packages: blackDuckPackages(row),
+          source_data: {
+            format,
+            sourceRepositoryUrl: repository,
+            projectVersionUrl: projectVersion,
+            row: structuredClone(row),
           },
-          target,
-        ),
-      };
+        },
+        target,
+      );
     },
     (entry) => occurrenceId(entry, projectVersion),
     target,

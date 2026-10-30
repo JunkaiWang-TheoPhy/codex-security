@@ -82,12 +82,8 @@ export function repositoryScopeValidator(
     let repository: string | undefined;
     for (const { source_finding_id: id, evidence } of findings) {
       const retained = retainedRepository(evidence.source_data, id, target);
+      if (!retained) continue;
       const declared = evidence.details?.repository?.url;
-      if (!retained) {
-        if (target === "cloud" && declared)
-          repositories.set(id, { url: declared });
-        continue;
-      }
       const repositoryKey = key(retained.url);
       if (retained.scope) {
         if (scope && (scope !== retained.scope || repository !== repositoryKey))
