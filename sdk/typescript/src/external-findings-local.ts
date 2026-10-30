@@ -484,7 +484,7 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
-  strictSources: ReadonlySet<string>,
+  strictSources: ReadonlyMap<string, Provider>,
   strictPlatformFor: (source: ExternalSourceRepository) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
@@ -544,7 +544,7 @@ async function requireMatchingRepository(
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
     const platform = bound
-      ? strictPlatformFor(source)
+      ? (strictSources.get(source.url) ?? strictPlatformFor(source))
       : loosePlatformFor(source);
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = remotes.flatMap((remote) => identity(remote) ?? []);
@@ -687,10 +687,19 @@ export async function prepareLocalImport(
         );
   const mixed = projected.length > 0 && readerSources.length > 0;
   const nativeSources = new Map(
-    (mixed ? current.findings : projected).map(
-      (finding) =>
-        [finding, localFindingRepositories(options.provider, finding)] as const,
-    ),
+    (mixed ? current.findings : projected)
+      .filter(
+        ({ evidence }) =>
+          options.provider !== "endor" ||
+          isRecord(evidence.source_data?.["runContext"]),
+      )
+      .map(
+        (finding) =>
+          [
+            finding,
+            localFindingRepositories(options.provider, finding),
+          ] as const,
+      ),
   );
   const platformFor = localRepositoryPlatform(
     options.provider,
@@ -705,13 +714,20 @@ export async function prepareLocalImport(
   );
   const identify = (url: string) =>
     remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+  // A hint from an independent reader applies across projected rows. A native
+  // GitHub asset in one row only identifies the platform of that row's claims.
+  const operatorPlatform = localRepositoryPlatform(
+    options.provider,
+    readerSources,
+    true,
+  );
   const bound = blackDuckReportRepositories(
     options.provider,
     current.findings,
     "local",
     (urls) => sameBlackDuckRepositories(Array.from(urls, identify)),
   );
-  const strictSources = new Set<string>();
+  const strictSources = new Map<string, Provider>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
   for (const finding of current.findings) {
     const { evidence, source_finding_id: id } = finding;
@@ -720,24 +736,37 @@ export async function prepareLocalImport(
     const retained = bound.get(id);
     const native = nativeSources.get(finding) ?? [];
     if (retained) {
+      const claims = [
+        retained.url,
+        ...(url ? [url] : []),
+        ...native.map((ref) => ref.url),
+      ];
+      const rowPlatform = (claim: string) =>
+        options.provider !== "wiz"
+          ? platformFor({ url: claim })
+          : native.some((source) => source.platform === "github")
+            ? "github"
+            : operatorPlatform({ url: claim });
       if (
-        native.length &&
         !sameBlackDuckRepositories(
-          [
-            retained.url,
-            ...(url ? [url] : []),
-            ...native.map((source) => source.url),
-          ].map(identify),
+          claims.map(
+            (claim) =>
+              remoteRepository(claim, rowPlatform(claim), true) ?? {
+                key: claim,
+              },
+          ),
         )
       )
         throw new CodexSecurityError(
           "The retained scanner repository does not match the original provider finding.",
         );
-      for (const source of [retained, ...native]) {
+      for (const source of [retained, ...native])
         sources.set(source.url, source);
-        strictSources.add(source.url);
+      for (const claim of claims) {
+        const platform = rowPlatform(claim);
+        if (!strictSources.has(claim) || platform !== "github")
+          strictSources.set(claim, platform);
       }
-      if (url) strictSources.add(url);
     }
     for (const source of native) known.add(source.url);
   }
@@ -758,9 +787,12 @@ export async function prepareLocalImport(
     }
   }
   if (strictSources.size && options.provider !== "blackduck") {
-    const keys = new Set(Array.from(strictSources, (url) => identify(url).key));
-    for (const { url } of references)
-      if (keys.has(identify(url).key)) strictSources.add(url);
+    const keys = new Set(
+      Array.from(strictSources.keys(), (url) => identify(url).key),
+    );
+    for (const source of references)
+      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+        strictSources.set(source.url, platformFor(source));
   }
   if (inspector) {
     const platform = inspector.platform ?? options.provider;

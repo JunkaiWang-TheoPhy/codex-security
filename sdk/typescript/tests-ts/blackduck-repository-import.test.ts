@@ -10,6 +10,7 @@ import {
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
 import type { ExternalFinding } from "../src/external-findings.js";
+import { readVendorFindings } from "../src/wiz-findings.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import {
   localFindingsFixture,
@@ -308,6 +309,33 @@ test("a Wiz file can combine projected and native package repositories", async (
   };
   await f.writeJson([projection(inspectorRepositoryUrl), record]);
   expect((await (await f.prepare()).import()).counts.created).toBe(2);
+
+  const source = "https://git.example.test/Team/Project";
+  const remote = source.toLowerCase();
+  execFileSync("git", ["-C", f.repository, "remote", "add", "origin", remote]);
+  record.vulnerableAsset.cloudProviderURL = remote + "/tree/main";
+  const projected = {
+    ...record,
+    id: projection(source).source_finding_id,
+    sourceRepositoryUrl: source,
+  };
+  const normalized = async () =>
+    prepareNormalizedLocalImport(
+      await readVendorFindings(f.file, "local"),
+      { provider: "wiz", sourceKey: f.sourceKey, repository: f.repository },
+      { environment: f.environment, sourceRepositories: [{ url: remote }] },
+    );
+  for (const prepare of [() => f.prepare(), normalized]) {
+    await f.writeJson([
+      { ...projected, vulnerableAsset: { id: "other-asset" } },
+      record,
+    ]);
+    await expect(prepare()).rejects.toThrow(
+      /does not match a configured remote/,
+    );
+    await f.writeJson([projected, record]);
+    expect((await prepare()).preview.findings).toHaveLength(2);
+  }
 });
 
 test("GitHub owns the casing of a projected Enterprise repository", async () => {
@@ -392,6 +420,10 @@ test.each(["snyk", "endor"] as const)(
     await prepare(
       [
         row,
+        {
+          source_finding_id: "metadata",
+          evidence: { ...row.evidence, source_data: { runContext: "nightly" } },
+        },
         {
           source_finding_id: "native",
           evidence: { ...row.evidence, source_data: provenance },
