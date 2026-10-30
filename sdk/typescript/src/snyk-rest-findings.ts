@@ -1,31 +1,47 @@
 import {
-  repositoryUrlKey,
+  hostedRepositoryUrlKey,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
+import {
+  HOSTED_FINDINGS_FORMATS,
+  type HostedExternalFindings,
+} from "./external-findings.js";
 import type { ImportedPackage } from "./external-import-models.js";
 import { requireExternalImports } from "./external-imports-feature.js";
-import { normalizeGitRepositoryUrl } from "./git-remote.js";
 import {
-  combineHostedSignals,
-  getHostedJson,
+  gitServiceHostname,
+  isGitHubCloudHost,
+  isKnownGitHost,
+  normalizeHostedGitRepositoryUrl,
+} from "./git-remote.js";
+import {
+  checkSnykTokenOrigin,
+  hostedScannerHttp,
+  hostedEnvironmentToken,
   hostedRepositoryUrl,
+  validateHostedRepositoryUrl,
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
+import { validRfc3339DateTime } from "./timestamps.js";
 import {
   array,
   normalizeRecords,
+  hostedWireFields,
+  hostedWireValue,
+  type HostedNumericFields,
+  restoreHostedNumbers,
   record,
-  relativePath,
+  hostedRepositoryPath,
   requiredText,
+  scannerSeverity,
   stableId,
   strings,
   text,
 } from "./scanner-import.js";
-import type { SnykFindingsReport } from "./snyk-findings.js";
 
-export const SNYK_REST_ISSUES_FORMAT = "snyk-rest-issues/v1";
+export const SNYK_REST_ISSUES_FORMAT = HOSTED_FINDINGS_FORMATS.snyk;
 const apiVersion = "2026-03-25";
 const formatVersion = { format: SNYK_REST_ISSUES_FORMAT, apiVersion } as const;
 const defaultOrigin = "https://api.snyk.io";
@@ -41,6 +57,7 @@ const scmOrigins = new Set([
   "bitbucket-connect-app",
   "bitbucket-server",
   "github",
+  "github-app",
   "github-cloud-app",
   "github-enterprise",
   "github-server-app",
@@ -101,6 +118,7 @@ export interface SnykIssuesExport extends SnykScope {
   apiVersion: typeof apiVersion;
   apiOrigin: string;
   complete: true;
+  numericFields?: HostedNumericFields;
   project: Resource;
   target: Resource | null;
   pages: { startingAfter: string | null; response: Resource }[];
@@ -117,11 +135,11 @@ function uuid(value: unknown, label: string): string {
 
 type Scope = SnykScope & { apiOrigin: string };
 
-function scope(input: Resource | CollectSnykIssuesOptions): Scope {
-  const apiOrigin = requiredText(input["apiOrigin"], "Snyk API origin").replace(
-    /\/$/u,
-    "",
-  );
+function scope(
+  input: Resource | CollectSnykIssuesOptions,
+  origin: unknown,
+): Scope {
+  const apiOrigin = requiredText(origin, "Snyk API origin").replace(/\/$/u, "");
   if (!origins.has(apiOrigin))
     throw new Error("Select a documented Snyk regional HTTPS API origin.");
   const product = input["product"];
@@ -198,21 +216,50 @@ function checkOrganization(
     );
 }
 
-function checkRemote(remote: unknown, selected: Scope, github: boolean) {
+function checkRemote(remote: unknown, selected: Scope, origin: string) {
   if (remote === null || remote === "") return;
   const url = requiredText(remote, "Snyk target URL");
-  const normalized = normalizeGitRepositoryUrl(
-    url,
-    github ? selected.sourceRepositoryUrl : undefined,
+  validateHostedRepositoryUrl(url);
+  // Snyk monitor can render a local path and a Git server as the same HTTP target.
+  if (
+    origin === "cli" &&
+    selected.product === "open-source" &&
+    /^http:\/\//iu.test(url)
+  )
+    throw new Error(
+      "Snyk CLI HTTP target URL cannot verify a repository. Set an explicit HTTPS URL with snyk monitor --remote-repo-url and collect the resulting project.",
+    );
+  const host = gitServiceHostname(
+    new URL(selected.sourceRepositoryUrl).hostname,
   );
+  const customHost = !isKnownGitHost(host);
+  const github =
+    origin.startsWith("github") && (customHost || isGitHubCloudHost(host));
+  const enterprise =
+    github &&
+    (origin === "github-enterprise" || origin === "github-server-app");
+  const gitlab = origin === "gitlab" && (customHost || host === "gitlab.com");
+  const normalized = /^https?:\/\//iu.test(url)
+    ? hostedRepositoryUrl(url, "Snyk target URL")
+    : normalizeHostedGitRepositoryUrl(
+        url,
+        selected.sourceRepositoryUrl,
+        github,
+      );
+  const key = (value: string) =>
+    hostedRepositoryUrlKey(value, enterprise, gitlab);
   if (
     /[?#]/u.test(url) ||
-    repositoryUrlKey(normalized) !==
-      repositoryUrlKey(selected.sourceRepositoryUrl)
+    key(normalized) !== key(selected.sourceRepositoryUrl)
   )
     throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
+  return {
+    github,
+    gitlab,
+    nativeUrl: enterprise || gitlab ? normalized : undefined,
+  };
 }
 
 function projectContext(project: Resource, selected: Scope) {
@@ -233,53 +280,82 @@ function projectContext(project: Resource, selected: Scope) {
     throw new Error(
       `Snyk project type ${manager} from ${origin} is not a supported ${selected.product} project.`,
     );
+  const context = {
+    manager,
+    scm,
+    origin,
+    manifest: scm ? hostedRepositoryPath(attributes["target_file"]) : null,
+  };
+  if (project["relationships"] === undefined)
+    return { ...context, lookupTargetId: undefined, expandedUrl: undefined };
   const relationships = record(
     project["relationships"],
     "Snyk project relationships",
   );
   checkOrganization(relationships, selected, true);
   const link = relationship(relationships, "target");
-  const expanded =
+  const expandedUrl =
     link["attributes"] === undefined
-      ? {}
-      : record(link["attributes"], "Snyk expanded target attributes");
+      ? undefined
+      : record(link["attributes"], "Snyk expanded target attributes")["url"];
+  const targetId = resourceId(link, "target");
   return {
-    manager,
-    scm,
-    github: origin.startsWith("github"),
-    manifest: scm ? repoPath(attributes["target_file"]) : null,
-    targetId: resourceId(link, "target"),
-    expanded,
+    ...context,
+    lookupTargetId:
+      expandedUrl == null || expandedUrl === "" ? targetId : undefined,
+    expandedUrl,
   };
 }
 
 function checkTarget(
   value: unknown,
   selected: Scope,
-  { expanded, targetId, github }: ReturnType<typeof projectContext>,
+  { expandedUrl, lookupTargetId, origin }: ReturnType<typeof projectContext>,
 ) {
-  if (Object.hasOwn(expanded, "url")) {
-    if (value !== null)
-      throw new Error(
-        "Unexpected separate Snyk target in an expanded project report.",
-      );
-    return checkRemote(expanded["url"], selected, github);
+  if (value === null) {
+    // Earlier v1 exports saved no detail for an explicitly null or empty expanded URL.
+    if (expandedUrl !== undefined)
+      return checkRemote(expandedUrl, selected, origin);
+    if (lookupTargetId === undefined) return;
   }
+  if (lookupTargetId === undefined)
+    throw new Error(
+      "Unexpected separate Snyk target without a project target lookup.",
+    );
   const target = record(value, "Snyk target resource");
-  if (resourceId(target, "target") !== targetId)
+  if (resourceId(target, "target") !== lookupTargetId)
     throw new Error(
       "Snyk target does not match the selected project's target.",
     );
-  if (target["relationships"] !== undefined)
-    checkOrganization(
-      record(target["relationships"], "Snyk target relationships"),
-      selected,
-      true,
+  if (target["relationships"] !== undefined) {
+    const relationships = record(
+      target["relationships"],
+      "Snyk target relationships",
     );
-  checkRemote(
+    checkOrganization(relationships, selected, true);
+    if (relationships["integration"] !== undefined) {
+      const integration = relationship(relationships, "integration");
+      const attributes = record(
+        integration["attributes"],
+        "Snyk integration attributes",
+      );
+      const type = requiredText(
+        attributes["integration_type"],
+        "Snyk integration type",
+      );
+      if (
+        scmOrigins.has(origin) &&
+        (!scmOrigins.has(type) || origin.split("-")[0] !== type.split("-")[0])
+      )
+        throw new Error(
+          `Snyk target integration ${type} must be a supported SCM integration for the project's ${origin} origin.`,
+        );
+    }
+  }
+  return checkRemote(
     record(target["attributes"], "Snyk target attributes")["url"],
     selected,
-    github,
+    origin,
   );
 }
 
@@ -361,24 +437,30 @@ export async function collectSnykIssues(
   options: CollectSnykIssuesOptions,
   dependencies: HostedScannerHttpOptions = {},
 ): Promise<SnykIssuesExport> {
-  requireExternalImports(dependencies.environment);
-  const signal = combineHostedSignals(options.signal, dependencies.signal);
-  signal?.throwIfAborted();
-  const selected = scope({
-    ...options,
-    apiOrigin: options.apiOrigin ?? defaultOrigin,
-  });
+  const environment = dependencies.environment ?? process.env;
+  requireExternalImports(environment);
+  const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
+  const selected = scope(options, options.apiOrigin ?? defaultOrigin);
   const token = requiredText(
-    options.token ?? (dependencies.environment ?? process.env)["SNYK_TOKEN"],
+    options.token ??
+      hostedEnvironmentToken(
+        environment,
+        "SNYK_TOKEN",
+        selected.apiOrigin,
+        "API_V3_URL",
+        "SNYK_API_V3_URL",
+        "API_REST_URL",
+        "SNYK_API_REST_URL",
+        "SNYK_API",
+        "SNYK_CFG_ENDPOINT",
+      ),
     "Snyk API token (SNYK_TOKEN)",
   );
   if (/[\r\n]/u.test(token))
     throw new Error("Snyk API token cannot contain a line break.");
+  checkSnykTokenOrigin(token, selected.apiOrigin);
   const get = async (url: URL, label: string) =>
-    jsonApi(
-      await getHostedJson(url, `token ${token}`, { ...dependencies, signal }),
-      label,
-    );
+    jsonApi(await getJson(url, `token ${token}`), label);
   const getResource = async (url: URL, kind: string) =>
     record(
       (await get(url, `Snyk ${kind} response`))["data"],
@@ -388,14 +470,16 @@ export async function collectSnykIssues(
   projectUrl.searchParams.set("expand", "target");
   const project = await getResource(projectUrl, "project");
   const context = projectContext(project, selected);
-  const target = Object.hasOwn(context.expanded, "url")
-    ? null
-    : await getResource(
-        endpoint(selected, `targets/${context.targetId}`),
-        "target",
-      );
+  const target =
+    context.lookupTargetId === undefined
+      ? null
+      : await getResource(
+          endpoint(selected, `targets/${context.lookupTargetId}`),
+          "target",
+        );
   checkTarget(target, selected, context);
   const pages: SnykIssuesExport["pages"] = [];
+  const numericFields: HostedNumericFields = Object.create(null);
   const base = issuesEndpoint(selected);
   const seen = new Set<string>();
   let startingAfter: string | null = null;
@@ -404,7 +488,14 @@ export async function collectSnykIssues(
     if (startingAfter !== null)
       url.searchParams.set("starting_after", startingAfter);
     const response = await get(url, "Snyk issue page");
-    pages.push({ startingAfter, response });
+    pages.push({
+      startingAfter,
+      response: hostedWireValue(response, numericFields, [
+        "pages",
+        String(pages.length),
+        "response",
+      ]),
+    });
     startingAfter = issuePage(response, selected, base, seen).next;
   } while (startingAfter !== null);
   signal?.throwIfAborted();
@@ -412,9 +503,10 @@ export async function collectSnykIssues(
     ...formatVersion,
     ...selected,
     complete: true,
-    project,
-    target,
+    project: hostedWireValue(project, numericFields, ["project"]),
+    target: hostedWireValue(target, numericFields, ["target"]),
     pages,
+    ...(Object.keys(numericFields).length && { numericFields }),
   };
 }
 
@@ -426,21 +518,52 @@ function savedContext(document: Resource) {
     throw new Error(
       `Expected ${SNYK_REST_ISSUES_FORMAT} for API version ${apiVersion}.`,
     );
-  const selected = scope(document);
+  const selected = scope(document, document["apiOrigin"]);
   const project = record(document["project"], "Snyk project resource");
   const context = projectContext(project, selected);
   const target = document["target"];
-  checkTarget(target, selected, context);
+  const remote = checkTarget(target, selected, context);
+  const nativeUrl = remote?.nativeUrl;
+  const github = remote?.github ?? context.origin.startsWith("github");
+  const platform: HostedExternalFindings["sourceRepositoryPlatform"] =
+    nativeUrl && github
+      ? "github"
+      : context.scm && !github
+        ? "other"
+        : undefined;
   return {
-    source: { ...formatVersion, ...selected, project, target },
+    source: {
+      ...formatVersion,
+      ...selected,
+      ...hostedWireFields({ project, target }),
+    },
     context,
+    repository: {
+      url: selected.sourceRepositoryUrl,
+      platform,
+      ...(remote?.gitlab && { gitlab: true }),
+      ...(nativeUrl &&
+        nativeUrl !== selected.sourceRepositoryUrl && { nativeUrl }),
+    },
   };
 }
 
-export function snykRestFindingRepository(sourceData: Resource): string {
-  const { source } = savedContext(sourceData);
+export function snykRestFindingRepository(sourceData: Resource): {
+  url: string;
+  platform?: HostedExternalFindings["sourceRepositoryPlatform"];
+  nativeUrl?: string;
+  gitlab?: boolean;
+} {
+  const { source, repository } = savedContext(sourceData);
   selectedIssueAttributes(scopedIssue(sourceData["issue"], source), source);
-  return source.sourceRepositoryUrl;
+  return repository;
+}
+
+/** Project evidence retained when no finding can carry it. */
+export function snykRestReportRepository(context: Resource | undefined) {
+  return context === undefined
+    ? undefined
+    : savedContext(record(context, "Snyk report project context")).repository;
 }
 
 function readIssues(document: Resource, selected: Scope) {
@@ -476,23 +599,12 @@ function records(parent: Resource, field: string) {
 }
 
 function problemIds(entries: Resource[], type?: string) {
-  const matches = type
-    ? entries.filter((entry) => entry["type"] === type)
-    : entries;
-  return [
-    ...new Set(
-      matches.map((entry) =>
-        requiredText(entry["id"], "Snyk problem or class ID"),
-      ),
-    ),
-  ];
-}
-
-function repoPath(value: unknown) {
-  const path = text(value);
-  return path && !path.includes("\\") && !path.includes("://")
-    ? relativePath(path)
-    : null;
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (type === undefined || entry["type"] === type)
+      ids.add(requiredText(entry["id"], "Snyk problem or class ID"));
+  }
+  return [...ids];
 }
 
 function packageEvidence(
@@ -542,7 +654,7 @@ function codeEvidence(coordinates: Resource[], scm: boolean) {
       if (value === undefined) continue;
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
-      const path = repoPath(location["file"]);
+      const path = hostedRepositoryPath(location["file"]);
       if (scm && path) locations.push({ path });
     }
   }
@@ -555,13 +667,15 @@ function codeEvidence(coordinates: Resource[], scm: boolean) {
 export function normalizeSnykIssues(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-): SnykFindingsReport {
-  const document = record(input, "Snyk REST Issues export");
-  const { source, context } = savedContext(document);
+): HostedExternalFindings {
+  const document = restoreHostedNumbers(
+    record(input, "Snyk REST Issues export"),
+  );
+  const { source, context, repository } = savedContext(document);
   const code = source.product === "code";
   const result = normalizeRecords(
     readIssues(document, source),
-    (issue, sourceFindingId) => {
+    (issue) => {
       const attributes = record(issue["attributes"], "Snyk issue attributes");
       const status = attributes["status"];
       if (
@@ -571,10 +685,16 @@ export function normalizeSnykIssues(
         throw new Error(
           "Snyk issue must have a source status and an ignored flag.",
         );
-      const updated = Date.parse(
-        requiredText(attributes["updated_at"], "Snyk updated_at"),
+      const updatedAt = requiredText(
+        attributes["updated_at"],
+        "Snyk updated_at",
       );
-      if (!Number.isFinite(updated) || updated < 0)
+      const updated = Date.parse(updatedAt);
+      if (
+        !validRfc3339DateTime(updatedAt) ||
+        !Number.isFinite(updated) ||
+        updated < 0
+      )
         throw new Error("Invalid Snyk issue updated_at.");
       const severity = requiredText(
         attributes["effective_severity_level"],
@@ -585,43 +705,39 @@ export function normalizeSnykIssues(
       const activeCoordinates = records(attributes, "coordinates").filter(
         (coordinate) => status === "open" && coordinate["state"] === "open",
       );
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(attributes["title"], "Snyk issue title"),
-            description: text(attributes["description"]),
-            severity:
-              severity === "info"
-                ? "informational"
-                : ["critical", "high", "medium", "low"].includes(severity)
-                  ? severity
-                  : "unknown",
-            advisory_ids: code ? [] : problemIds(problems),
-            ...(code
-              ? codeEvidence(activeCoordinates, context.scm)
-              : {
-                  packages: packageEvidence(activeCoordinates, context),
-                }),
-            source_updated_at: Math.floor(updated / 1000),
-            source_data: structuredClone({ ...source, issue }),
-            ...(code && {
-              details: {
-                kind: "sast",
-                repository: { url: source.sourceRepositoryUrl },
-                scanner_origin: "Snyk Code",
-                source_status: status,
-                rule: rules.length === 1 ? { id: rules[0] } : null,
-                weakness_ids: problemIds(
-                  records(attributes, "classes"),
-                  "weakness",
-                ),
-              },
-            }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(attributes["title"], "Snyk issue title"),
+          description: text(attributes["description"]),
+          severity:
+            severity === "info" ? "informational" : scannerSeverity(severity),
+          advisory_ids: code ? [] : problemIds(problems),
+          ...(code
+            ? codeEvidence(activeCoordinates, context.scm)
+            : {
+                packages: packageEvidence(activeCoordinates, context),
+              }),
+          source_updated_at: Math.floor(updated / 1000),
+          source_data: structuredClone({
+            ...source,
+            ...hostedWireFields({ issue }, source.numericFields),
+          }),
+          ...(code && {
+            details: {
+              kind: "sast",
+              repository: { url: source.sourceRepositoryUrl },
+              scanner_origin: "Snyk Code",
+              source_status: status,
+              rule: rules.length === 1 ? { id: rules[0] } : null,
+              weakness_ids: problemIds(
+                records(attributes, "classes"),
+                "weakness",
+              ),
+            },
+          }),
+        },
+        target,
+      );
     },
     (issue) => {
       const attributes = selectedIssueAttributes(issue, source);
@@ -635,5 +751,15 @@ export function normalizeSnykIssues(
     },
     target,
   );
-  return { ...result, sourceRepositoryUrl: source.sourceRepositoryUrl };
+  return {
+    ...result,
+    sourceRepositoryUrl: source.sourceRepositoryUrl,
+    ...(repository.platform && {
+      sourceRepositoryPlatform: repository.platform,
+    }),
+    ...(!result.findings.length &&
+      (repository.gitlab || repository.platform === "github") && {
+        snykRestContext: source,
+      }),
+  };
 }

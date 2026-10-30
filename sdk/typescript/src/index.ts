@@ -234,6 +234,7 @@ export type {
 export type {
   ExternalFinding,
   ExternalFindings,
+  HostedExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
@@ -331,6 +332,10 @@ export {
   readOpenGrepFindings,
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
 export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,

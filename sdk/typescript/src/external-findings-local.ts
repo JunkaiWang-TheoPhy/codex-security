@@ -1,28 +1,60 @@
+import { isUtf8 } from "node:buffer";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
-import { scannerFindingRepositoryUrls } from "./external-findings-read.js";
+import {
+  trivyBatchSourceUrls,
+  trivyRemoteKey,
+  trivyReportRemotes,
+} from "./trivy-findings.js";
+import { snykRepositoryScope } from "./snyk-findings.js";
+import { semgrepSarifSourceRepositories } from "./semgrep-findings.js";
+import {
+  isSemgrepPlatformReport,
+  semgrepPlatformFindingRepository,
+} from "./semgrep-platform-findings.js";
 import { CodexSecurityError } from "./errors.js";
+import {
+  hostedRepositoryUrl,
+  validateHostedRepositoryUrl,
+} from "./hosted-scanner-http.js";
 import {
   forwardExternalImportSetting,
   requireExternalImports,
 } from "./external-imports-feature.js";
-import type {
-  ExternalFindings,
-  ExternalSourceRepository,
+import {
+  checkRetainedFindingProvider,
+  snapshotExternalFindings,
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+  type ExternalFindings,
+  type HostedExternalFindings,
+  type NormalizedFindingsFor,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  hostedRepositoryUrlKey,
   repositoryUrlKey,
+  isVerifiedGitHubRepository,
   validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { normalizeGitRepositoryUrl, parseGitRemote } from "./git-remote.js";
-import { trivyRemoteKey, trivyBatchSourceUrls } from "./trivy-findings.js";
+import {
+  gitPathToHttpPath,
+  gitTransportBytes,
+  isGitHubCloudHost,
+  isGitSshRemote,
+  isLocalGitRemote,
+  isWindowsGitDrive,
+  normalizeHostedGitRepositoryUrl,
+  parseGitRemote,
+} from "./git-remote.js";
+import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -65,6 +97,8 @@ export interface NormalizedLocalImportOptions {
   provider: Provider;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
+  /** Full Inspector project ARNs mapped to independently verified repository URLs. */
+  inspectorProjectMap?: ReadonlyMap<string, string>;
 }
 
 export interface LocalExternalImportDependencies {
@@ -75,7 +109,7 @@ export interface LocalExternalImportDependencies {
   sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
-export interface LocalExternalImportPreview extends ExternalFindings {
+export interface LocalExternalImportPreview extends HostedExternalFindings {
   repository: string;
   source: { provider: Provider; source_key: string };
 }
@@ -105,40 +139,59 @@ function requireIdentity(
     );
 }
 
+const gitTransportPorts: Readonly<Record<string, string>> = {
+  "http:": "80",
+  "https:": "443",
+  "ssh:": "22",
+  "git+ssh:": "22",
+  "ssh+git:": "22",
+  "git:": "9418",
+  "ftp:": "21",
+  "ftps:": "990",
+};
+
+// Imported scanner paths retain their source machine's drive, independent of this checkout's OS.
+const windowsDrivePath = /^[a-z]:[\\/]/iu;
+
+// libcurl rejects multiple unescaped userinfo separators before making a request.
+const invalidCurlUserinfo = /^(?:https?|ftps?):\/\/[^/?#@]*@[^/?#@]*@/iu;
+
 /** Compare transport forms without changing retained scanner evidence. */
-function remoteRepositoryKey(
+function remoteRepository(
   value: string,
   provider: Provider,
-  checkout = false,
-): string | undefined {
-  const drivePath =
-    provider === "trivy" && checkout
-      ? process.platform === "win32" && /^[a-z]:/iu.test(value)
-      : /^[A-Za-z]:[\\/]/u.test(value);
-  if (drivePath) return undefined;
+  bound: boolean,
+  hostedKey?: (url: string) => string,
+): { key: string; account?: string; homeRelative?: boolean } | undefined {
+  if (invalidCurlUserinfo.test(value)) return undefined;
+  const key =
+    hostedKey ??
+    (provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey);
+  const transport = /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(
+    value,
+  );
+  const authority = transport?.[1];
+  // Git decodes the authority before locating its path. An encoded delimiter
+  // cannot prove a match to another spelling through WHATWG URL's hostname.
+  if (
+    authority &&
+    (/%2f|[?#]/iu.test(authority) ||
+      authority.slice(authority.lastIndexOf("@") + 1).includes("%"))
+  )
+    return { key: value };
   let remote;
   try {
     remote = parseGitRemote(value);
   } catch {
-    return undefined;
+    return bound && (transport || /^https?:\/\//iu.test(value.trimStart()))
+      ? { key: "\0" + value }
+      : undefined;
   }
-  if (
-    !remote ||
-    ![
-      "http:",
-      "https:",
-      "ssh:",
-      "git:",
-      "ftp:",
-      "ftps:",
-      "git+ssh:",
-      "ssh+git:",
-    ].includes(remote.url.protocol)
-  )
+  if (!remote || !Object.hasOwn(gitTransportPorts, remote.url.protocol))
     return undefined;
-  if (provider === "trivy") return trivyRemoteKey(value, undefined, checkout);
-  const url = remote.url;
-  const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+  const { url, scpStyle } = remote;
+  let path = remote.path;
+  const ssh = url.protocol.includes("ssh");
   const protocol = url.protocol === "http:" ? "http:" : "https:";
   const githubSshOverHttps =
     ssh &&
@@ -146,19 +199,73 @@ function remoteRepositoryKey(
     url.port === "443";
   const hostname = githubSshOverHttps ? "github.com" : url.hostname;
   const port =
-    githubSshOverHttps ||
-    (ssh && url.port === "22") ||
-    (url.protocol === "git:" && url.port === "9418") ||
-    (url.protocol === "ftp:" && url.port === "21") ||
-    (url.protocol === "ftps:" && url.port === "990")
+    githubSshOverHttps || url.port === gitTransportPorts[url.protocol]
       ? ""
       : url.port;
-  // A GitHub source identifies a case-insensitive repository on custom Enterprise
-  // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
-  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
-  return key(
-    `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
-  );
+  const origin = `${protocol}//${hostname}${port ? `:${port}` : ""}/`;
+  const httpTransport = url.protocol === "http:" || url.protocol === "https:";
+  const rawSuffix = /[?#].*$/su.exec(value)?.[0] ?? "";
+  // Git appends its HTTP service path before libcurl strips fragment text.
+  const requestSuffix = httpTransport
+    ? rawSuffix.replace(/#.*$/su, "#").replace(/\/$/u, "")
+    : "";
+  const requestKey = (path: string) => {
+    const repository = key(origin + path);
+    return requestSuffix
+      ? JSON.stringify([repository, requestSuffix])
+      : repository;
+  };
+  if (!bound) {
+    // SCP paths are literal. SSH URI paths include their query and fragment text.
+    if (scpStyle) path = path.replaceAll("%", "%25");
+    else if (ssh || url.protocol === "git:") path += rawSuffix;
+    // Keep literal path delimiters in URL-escaped form, separate from HTTP selectors.
+    return {
+      key: requestKey(path.replace(/%3f|\?/giu, "%3F").replaceAll("#", "%23")),
+    };
+  }
+
+  if (!ssh && url.protocol !== "git:") {
+    if (httpTransport) {
+      // libcurl and WHATWG differ on backslashes and encoded dot segments.
+      const raw = /^https?:\/\/[^/\\?#\s]+(\/[^\\?#]*)?(?:[?#].*)?$/iu.exec(
+        value,
+      );
+      if (!raw) return { key: "\0" + value };
+      // The hosted HTTP key normalizes the raw Git path. URL.pathname escapes literal braces.
+      if (hostedKey) path = (raw[1] ?? "").slice(1);
+      else if (/\/(?:%2e|\.%2e|%2e\.|%2e%2e)(?:\/|$)/iu.test(raw[1] ?? ""))
+        return { key: "\0" + value };
+    }
+    if (rawSuffix && !httpTransport) return { key: key(origin + path) + "\0" };
+    return { key: requestKey(path) };
+  }
+
+  // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
+  if (!scpStyle && !transport) return { key: value };
+  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
+  const login = scpStyle
+    ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
+    : /^(.*)@/u.exec(authority ?? "")?.[1];
+  const homeRelative =
+    /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
+  const suffix = /[?#].*$/su.exec(gitPath);
+  // Express upload-pack bytes as a URL path for comparison with the HTTP source.
+  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
+  const repository = suffix
+    ? key(origin + name + "?") +
+      "\0" +
+      suffix[0].replace(/\/$/u, "").replace(/\.git$/u, "")
+    : key(origin + name);
+  return {
+    key: repository,
+    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
+    // GitHub serves the same repository path through its SCP and SSH URLs.
+    homeRelative:
+      ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
+        ? homeRelative
+        : undefined,
+  };
 }
 
 async function bareMetadataRoots(
@@ -349,75 +456,85 @@ async function hasGitMetadata(
   );
 }
 
-async function requireMatchingRepository(
+type HostedRepository = ExternalSourceRepository & { gitlab?: boolean };
+
+function hostedRepositoryMatches(
+  source: HostedRepository,
+  value: string,
+  expectedKey?: string,
+  gitlab = source.gitlab,
+): boolean {
+  if (!/^https?:\/\//iu.test(source.url)) return source.url === value;
+  const github = source.platform === "github";
+  const url = normalizeHostedGitRepositoryUrl(value, source.url, github);
+  return (
+    hostedRepositoryUrlKey(url, github, gitlab) ===
+    (expectedKey ?? hostedRepositoryUrlKey(source.url, github, gitlab))
+  );
+}
+
+async function checkoutRemotes(
   repository: string,
   provider: Provider,
-  sources: readonly (ExternalSourceRepository & { typedTrivyUrl?: boolean })[],
+  hasSources: boolean,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
-  checkTrivyBinding?: () => void,
-): Promise<void> {
-  if (sources.length === 0 && provider !== "trivy") return;
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = remoteRepositoryKey(source.url, "github");
-      return key === undefined ? [] : [key];
-    }),
-  );
-  const claims = sources.map(({ url, platform, typedTrivyUrl }) => {
-    const githubKey = remoteRepositoryKey(url, "github");
-    const sourceProvider =
-      provider !== "trivy" &&
-      (platform === "github" ||
-        (githubKey && githubRepositories.has(githubKey)))
-        ? "github"
-        : provider;
-    // URL schemes are case-insensitive in web references. Git transports are literal.
-    const remote =
-      provider === "trivy" && (typedTrivyUrl || platform === "github")
-        ? url.replace(/^https?:\/\//iu, (scheme) => scheme.toLowerCase())
-        : url;
-    const key =
-      remoteRepositoryKey(remote, sourceProvider) ??
-      (provider === "trivy" ? remote : undefined);
-    return { url, sourceProvider, key };
-  });
-  const requireConsistentClaims = () => {
-    if (provider === "trivy" && new Set(claims.map(({ key }) => key)).size > 1)
-      throw new CodexSecurityError(
-        "Trivy source URLs identify different repositories.",
-      );
-  };
-
-  if (!(await hasGitMetadata(repository, signal)))
-    return requireConsistentClaims();
+) {
+  if (!(await hasGitMetadata(repository, signal))) return;
   const gitProtectedRoots = [
     ...(typeof protectedRoots === "string"
       ? [protectedRoots]
       : (protectedRoots ?? [])),
     await abortable(() => canonicalConfigPath(process.cwd()), signal),
   ];
-  const readGit = (args: readonly string[]) =>
-    abortable(
-      () =>
-        gitOutput(
+  const readGit = (args: readonly string[]) => {
+    const overrides: NodeJS.ProcessEnv = { LC_ALL: "C" };
+    // GIT_CONFIG redirects only git config; read the same configuration as git remote.
+    if (args[0] === "config")
+      for (const name of Object.keys(environment ?? process.env))
+        if (
+          (process.platform === "win32" ? name.toUpperCase() : name) ===
+          "GIT_CONFIG"
+        )
+          overrides[name] = undefined;
+    return abortable(async () => {
+      try {
+        const output = await gitOutput(
           repository,
           args,
           signal,
-          { LC_ALL: "C" },
+          overrides,
           undefined,
-          "utf8",
+          "buffer",
           gitProtectedRoots,
           environment,
-        ),
-      signal,
-    );
+        );
+        // Keep a byte per character until Git's record boundaries and config keys have been matched.
+        return output.toString("latin1").replace(/\n$/u, "");
+      } catch (error) {
+        // The SDK exposes Git's original UTF-8 diagnostics on command errors.
+        if (error instanceof Error) {
+          if ("stderr" in error && Buffer.isBuffer(error.stderr))
+            error.stderr = error.stderr.toString("utf8");
+          if ("stdout" in error && Buffer.isBuffer(error.stdout))
+            error.stdout = error.stdout.toString("utf8");
+        }
+        throw error;
+      }
+    }, signal);
+  };
+  const utf8 = (raw: string) => {
+    const bytes = Buffer.from(raw, "latin1");
+    return isUtf8(bytes) ? bytes.toString("utf8") : undefined;
+  };
   let remoteNames: string;
   try {
     if (provider === "trivy") {
-      const root = resolve(await readGit(["rev-parse", "--show-toplevel"]));
+      const root = Buffer.from(
+        await readGit(["rev-parse", "--show-toplevel"]),
+        "latin1",
+      ).toString("utf8");
       if (
         root !== repository &&
         !(await abortable(() => sameFile(root, repository), signal))
@@ -425,7 +542,7 @@ async function requireMatchingRepository(
         throw new CodexSecurityError(
           `Trivy finding paths are checkout-relative. Git found the checkout at ${JSON.stringify(root)}. Select it with --repository and set --trivy-scan-root relative to it.`,
         );
-      if (sources.length === 0) return;
+      if (!hasSources) return;
     }
     remoteNames = await readGit(["remote"]);
   } catch (error) {
@@ -443,34 +560,277 @@ async function requireMatchingRepository(
           error.stderr.trimEnd(),
         ))
     )
-      return requireConsistentClaims();
+      return;
     throw error;
   }
-  const remotes: string[] = [];
-  for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
-    remotes.push(...urls.split(/\r?\n/u));
+  if (!remoteNames) return;
+  const remoteConfig = (
+    await readGit([
+      "config",
+      "--null",
+      "--get-regexp",
+      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof)$",
+    ]).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === 1)
+        return "";
+      throw error;
+    })
+  ).split("\0");
+  const multilinePrefixes = remoteConfig
+    .filter((entry) => entry.startsWith("url."))
+    .map((entry) => entry.slice(entry.indexOf("\n") + 1))
+    .filter((prefix) => prefix.includes("\n"))
+    .sort((a, b) => b.length - a.length);
+  const remotes: { url: string; forcedHelper: boolean }[] = [];
+  let hasUnverifiedRemote = false;
+  for (const rawName of remoteNames.split("\n").filter(Boolean)) {
+    const name = utf8(rawName);
+    if (name === undefined) {
+      hasUnverifiedRemote = true;
+      continue;
+    }
+    const vcsKey = `remote.${rawName}.vcs\n`;
+    const configuredHelper = remoteConfig
+      .findLast((entry) => entry.startsWith(vcsKey))
+      ?.slice(vcsKey.length);
+    const output = await readGit(["remote", "get-url", "--all", "--", name]);
+    const lines = output.split("\n");
+    const urlKey = `remote.${rawName}.url\n`;
+    const configured = remoteConfig
+      .filter((entry) => entry.startsWith(urlKey))
+      .map((entry) => entry.slice(urlKey.length));
+    let urls = lines;
+    // Each effective URL after a list reset contributes at least one line.
+    if (
+      lines.length > 1 &&
+      configured.slice(-lines.length).some((url) => url.includes("\n"))
+    ) {
+      // A rewrite can consume line breaks in its longest matching insteadOf prefix.
+      // Git config keys (including the replacement URL) cannot contain a newline.
+      // Git emits either the full list or the suffix after the last empty URL.
+      const afterReset = configured.lastIndexOf("") + 1;
+      const records: string[] = [];
+      let end = lines.length;
+      for (let i = configured.length - 1; i >= 0 && end > 0; i--) {
+        const original = configured[i]!;
+        const prefix = multilinePrefixes.find((value) =>
+          original.startsWith(value),
+        );
+        const start =
+          end - original.slice(prefix?.length ?? 0).split("\n").length;
+        if (start < 0 || (start === 0 && i !== 0 && i !== afterReset)) break;
+        records.push(lines.slice(start, end).join("\n"));
+        end = start;
+      }
+      if (end === 0) urls = records.reverse();
+      else {
+        hasUnverifiedRemote = true;
+        urls = [await readGit(["remote", "get-url", "--", name])];
+      }
+    }
+    for (const rawUrl of urls) {
+      // Explicit helper:: takes precedence over remote.<name>.vcs.
+      const explicit = /^([a-z0-9][a-z0-9+.-]*)::/iu.exec(rawUrl);
+      const helper = explicit?.[1] ?? configuredHelper;
+      const address = explicit ? rawUrl.slice(explicit[0].length) : rawUrl;
+      if (helper === undefined && isLocalGitRemote(address)) continue;
+      const url = utf8(address);
+      if (url === undefined) {
+        hasUnverifiedRemote = true;
+        continue;
+      }
+      const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1] ?? "";
+      const curl = /^(?:https?|ftps?):$/u.test(transport.toLowerCase());
+      // A configured URL has a case-insensitive scheme. An explicit Git helper
+      // has a case-sensitive name and only the standard curl names take URL arguments.
+      const recognized = curl
+        ? helper === undefined || /^(?:https?|ftps?)$/u.test(helper)
+        : helper === undefined &&
+          (!url.includes("://") ||
+            Object.hasOwn(gitTransportPorts, transport) ||
+            // Inspector can retain an unrecognized spelling as a literal repository key.
+            (provider === "inspector" &&
+              remoteRepository(url, provider, true)?.key === url));
+      // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
+      if (
+        !recognized ||
+        (curl &&
+          (/[\x00-\x20\x7f]/u.test(url) || invalidCurlUserinfo.test(url)))
+      ) {
+        hasUnverifiedRemote = true;
+        continue;
+      }
+      if (isWindowsGitDrive(url) && !url.startsWith("-")) {
+        // Git's Windows path validity rules decide between a drive and an SSH host.
+        // Diagnostic mode opens no repository. gitOutput disables all transports before SSH setup.
+        try {
+          await readGit(["fetch-pack", "--diag-url", url]);
+          continue;
+        } catch (error) {
+          if (!(
+            error instanceof Error &&
+            "code" in error &&
+            error.code === 128 &&
+            "stderr" in error &&
+            typeof error.stderr === "string" &&
+            error.stderr
+              .split(/\r?\n/u)
+              .filter((line) => line.startsWith("fatal: "))
+              .join("\n") === "fatal: transport 'ssh' not allowed"
+          ))
+            throw error;
+        }
+      }
+      remotes.push({ url, forcedHelper: helper !== undefined });
+    }
   }
-  if (
-    checkTrivyBinding &&
-    remotes.some(
-      (remote) => remoteRepositoryKey(remote, provider, true) !== undefined,
-    )
-  )
-    checkTrivyBinding();
-  requireConsistentClaims();
-  for (const { url, sourceProvider, key } of claims) {
-    const remoteKeys = new Set(
-      remotes.flatMap((remote) => {
-        const key = remoteRepositoryKey(remote, sourceProvider, true);
-        return key === undefined ? [] : [key];
-      }),
+  return hasUnverifiedRemote || remotes.length ? remotes : undefined;
+}
+
+// Typed web links and explicit curl helper arguments use a case-insensitive URL scheme.
+function trivyUrlArgument(url: string) {
+  return url.replace(/^(?:https?|ftps?):\/\//iu, (scheme) =>
+    scheme.toLowerCase(),
+  );
+}
+
+function localTrivySources(
+  input: ExternalFindings,
+  references: readonly ExternalSourceRepository[],
+) {
+  const urls = new Set(trivyBatchSourceUrls(input, false));
+  for (const { evidence } of input.findings) {
+    const typedUrl = evidence.details?.repository?.url;
+    if (typedUrl) urls.add(trivyUrlArgument(typedUrl));
+    for (const url of trivyReportRemotes(evidence.source_data?.["report"]).urls)
+      urls.add(url);
+  }
+  for (const { platform, url } of references)
+    urls.add(platform === "github" ? trivyUrlArgument(url) : url);
+  return [...urls].map((url) => ({ url }));
+}
+
+async function requireMatchingRepository(
+  repository: string,
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  hosted: HostedRepository | undefined,
+  protectedRoots: WorkbenchCommandOptions["protectedRoot"],
+  environment: WorkbenchCommandOptions["environment"],
+  signal?: AbortSignal,
+  trivy?: ExternalFindings,
+): Promise<void> {
+  if (!sources.length && !trivy) return;
+  const remotes = await checkoutRemotes(
+    repository,
+    provider,
+    sources.length > 0,
+    protectedRoots,
+    environment,
+    signal,
+  );
+  const mismatch = (url: string) =>
+    new CodexSecurityError(
+      `Imported repository ${JSON.stringify(url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
     );
-    if (remoteKeys.size === 0) continue;
-    if (key === undefined || !remoteKeys.has(key))
+  if (trivy) {
+    if (remotes) trivyBatchSourceUrls(trivy, true);
+    const keys = new Set(sources.map(({ url }) => trivyRemoteKey(url)));
+    if (keys.size > 1)
       throw new CodexSecurityError(
-        `Imported repository ${JSON.stringify(url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+        "Trivy source URLs identify different repositories.",
       );
+    const source = sources[0];
+    if (
+      remotes &&
+      source &&
+      !remotes.some(({ url, forcedHelper }) =>
+        keys.has(
+          trivyRemoteKey(
+            forcedHelper ? trivyUrlArgument(url) : url,
+            undefined,
+            true,
+          ),
+        ),
+      )
+    )
+      throw mismatch(source.url);
+    return;
+  }
+  if (!remotes) return;
+  const drive = sources.find(({ url }) => windowsDrivePath.test(url));
+  if (drive) throw mismatch(drive.url);
+  if (hosted) {
+    const platform = hosted.platform ?? provider;
+    const key = (url: string) =>
+      hostedRepositoryUrlKey(url, hosted.platform === "github", hosted.gitlab);
+    const http = /^https?:\/\//iu;
+    const httpKey = http.test(hosted.url)
+      ? remoteRepository(hosted.url, platform, true, key)?.key
+      : undefined;
+    for (const { url: remote } of remotes) {
+      const parsed = remoteRepository(remote, platform, true, key);
+      if (!parsed) continue;
+      // Git's HTTP credentials and default port don't change the checkout repository.
+      if (
+        httpKey && http.test(remote)
+          ? parsed.key === httpKey
+          : hostedRepositoryMatches(hosted, remote, httpKey)
+      )
+        return;
+    }
+    throw mismatch(hosted.url);
+  }
+  const ftpAddress = (value: string) => {
+    const scheme = /^ftps?:\/\//iu.exec(value)?.[0];
+    if (!scheme) return undefined;
+    // FTP login and path bytes can select a different repository. Fold only the ASCII DNS hostname.
+    const address = value
+      .slice(scheme.length)
+      .replace(
+        /^([^/?#@]*@)?([\w.-]+)(?=[:/?#]|$)/u,
+        (_, login: string = "", host: string) => login + host.toLowerCase(),
+      );
+    return scheme.toLowerCase() + address;
+  };
+  const identity = (value: string, platform: Provider) =>
+    remoteRepository(value, platform, provider === "inspector");
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = identity(source.url, "github")?.key;
+      return key === undefined ? [] : [key];
+    }),
+  );
+  for (const source of sources) {
+    const githubKey = identity(source.url, "github")?.key;
+    const sourceProvider =
+      source.platform === "github" ||
+      (githubKey !== undefined && githubRepositories.has(githubKey))
+        ? "github"
+        : provider;
+    const targets = remotes.flatMap(({ url, forcedHelper }) => {
+      // A curl helper uses the inner URL's transport. An FTP login or path can identify
+      // a different repository from the same host's HTTPS endpoint.
+      if (forcedHelper && ftpAddress(url) !== ftpAddress(source.url)) return [];
+      return identity(url, sourceProvider) ?? [];
+    });
+    const target = identity(source.url, sourceProvider);
+    if (
+      !target ||
+      !targets.some(
+        ({ key, account, homeRelative }) =>
+          key === target.key &&
+          (homeRelative === undefined ||
+            target.homeRelative === undefined ||
+            homeRelative === target.homeRelative) &&
+          ((homeRelative === false && target.homeRelative === false) ||
+            account === undefined ||
+            target.account === undefined ||
+            account === target.account),
+      )
+    )
+      throw mismatch(source.url);
   }
 }
 
@@ -531,15 +891,31 @@ async function localContext(
 }
 
 /** Prepare scanner evidence without writing state or performing a security assessment. */
-export async function prepareNormalizedLocalImport(
-  input: ExternalFindings,
-  options: NormalizedLocalImportOptions,
+export async function prepareNormalizedLocalImport<P extends Provider>(
+  input: NormalizedFindingsFor<P>,
+  options: NormalizedLocalImportOptions & { provider: P },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
+  return prepareLocalImport(
+    input,
+    snapshotImportOptions(options),
+    dependencies,
+  );
+}
+
+/** @internal Prepare evidence using settings captured by either local import entrypoint. */
+export async function prepareLocalImport(
+  input: HostedExternalFindings,
+  options: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies,
+  sourceRepositories = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  ),
+): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = structuredClone(input);
+  const current = snapshotExternalFindings(input, options.provider);
   validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
@@ -552,6 +928,7 @@ export async function prepareNormalizedLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    checkRetainedFindingProvider(options.provider, finding);
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -569,61 +946,165 @@ export async function prepareNormalizedLocalImport(
       );
     dependabotSource = native;
   }
-  const sources = new Set(
-    options.provider === "trivy" ? trivyBatchSourceUrls(current, false) : [],
-  );
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
     dependencies,
   );
-  let hostedRepository: string | undefined;
-  const typedTrivyUrls = new Set<string>();
+  const sources = new Map<string, ExternalSourceRepository>();
+  const reportUrl = current.sourceRepositoryUrl || undefined;
+  if (reportUrl) sources.set(reportUrl, { url: reportUrl });
+  const snyk =
+    options.provider === "snyk" ? snykRepositoryScope(current) : undefined;
+  const snykProject = snyk?.project;
+  for (const url of [snykProject?.url, snykProject?.nativeUrl])
+    if (url) sources.set(url, { url });
+  let hostedUrl = reportUrl ?? snyk?.sourceUrl;
+  const reportPlatform = current.sourceRepositoryPlatform;
+  const singleProject = Boolean(
+    hostedUrl ||
+    reportPlatform ||
+    (options.provider === "semgrep" &&
+      current.findings.some(({ evidence }) =>
+        isSemgrepPlatformReport(evidence.source_data),
+      )),
+  );
+  let hostedPlatform = snykProject?.platform;
+  if (snyk && !snykProject && !current.findings.length)
+    hostedPlatform = reportPlatform;
+  let hostedGitHub =
+    reportPlatform !== "other" && hostedPlatform && hostedPlatform === "github";
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
-    if (url) {
-      if (options.provider === "trivy") typedTrivyUrls.add(url);
-      else sources.add(url);
+    if (url) sources.set(url, { url });
+    const data = evidence.source_data;
+    if (snyk && data) {
+      for (const source of snyk.claims.get(data) ?? []) {
+        sources.set(source.url, { url: source.url });
+        if (source.nativeUrl)
+          sources.set(source.nativeUrl, { url: source.nativeUrl });
+        // A native plugin may report its local drive path. Check it against the checkout below.
+        if (
+          reportPlatform === "other" &&
+          windowsDrivePath.test(source.url) &&
+          isGitSshRemote(source.url)
+        )
+          hostedUrl ??= source.url;
+        // Only retained or independent evidence can establish GitHub on a populated report.
+        if (source.platform !== undefined)
+          hostedGitHub = (hostedGitHub ?? true) && source.platform === "github";
+      }
     }
-    for (const source of scannerFindingRepositoryUrls(
-      options.provider,
-      evidence.source_data,
-    )) {
-      sources.add(source);
-      if (options.provider === "snyk" || options.provider === "semgrep")
-        hostedRepository = source;
+    if (options.provider === "semgrep") {
+      const native = semgrepPlatformFindingRepository(
+        data,
+        (url) =>
+          reportPlatform !== "other" &&
+          isVerifiedGitHubRepository(url, sourceRepositories),
+      );
+      if (native) {
+        hostedUrl ??= native;
+        sources.set(native, { url: native });
+      } else if (singleProject) {
+        for (const source of semgrepSarifSourceRepositories(data))
+          sources.set(source.url, source);
+      }
     }
   }
-  if (hostedRepository) {
-    // A hosted project identifies one repository even when the checkout has multiple remotes.
-    const expected = repositoryUrlKey(hostedRepository);
-    for (const url of sources)
-      if (repositoryUrlKey(normalizeGitRepositoryUrl(url)) !== expected)
+  const inspector = inspectorReportRepository(
+    options.provider,
+    current.findings,
+    "local",
+    options.inspectorProjectMap,
+  );
+  if (inspector) {
+    const platform = inspector.platform ?? options.provider;
+    const native = remoteRepository(inspector.url, platform, true);
+    for (const url of sources.keys()) {
+      if (
+        windowsDrivePath.test(url) ||
+        !native ||
+        remoteRepository(url, platform, true)?.key !== native.key
+      )
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(url)} does not match the retained Inspector repository ${JSON.stringify(inspector.url)}.`,
+        );
+    }
+  }
+  for (const source of [
+    ...(inspector ? [inspector] : []),
+    ...sourceRepositories,
+  ]) {
+    // A reader's platform must not loosen an operator-supplied Inspector map.
+    if (sources.get(source.url)?.platform !== "github")
+      sources.set(
+        source.url,
+        options.inspectorProjectMap ? { url: source.url } : source,
+      );
+  }
+  let hosted: HostedRepository | undefined;
+  const references = [...sources.values()];
+  const projectedUrl =
+    singleProject && !hostedUrl
+      ? (
+          references.find(({ url }) => /^https?:\/\//iu.test(url)) ??
+          references[0]
+        )?.url
+      : undefined;
+  const source = hostedUrl ?? projectedUrl;
+  if (source) {
+    const github =
+      hostedGitHub ?? references.some(({ platform }) => platform === "github");
+    const url = projectedUrl
+      ? normalizeHostedGitRepositoryUrl(projectedUrl, undefined, github)
+      : source;
+    // A case-sensitive report may retain only its private SSH selector.
+    if (
+      projectedUrl &&
+      !(
+        reportPlatform === "other" &&
+        !windowsDrivePath.test(url) &&
+        isGitSshRemote(url)
+      )
+    )
+      hostedRepositoryUrl(url, "Projected source repository URL");
+    hosted = {
+      url,
+      platform: github ? "github" : undefined,
+      gitlab: snyk?.destinationSuffix,
+    };
+    // Validate the entire report even when the checkout has several remotes or none.
+    for (const url of sources.keys()) {
+      validateHostedRepositoryUrl(url);
+      if (
+        !hostedRepositoryMatches(
+          hosted,
+          url,
+          undefined,
+          snyk?.allowsSuffix(url),
+        )
+      )
         throw new CodexSecurityError(
           "The normalized repository does not match the hosted scanner project.",
         );
+    }
   }
-  const githubSources = new Set<string>();
-  for (const { url, platform } of dependencies.sourceRepositories ?? []) {
-    (platform === "github" ? githubSources : sources).add(url);
-  }
-  if (dependabotSource) githubSources.add(dependabotSource);
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
+  const trivy = options.provider === "trivy" ? current : undefined;
   await requireMatchingRepository(
     repository,
     options.provider,
-    [
-      ...Array.from(sources, (url) => ({ url })),
-      ...Array.from(githubSources, (url) => ({
-        url,
-        platform: "github" as const,
-      })),
-      ...Array.from(typedTrivyUrls, (url) => ({ url, typedTrivyUrl: true })),
-    ],
+    trivy
+      ? localTrivySources(trivy, sourceRepositories)
+      : [...sources.values()],
+    hosted,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
-    options.provider === "trivy"
-      ? () => trivyBatchSourceUrls(current, true)
-      : undefined,
+    trivy,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {

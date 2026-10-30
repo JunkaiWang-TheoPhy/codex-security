@@ -265,6 +265,58 @@ test("a reader's GitHub web hint cannot change the meaning of the raw Trivy tran
   }
 });
 
+test("an unbound local Trivy import keeps a standalone typed repository link", async () => {
+  await using checkout = await trivyCheckout();
+  const report = { ...trivyReport(), ...repositoryClaims(".", "") };
+  const input = normalizeTrivyFindings(report, "local", ".");
+  const finding = input.findings[0]!;
+  finding.evidence.details = {
+    kind: "sast",
+    repository: { url: "https://example.test/team/archive/../project" },
+  };
+  expect((await checkout.prepare(input)).preview.findings).toEqual([finding]);
+});
+
+test("Trivy treats an explicit curl helper argument as a URL", async () => {
+  const mixedScheme = checkoutUrl.replace("https:", "HTTPS:");
+  await using checkout = await trivyCheckout("https::" + mixedScheme);
+  expect(
+    (await checkout.fromNormalized(trivyReport(), ".")).preview.findings,
+  ).toHaveLength(1);
+  const report = trivyReport();
+  report.Metadata.RepoURL = mixedScheme;
+  await expect(checkout.fromNormalized(report, ".")).rejects.toThrow(mismatch);
+});
+
+test("Trivy can match a checkout with an unrelated malformed remote", async () => {
+  await using checkout = await trivyCheckout(checkoutUrl);
+  git(checkout.repository, "remote", "add", "broken", "https://[invalid");
+  const prepared = await checkout.fromNormalized(trivyReport(), ".");
+  expect(prepared.preview.findings).toHaveLength(1);
+});
+
+test("Trivy preserves Unicode path bytes in GitHub report and typed repository claims", async () => {
+  const ascii = "https://github.com/example/Kit";
+  const unicode = "https://github.com/example/Kit";
+  const encoded = "https://github.com/example/%E2%84%AAit";
+  const report = {
+    ...trivyReport(),
+    ArtifactName: ".",
+    Metadata: { RepoURL: unicode },
+  };
+  await using different = await trivyCheckout(ascii);
+  await expect(different.fromFile(report, ".")).rejects.toThrow(mismatch);
+  const input = normalizeTrivyFindings(report, "local", ".");
+  const finding = input.findings[0]!;
+  finding.evidence.details = { kind: "sast", repository: { url: ascii } };
+  await expect(different.prepare(input)).rejects.toThrow(
+    "different repositories",
+  );
+  finding.evidence.details.repository = { url: encoded };
+  await using same = await trivyCheckout(encoded);
+  expect((await same.prepare(input)).preview.findings).toHaveLength(1);
+});
+
 test("a reader-declared Trivy source must agree with the finding even when both are checkout remotes", async () => {
   await using checkout = await trivyCheckout(checkoutUrl, foreignUrl);
   git(checkout.repository, "remote", "add", "upstream", foreignUrl);
@@ -454,6 +506,7 @@ test.each([
     false,
     true,
   ],
+  [checkoutUrl, "https://a@b@github.com/example/project.git", false, false],
   [
     checkoutUrl,
     "https://checkout-user@github.com/example/other.git",

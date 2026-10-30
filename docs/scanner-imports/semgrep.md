@@ -4,16 +4,62 @@ Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPOR
 See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally)
 and [how saved scanner reports map to imported evidence](schema-guide.md).
 
-Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
+## Existing Platform findings
+
+Set `SEMGREP_APP_TOKEN` to a Web API token for `https://semgrep.dev`. If
+`SEMGREP_URL` or its fallback `SEMGREP_APP_URL` is set, it must identify that
+origin. Select the deployment slug, exact project name and ref. Use `sast` for
+Code (the default), `sca` for Supply Chain or `ai_sast` for AI-powered detections.
+
+```sh
+codex-security import semgrep example/project --semgrep-deployment example \
+  --semgrep-ref refs/heads/main --format json > platform.json &&
+codex-security publish findings platform.json --to local --provider semgrep \
+  --repository ./project --source-key example/project/main/platform-sast --dry-run
+```
+
+The collector resolves the SCM URL and requests up to 3,000 findings per page
+for the selected project ID, ref and product. For collections spanning multiple pages, it checks
+for overlapping finding IDs and rereads the first page. Retry if either check
+detects a change. The API does not provide an atomic snapshot, so concurrent
+changes confined to later pages can still cause findings to be skipped.
+If the project has no SCM URL, supply its HTTP(S) URL with `--source-repository-url`.
+For a supported SSH clone URL, pass the matching HTTPS URL. For Azure DevOps,
+configure the HTTPS URL in the Semgrep project. Its native `ssh.dev.azure.com`
+clone URL cannot be mapped. The report keeps the native URL and mapping.
+On custom hosts, match the path case and the presence or absence
+of `.git` exactly. A verified GitHub binding also accepts SSH clones, case
+variants and an optional `.git` suffix. The project ID scopes collection.
+A row can carry an independently configured repository name. The collector
+records the names it receives for the selected project, and replay checks
+supplied names against that list. Older exports without the list use the
+repository URL when present. Rows may omit the repository or ref. Imports use
+the selected scope for omitted fields and check supplied values against it.
+This endpoint excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
+and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
+
+The SDK exposes `collectSemgrepPlatformFindings` and
+`normalizeSemgrepPlatformFindings`. For a custom GitHub Enterprise host, pass
+`{ sourceRepositories: [{ url, platform: "github" }] }` as the second argument
+to `normalizeSemgrepPlatformFindings` or `normalizeSemgrepFindings` after
+independently identifying the repository. Finding IDs retain their [exact integer
+value](schema-guide.md#numeric-fields-in-hosted-exports), scoped to deployment, project ID, ref and product. Reimport with the
+same source key to refresh imported triage, locations or dependency evidence.
+Keep a separate key for CLI scans. Individual API pages and Guardian/MCP
+summaries are unsupported.
+
+The importer uses the file paths and line ranges reported by Semgrep. Run
+`semgrep ci` from the Git repository root and use `--subdir` to scan part of a
+monorepo. The Findings API cannot reconstruct a missing path prefix if the scan
+starts below the repository root. [Semgrep monorepo guidance](https://docs.semgrep.dev/kb/semgrep-ci/scan-monorepo-in-parts).
+
+## CLI and CI scans
+
+Prefer native **Semgrep Code/SAST CLI or CI JSON** for a new scan. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.
 
-For an existing backlog, use the [Platform collector](#existing-platform-findings).
-Do not pass an individual API page or Guardian/MCP response as CLI JSON.
-
-To produce JSON locally, run the following from the source repository root with
-your selected SAST rules. This runs a new scan; it does not retrieve earlier
-findings from Semgrep AppSec Platform.
+Run the following from the source repository root with your selected SAST rules.
 
 ```sh
 semgrep scan --config /path/to/sast-rules.yaml --json-output semgrep.json .
@@ -53,35 +99,9 @@ an authorized repository and support for the `semgrep` provider. Local SARIF
 imports also check every original `versionControlProvenance.repositoryUri` on
 accepted findings. Unknown Git hosts keep case-sensitive repository paths.
 
-## Existing Platform findings
-
-Set `SEMGREP_APP_TOKEN` to a Web API token in the environment. Select the
-deployment slug, exact project name and ref. Use `sast` (the default) for
-Code, `sca` for Supply Chain or `ai_sast` for AI-powered detections.
-
-```sh
-codex-security import semgrep example/project --semgrep-deployment example \
-  --semgrep-ref refs/heads/main --semgrep-product sast --format json > platform.json &&
-codex-security publish findings platform.json --to local --provider semgrep \
-  --repository ./project --source-key example/project/main/platform-sast --dry-run
-```
-
-The collector resolves the SCM URL and reads all pages for the selected
-project ID, ref and product. If the project has no SCM URL, supply
-`--source-repository-url` when collecting. The saved `semgrep-platform-findings/v1`
-report carries the repository URL for local or Cloud import. This endpoint
-excludes removed findings and Secrets. [Project API](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
-and [Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
-
-The SDK exposes `collectSemgrepPlatformFindings` and
-`normalizeSemgrepPlatformFindings`. Finding IDs retain their exact integer
-value, scoped to deployment, project ID, ref and product. Reimport with the
-same source key to update triage, locations or dependency evidence. Keep a
-separate key for CLI scans.
-
 ## Evidence and identity
 
-JSON preserves original severity, rule, CWE IDs, source range, snippets when
+CLI JSON preserves original severity, rule, CWE IDs, source range, snippets when
 available and ignored state. SARIF retains its selected result and rule, including
 trace and fix evidence. Its Critical and High ratings both become diagnostic
 `error`, displayed here as High; prefer JSON when that distinction matters.
@@ -122,7 +142,7 @@ are omitted when they are unrelated to the selected finding; required inventorie
 retain their original entries and indexes. Empty external-property reference
 containers are accepted, while actual external file references are rejected.
 
-SDK callers pass `{ sourceRepositoryUrl }` to `normalizeSemgrepFindings`,
+For CLI and CI reports, SDK callers pass `{ sourceRepositoryUrl }` to `normalizeSemgrepFindings`,
 `normalizeSemgrepSarif`, or `readSemgrepFindings`. When passing that normalized
 output directly to `prepareNormalizedLocalImport`, supply the original SARIF
 repository references in the third argument's `sourceRepositories`; the file

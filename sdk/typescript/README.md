@@ -61,6 +61,24 @@ Install the package locally in your TypeScript project:
 npm install @openai/codex-security
 ```
 
+### Package and plugin versions
+
+For bug reports, run `npx @openai/codex-security info --json` in the project
+where the SDK is installed, or `codex-security info --json` for a global install.
+Include the npm version (`cliVersion` and `sdkVersion`), bundled plugin manifest
+version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
+and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
+path, or a custom Codex executable, include its version separately.
+
+For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
+shows the registry's source commit and tarball digest. Compare `gitHead` with
+the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads
+the archive, including `package/_bundled_plugin/.codex-plugin/plugin.json`.
+
+The [release workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-github-release.yml)
+verifies the signed attestation that binds the tarball to the tagged commit.
+For `0.1.0` and `0.1.1`, npm omits `gitHead`. Use the commit from the verified attestation.
+
 ## Authentication
 
 Sign in with ChatGPT:
@@ -173,8 +191,8 @@ try {
 
 Omitting `outputDir` saves results in the private Codex Security state directory.
 To choose another location, use a new or empty directory outside the scanned
-repository and its enclosing Git worktree. On macOS and Linux, an existing output
-directory must be private to you (`chmod 700`).
+repository and its enclosing Git worktree. Existing output directories keep their
+permissions; newly created directories are private to you by default.
 
 ### Read results
 
@@ -645,10 +663,10 @@ for issue creation.
 
 External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
 to enable `publish findings`, `findings imported`, `import github-advisories`,
-`import snyk` and `import semgrep`, and the SDK's external publication, local
-import/readback and hosted acquisition APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
-SDK callers can supply the flag through the existing per-call
-`dependencies.environment`. Pure normalizers and file readers remain available.
+`import snyk` and `import semgrep`. The flag enables the SDK's external
+publication, local import/readback and hosted acquisition APIs. SDK callers
+can set it in the per-call `dependencies.environment`. Pure normalizers and
+file readers remain available.
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
@@ -666,6 +684,12 @@ the same acquisition format for repeat imports: SARIF and CSV are compatibility
 options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+For Amazon Inspector Code Security, use `--provider inspector` with a complete
+ListFindings JSON export and `--source-repository-url`. When the export identifies
+the repository by an ARN and name, pass `--inspector-project-arn ARN` with the ARN
+you verified for that Git URL in the SCM integration. See the
+[Inspector guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md).
 
 For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
 `--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
@@ -692,10 +716,13 @@ Use `publish findings FILE --to local --repository PATH --provider wiz
 database. Preview with `--dry-run --format json`, then confirm interactively or
 use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
 repository defaults to the current directory. No Cloud login or model call is
-needed. Use `--provider snyk` for a hosted REST collection, native CLI JSON,
-a Snyk plugin SCA bundle or Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
-target; switching formats creates separate source identities. See
-[local imports](docs/cli.md#import-vendor-findings-locally).
+needed. See [local imports](docs/cli.md#import-vendor-findings-locally).
+
+Use `collectSnykIssues` or `collectSemgrepPlatformFindings` to save a monitored
+project's findings, then import the report with `--provider snyk` or
+`--provider semgrep`. The [Snyk](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md)
+and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md)
+guides also cover fresh scans and supported file formats.
 
 Use `--provider trivy` to import language-package vulnerabilities from a saved
 Trivy schema-v2 repository or filesystem report. Use a CI artifact or a report
@@ -719,6 +746,26 @@ remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
 records remain stored, and unknown evidence fields are not inferred.
 
+Normalized Snyk and Semgrep reports can declare a `sourceRepositoryUrl`, even
+when the report is empty. Local and Cloud imports check it against retained
+repository evidence. Preserve `snykRestContext` when combining normalized Snyk
+findings so an empty hosted project can still verify its repository.
+Use `sourceRepositoryPlatform: "other"` for case-sensitive
+paths on a custom host. Local import compares the configured fetch URLs after Git
+applies URL rewrites. In an HTTP(S) URL the scheme is case-insensitive, so
+`HTTPS://example.test/team/repo` and `https://example.test/team/repo` match.
+The comparison works offline, including in checkouts with custom SSH commands or
+no installed transport helper. An explicit Git helper name (`helper::argument`
+or `remote.<name>.vcs`) is case-sensitive. For an opaque helper argument,
+configure a separate remote with a matching URL.
+
+The Snyk REST and Semgrep Platform readers generate a `source_finding_id` for
+each occurrence within its scanner project. The normalized SDK uses the ID
+you supply to create or update the record for that repository, provider and
+source key. Keep each ID with its evidence unless you intend to update an
+existing record, for example when a scanner project for the same repository
+has been recreated.
+
 File imports forward repository references from the reader automatically. Direct
 normalized callers should provide additional known references in the third
 argument's `sourceRepositories` when they are absent from
@@ -728,10 +775,6 @@ argument's `sourceRepositories` when they are absent from
 reports carry this platform in their repository inventory. If you export only the
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
-
-Use `collectSnykIssues` or `collectSemgrepPlatformFindings` to collect existing
-findings into a replayable report. See the [Snyk](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md)
-and [Semgrep](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) guides for supported formats.
 
 ## Findings storage and deduplication
 

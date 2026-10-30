@@ -1,8 +1,7 @@
 import { posix, sep } from "node:path";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
-  cloudRepositoryUrlKey,
-  repositoryUrlKey,
+  hostedRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -11,6 +10,7 @@ import {
   normalizeGitRepositoryUrl,
   parseGitRemote,
 } from "./git-remote.js";
+import { validateHostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -58,7 +58,13 @@ function comparableGitHubRemote(
   cloudRepositoryUrl?: string,
 ): string | undefined {
   if (/[?#\t\r\n]/u.test(remote)) return undefined;
-  const parsed = parseGitRemote(remote);
+  let parsed;
+  try {
+    parsed = parseGitRemote(remote);
+  } catch {
+    // A checkout can have unrelated remotes with no comparable URL.
+    return undefined;
+  }
   if (!parsed) return undefined;
   const prefix = `${parsed.url.protocol}//`;
   // Git dispatches mixed-case schemes to distinct remote helpers.
@@ -67,13 +73,6 @@ function comparableGitHubRemote(
   const githubUrl =
     cloudRepositoryUrl ??
     (isGitHubCloudHost(host) ? `https://${host}` : undefined);
-  if (!parsed.scpStyle && sshProtocols.has(parsed.url.protocol)) {
-    const authorityStart = prefix.length;
-    const pathStart = remote.indexOf("/", authorityStart);
-    if (pathStart < 0 || remote.slice(pathStart) !== parsed.url.pathname)
-      return undefined;
-    remote = `ssh://${remote.slice(authorityStart)}`;
-  }
   const normalized = normalizeGitRepositoryUrl(remote, githubUrl);
   if (!/^https?:\/\//iu.test(normalized)) return undefined;
   if (
@@ -96,9 +95,7 @@ export function trivyRemoteKey(
   const url = checkout
     ? normalized.replace(/^(https?:\/\/)[^/\\?#]*@/iu, "$1")
     : normalized;
-  return cloudRepositoryUrl
-    ? cloudRepositoryUrlKey(url)
-    : repositoryUrlKey(url);
+  return hostedRepositoryUrlKey(url, true);
 }
 
 const sshScheme = /^(?:ssh|git\+ssh|ssh\+git):\/\//u;
@@ -129,13 +126,12 @@ export function trivyBatchSourceUrls(
   const batch = trivyReportRemotes(input.report);
   if (bind) requireTrivyBinding(batch);
   for (const { evidence } of input.findings) {
+    const typedUrl = evidence.details?.repository?.url;
     const row = trivyReportRemotes(evidence.source_data?.["report"]);
+    if (typedUrl && (bind || batch.urls.length || row.urls.length))
+      validateHostedRepositoryUrl(typedUrl);
     if (bind) requireTrivyBinding(row);
-    if (
-      batch.urls.length &&
-      !evidence.details?.repository?.url &&
-      !row.urls.length
-    )
+    if (batch.urls.length && !typedUrl && !row.urls.length)
       throw new Error(
         "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
       );
@@ -494,7 +490,7 @@ export function normalizeTrivyFindings(
 
   const findings = normalizeRecords(
     entries,
-    (entry, id) => {
+    (entry) => {
       const {
         result,
         packages,
@@ -512,10 +508,22 @@ export function normalizeTrivyFindings(
         result.Type;
       const pkg = matchingPackage(vulnerability, packages);
       const manifest = nonManifestTypes.has(result.Type) ? null : targetPath;
-      const starts = new Set<number>();
-      if (manifest && pkg)
+      // Trivy uses the same spelling for archive members and files in exploded archives.
+      let declaration = pkgPath ? packagePath : manifest;
+      if (
+        result.Type === "jar" &&
+        pkgPath !== null &&
+        javaArchiveAncestor.test(pkgPath) &&
+        /\.(?:jar|ear|war)$/u.test(pkgPath)
+      )
+        declaration = null;
+      const locations: { path: string; line: number | null }[] = [];
+      if (targetPath && targetPath !== declaration)
+        locations.push({ path: targetPath, line: null });
+      if (declaration) {
+        const lines = new Set<number>();
         for (const range of array(
-          pkg["Locations"] ?? [],
+          pkg?.["Locations"] ?? [],
           "Trivy package Locations",
         )) {
           const start = isRecord(range) && range["StartLine"];
@@ -524,76 +532,62 @@ export function normalizeTrivyFindings(
             Number.isSafeInteger(start) &&
             start > 0
           )
-            starts.add(start);
+            lines.add(start);
         }
-      const locations: { path: string; line: number | null }[] = [];
-      if (targetPath) {
-        if (starts.size === 0) locations.push({ path: targetPath, line: null });
-        for (const line of starts) locations.push({ path: targetPath, line });
+        if (!lines.size) locations.push({ path: declaration, line: null });
+        for (const line of lines) locations.push({ path: declaration, line });
       }
-      // Trivy uses the same spelling for archive members and files in exploded archives.
-      const ambiguousJavaPath =
-        result.Type === "jar" &&
-        pkgPath !== null &&
-        javaArchiveAncestor.test(pkgPath) &&
-        /\.(?:jar|ear|war)$/u.test(pkgPath);
-      if (packagePath && packagePath !== targetPath && !ambiguousJavaPath)
-        locations.push({ path: packagePath, line: null });
       const severity = text(vulnerability["Severity"])?.toLowerCase();
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: text(vulnerability["Title"]) ?? `${advisory} in ${name}`,
-            severity:
-              severity &&
-              ["critical", "high", "medium", "low"].includes(severity)
-                ? severity
-                : "unknown",
-            description: text(vulnerability["Description"]),
-            url: text(vulnerability["PrimaryURL"]),
-            advisory_ids: [
-              ...new Set([advisory, ...strings(vulnerability["VendorIDs"])]),
-            ],
-            packages: [
-              {
-                name,
-                ecosystem,
-                manifest_path: manifest,
-                installed_version: text(vulnerability["InstalledVersion"]),
-                fixed_versions:
-                  text(vulnerability["FixedVersion"])
-                    ?.split(",")
-                    .map((version) => version.trim())
-                    .filter(Boolean) ?? [],
-              },
-            ],
-            locations,
-            branch: text(metadata["Branch"]),
-            source_scan_id: text(document["ReportID"]),
-            source_data: structuredClone({
-              scanRoot: root,
-              report,
-              result,
-              vulnerability,
-              ...(pkg
-                ? {
-                    package: pick(pkg, [
-                      "ID",
-                      "Name",
-                      "Version",
-                      "Identifier",
-                      "FilePath",
-                      "Relationship",
-                      "Locations",
-                    ]),
-                  }
-                : {}),
-            }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: text(vulnerability["Title"]) ?? `${advisory} in ${name}`,
+          severity:
+            severity && ["critical", "high", "medium", "low"].includes(severity)
+              ? severity
+              : "unknown",
+          description: text(vulnerability["Description"]),
+          url: text(vulnerability["PrimaryURL"]),
+          advisory_ids: [
+            ...new Set([advisory, ...strings(vulnerability["VendorIDs"])]),
+          ],
+          packages: [
+            {
+              name,
+              ecosystem,
+              manifest_path: manifest,
+              installed_version: text(vulnerability["InstalledVersion"]),
+              fixed_versions:
+                text(vulnerability["FixedVersion"])
+                  ?.split(",")
+                  .map((version) => version.trim())
+                  .filter(Boolean) ?? [],
+            },
+          ],
+          locations,
+          branch: text(metadata["Branch"]),
+          source_scan_id: text(document["ReportID"]),
+          source_data: structuredClone({
+            scanRoot: root,
+            report,
+            result,
+            vulnerability,
+            ...(pkg
+              ? {
+                  package: pick(pkg, [
+                    "ID",
+                    "Name",
+                    "Version",
+                    "Identifier",
+                    "FilePath",
+                    "Relationship",
+                    "Locations",
+                  ]),
+                }
+              : {}),
+          }),
+        },
+        target,
+      );
     },
     (entry) => {
       const { result, advisory, name, pkgPath, targetPath, packagePath } =

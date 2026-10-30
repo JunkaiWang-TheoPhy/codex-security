@@ -460,8 +460,9 @@ explicit unsupported binary files are rejected. Bulk scans share this context
 with every repository.
 
 Use `--output-dir DIR` to choose where a scan saves its results. The directory
-must be empty and outside the scanned directory and enclosing Git worktree. On
-macOS/Linux, existing directories must be private (`chmod 700`).
+must be empty and outside the scanned directory and enclosing Git worktree.
+Existing directories keep their permissions; newly created directories are
+private to you by default.
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
 
@@ -1006,8 +1007,9 @@ directory.
 
 ### Progress and cost
 
-Interactive scans show full-screen progress. CI, redirected output, `--headless`,
-and `--verbose` use plain status lines. Results go to stdout; progress and
+Interactive scans show full-screen progress. The dashboard title uses the resolved
+directory name, so `scan .` shows the current directory's name. CI, redirected output,
+`--headless`, and `--verbose` use plain status lines. Results go to stdout; progress and
 diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
 all sources, `m` for the main scan, or `1`–`9` for a worker.
 
@@ -1278,9 +1280,9 @@ export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
 Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
-`import snyk`, `import semgrep`, and `import github-advisories` are absent from command help and schemas and cannot
-run. The SDK's external publication, local import/readback, and hosted
-acquisition APIs require the same flag in their effective environment. An explicit
+`import snyk`, `import semgrep` and `import github-advisories` are unavailable
+and hidden from command help and schemas. SDK external publication, local
+import/readback and hosted acquisition require the same flag. An explicit
 `dependencies.environment` is used instead of the process environment. Pure
 normalizers and file readers remain available as library utilities.
 
@@ -1303,8 +1305,10 @@ evidence or deduplicate equivalent vulnerabilities across different source IDs.
 Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL. Supported inputs include
 Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
+[hosted Snyk and Semgrep reports](#collect-hosted-snyk-and-semgrep-findings),
 [Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
 [Trivy dependency vulnerability JSON](#import-trivy-dependency-findings),
+[Amazon Inspector repository findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/inspector.md),
 [Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
 [OpenGrep native JSON](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/opengrep.md),
 [GitHub Dependabot repository alerts](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md),
@@ -1414,72 +1418,30 @@ confirmation and retry flow below.
 
 ### Import Snyk Open Source findings
 
-The plugin and CLI file formats below import **Open Source SCA vulnerabilities
-only**, not Code, Container, IaC, licenses or SBOMs. For existing Open Source
-or Code issues use the [hosted collector](#collect-hosted-snyk-and-semgrep-findings).
-
-Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
-with its `snyk-findings-export` skill to collect SCA findings from the repository's
-Git root. It runs a fresh local scan and writes a `snyk-findings-export/v1` bundle;
-it does not retrieve existing platform project findings.
-
-The same saved bundle supports [local import](#import-vendor-findings-locally)
-without a Cloud login:
+For a fresh SCA scan, use ungrouped native JSON from `snyk test` or a
+`snyk-findings-export/v1` bundle from the official plugin. Existing Open Source
+SARIF is also supported. For an existing monitored project use the
+[hosted collector](#collect-hosted-snyk-and-semgrep-findings).
 
 ```sh
-codex-security publish findings snyk-findings.json --to local \
-  --provider snyk --repository ./project \
-  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+codex-security publish findings snyk-findings.json --to local --provider snyk \
+  --repository ./project --source-key github.com/example/project/main/root/plugin-sca --dry-run
 ```
 
-Or preview publication to a connected Cloud repository:
-
-```sh
-codex-security publish findings snyk-findings.json --to cloud \
-  --provider snyk --repository https://github.com/example/project \
-  --source-key github.com/example/project/main/root/plugin-sca --dry-run
-```
-
-Check the collection's scan outcomes and limitations. Only Open Source SCA
-vulnerabilities are imported; other products and licenses are explicit exclusions.
-The importer retains the selected finding, native MCP record and collection
-context. MCP may shorten descriptions and omit dependency paths. Plugin paths
-remain in original evidence because v1 lacks their offset from the Git root.
-
-For automation, prefer native JSON from
-`snyk test --file=package.json --json-file-output=snyk.json`. Exit 1 means findings;
-stop on other nonzero exits before importing. The existing `--provider snyk`
-autodetects a single project object or an `--all-projects` array; any project error
-stops the import. Use default ungrouped output, without `--group-issues`.
-Native JSON preserves individual dependency paths and remediation fields. Its
-paths remain original evidence because it does not establish their Git-root offset.
-
-Open Source SARIF from `snyk test --sarif-file-output=snyk.sarif` remains supported
-for compatibility. Its target-relative manifest paths and synthetic line numbers
-remain original evidence, without being projected as repository locations or
-package manifest paths. All three formats accept either destination. Use a consistent
-format and stable source key per repository, branch and scan target, for example
-`github.com/example/project/main/root/native-sca` for native JSON. Their source
-identities differ: use separate keys when switching acquisition formats. Imports
-do not deduplicate across formats or remove earlier imported records.
-
-Known repository claims must
-match the selected Cloud repository or, when available, a configured local Git
-remote. Unknown repository context still requires selecting the correct target;
-the importer does not infer provenance from the current checkout.
-
-Remove `--dry-run` from the selected command to review and confirm the import, or
-use `--yes` after reviewing the preview. Read local records with
-`codex-security findings imported ./project --format json`. Imported source
-evidence is not a Codex assessment. No Snyk-side triage state is changed. See the
-[Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) for format limits and
-acquisition details.
+The same report can go to `--to cloud --repository URL_OR_ID`. Keep a separate
+source key for each repository, branch, scan target and acquisition format.
+The [Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#local-open-source-scans)
+covers plugin setup, CLI exit codes, multi-project scans and evidence limits.
 
 ### Collect hosted Snyk and Semgrep findings
 
 Use the opt-in collectors to read existing findings. Save complete `--format json`
 output and pass it to `publish findings` only when collection succeeds. Field
 filters, token limits and `--full-output` change the saved format.
+The scanner's repository URL must resolve to the same path in a browser and in
+Git. For example, use `/team/repo%7Bone%7D` for an escaped brace path that
+both can request. Collection and replay reject a literal `/team/repo{one}`
+because browsers escape its braces while Git sends them literally.
 
 - `import snyk PROJECT_UUID --snyk-org ORG_UUID --source-repository-url URL`
   reads Open Source issues by default. Select `--snyk-product code` for the Code
@@ -2465,7 +2427,8 @@ Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
 can help select the repository, alert numbers and ref through GitHub's MCP
-server. Pass that selection to the collector. For Dependabot, use
+server. Pass that selection to the collector. For Dependabot, use a token with
+**Dependabot alerts: read** and follow
 the [repository alert export guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/github-dependabot.md)
 to save the native REST records from one repository and preview them with
 `--provider github`. For GHSA disclosures, use the
@@ -2495,7 +2458,7 @@ the default branch. MCP list calls are paginated separately. Code-scanning
 imports require the saved collector output, which includes the selected instance.
 
 The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
-the plugin's connection does not sign in `gh`. Reading alerts requires
+the plugin's connection does not sign in `gh`. Reading code-scanning alerts requires
 [code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
 **Code scanning alerts: read** for a fine-grained token, or `security_events` for
 a classic token (`public_repo` is sufficient for public repositories). The source
@@ -2845,7 +2808,9 @@ patch-risk assessment still uses its read-only sandbox.
 
 `scan --patch` runs after a complete scan. `--patch-severity` defaults to `low`;
 `high` selects high and critical findings. Interactive users can select findings
-and add instructions. Patch results are `verified`, `no_change`, `blocked`, or
+and add instructions. The interactive finding browser lists critical, high,
+medium, then low findings, preserving scan order within each severity.
+Patch results are `verified`, `no_change`, `blocked`, or
 `failed`. Verified/already-fixed findings no longer fail the severity threshold.
 
 ### Create or resume a draft pull request
@@ -2924,7 +2889,7 @@ from the repository root with the published image:
 
 ```bash
 mkdir -p results state
-chmod 700 results state
+chmod 700 state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
 export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
 docker compose pull codex-security

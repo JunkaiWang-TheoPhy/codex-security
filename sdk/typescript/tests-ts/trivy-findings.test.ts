@@ -178,6 +178,17 @@ test("identical SSH declarations can use an SSH-config host alias", () => {
   expect(() => trivyRepositoryUrl(native)).toThrow("different repositories");
 });
 
+test("a GitHub SSH path corroborates its encoded HTTP spelling", () => {
+  const report = {
+    ...trivyReport(),
+    ArtifactName: "https://github.com/example/%E2%84%AAit",
+    Metadata: { RepoURL: "ssh://git@github.com/example/Kit.git" },
+  };
+  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
+  report.ArtifactName = "https://github.com/example/Kit";
+  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+});
+
 test("requires a scan root for aliases on an unverified Git host", () => {
   const report = {
     ...trivyReport(),
@@ -277,8 +288,8 @@ test("whole-checkout and scoped scans resolve the same manifest and package occu
   expect(scoped.evidence).toMatchObject({
     packages: [{ manifest_path: `${directory}/package-lock.json` }],
     locations: [
-      { path: `${directory}/package-lock.json`, line: 12 },
-      { path: `${directory}/vendor/package.json`, line: null },
+      { path: `${directory}/package-lock.json`, line: null },
+      { path: `${directory}/vendor/package.json`, line: 12 },
     ],
     source_data: {
       scanRoot: directory,
@@ -308,6 +319,7 @@ test.each([
               ...result,
               Target,
               Type,
+              Packages: [{ ...result.Packages[0]!, FilePath: PkgPath }],
               Vulnerabilities: [{ ...result.Vulnerabilities[0]!, PkgPath }],
             },
           ],
@@ -321,7 +333,7 @@ test.each([
     );
     expect(scoped.evidence.packages![0]!.manifest_path).toBeNull();
     expect(scoped.evidence.locations).toEqual([
-      { path: "apps/web/vendor/package.json", line: null },
+      { path: "apps/web/vendor/package.json", line: 12 },
     ]);
     for (const path of [undefined, "/outside/package.json"]) {
       const web = run("apps/web", path);
@@ -619,11 +631,11 @@ test("declaration ranges come from an unambiguous package at the reported path",
   };
   const run = () => normalizeResult(group).findings[0]!.evidence;
   expect(run().locations).toEqual([
-    { path: result.Target, line: 12 },
-    { path: selected.FilePath, line: null },
+    { path: result.Target, line: null },
+    { path: selected.FilePath, line: 12 },
   ]);
   group.Packages.push({ ...other, FilePath: selected.FilePath });
-  expect(run().locations![0]!.line).toBeNull();
+  expect(run().locations![1]!.line).toBeNull();
   expect(run().source_data?.["package"]).toBeUndefined();
 });
 

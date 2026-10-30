@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import { regexes } from "zod";
+import { validRfc3339DateTime } from "./timestamps.js";
 import {
   ContractValidationError,
   abortReason,
@@ -25,7 +25,7 @@ import type {
   ScanManifest,
 } from "./models.js";
 import {
-  requirePrivateOutputDirectory,
+  requireOutputDirectoryOwnership,
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
@@ -724,16 +724,13 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(
-        { mode: Number(returned.mode), uid: Number(returned.uid) },
-        canonical,
-      );
+      requireOutputDirectoryOwnership({ uid: Number(returned.uid) }, canonical);
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
           ? error.message
-          : "Scan directory must remain private to the current user.",
+          : "Scan directory must remain owned by the current user.",
         { cause: error },
       );
     }
@@ -762,10 +759,7 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(
-      { mode: Number(current.mode), uid: Number(current.uid) },
-      root.path,
-    );
+    requireOutputDirectoryOwnership({ uid: Number(current.uid) }, root.path);
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
@@ -1118,15 +1112,6 @@ export async function sameCheckedFileDevice(
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   throw abortReason(signal);
-}
-
-const RFC3339_DATE_TIME = new RegExp(
-  regexes.datetime({ offset: true }).source,
-  "i",
-);
-
-function validRfc3339DateTime(value: string): boolean {
-  return !value.startsWith("0000") && RFC3339_DATE_TIME.test(value);
 }
 
 function schemaError(

@@ -9,6 +9,19 @@ updates it, and what evidence a consumer can use. For setup and confirmation,
 see
 [import vendor findings locally](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
 
+## Numeric fields in hosted exports
+
+The Snyk REST and Semgrep Platform collectors store unsafe integers and any
+number whose decimal value would change when written back to JSON as exact text.
+For example, `1e-400` retains its value and `1.0` stays a JSON number. The optional `numericFields` object
+mirrors the affected fields and array indices and repeats their numeric text.
+Keep it with the export. The reader uses it to validate a numeric ID as a number
+and a quoted title as text, even when they contain the same digits. Quoted
+digits without a marker carry no record of their original type. Semgrep accepts
+exact int64 ID strings. The project summary uses the canonical ID in the export
+and in `source_data.project`. For example, `"42"` and `42` both become `42`.
+Each finding retains its own raw evidence markers in `source_data.numericFields`.
+
 ## Choose the record and source key
 
 A stored source record is scoped to **destination repository + provider + source
@@ -23,10 +36,11 @@ to investigate records together, not instructions to merge them.
 | [Wiz package JSON or detailed CSV](../../sdk/typescript/docs/cli.md#package-vulnerability-inputs); CSV requires `CloudPlatform=GitHub` and `CloudProviderURL` for a GitHub repository `/tree/<ref>` | Vendor occurrence `id` (CSV: `ID`), not the CVE                                                                                                         | Tenant and finding family                  |
 | [Wiz named repository collections](../../sdk/typescript/docs/cli.md#sast-repository-secrets-and-iac-inputs)                                                                                         | `sast:<id>`, `secret:<id>`, `iac:<id>`                                                                                                                  | Tenant and finding family                  |
 | [Endor Finding JSON or endorctl SARIF](endor.md)                                                                                                                                                    | Finding `uuid` or SARIF `properties["finding-uuid"]`                                                                                                    | Namespace, project and context             |
+| [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
-| [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
 | [Trivy repository or filesystem JSON](trivy.md)                                                                                                                                                     | Analyzer, advisory, package name, scan target and package path when available                                                                           | Repository, project and branch             |
 | [Hosted Snyk Open Source or Code](snyk.md#hosted-open-source-and-code)                                                                                                                              | API origin, organization UUID, project UUID, product and issue key                                                                                      | Organization, project and product          |
+| [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
 | [Semgrep Platform](semgrep.md#existing-platform-findings)                                                                                                                                           | Deployment, project ID, ref, product and numeric finding ID                                                                                             | Deployment, project, ref and product       |
 | [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
@@ -58,6 +72,11 @@ before preparing a fresh submission.
   normalized JSONL: supply the reviewed `source_finding_id` and `evidence`,
   retaining the raw row. The reader does not infer a mapping for other CSV
   profiles.
+- **Amazon Inspector.** Supply a complete export for one repository project.
+  A matching native URL or the operator's full project ARN mapping establishes
+  the Git host. Local import and Cloud replay check the destination again.
+  Each finding ARN identifies one occurrence. Duplicate ARNs exclude all
+  colliding rows. Package and code evidence retain the native finding.
 - **Endor Labs:** Prefer a complete native Finding, array or `list.objects`.
   `spec.level`, dependency paths/versions, advisory aliases, source SHA and
   primary SAST/AI SAST locations map when present. The project UUID does not
@@ -81,6 +100,8 @@ before preparing a fresh submission.
   Critical from High; both become diagnostic `error`, mapped to High, in Semgrep
   SARIF. Inspect the selected result for trace/fix details. Platform/MCP
   envelopes and general Supply Chain/Secrets feeds are not Code CLI or SARIF exports.
+- **OpenGrep.** Use native JSON and supply `--source-repository-url`. The
+  [OpenGrep guide](opengrep.md) covers export and occurrence identity.
 - **GitHub:** For code scanning, the selected instance supplies path/range, ref
   and commit. The rule's `security_severity_level` supplies severity; diagnostic
   `error` alone means `unknown`. An alert-wide dismissal takes precedence over
@@ -177,7 +198,15 @@ recover:
 - **`savedSubmission` identifies an existing checkpoint:** rerun the same
   approved command with unchanged input, source key, destination and endpoint to
   resume its saved requests. This also applies if the initial request was saved
-  but persisting a later receipt failed.
+  but persisting a later receipt failed. An upgrade can select additional rows
+  or distinguish values an earlier Snyk or Semgrep client rounded or stored as
+  text. In either case, resume the original selection with the earlier client or
+  its saved normalized findings before approving the new preview.
+  An older Snyk or Semgrep request saved without a repository binding needs a
+  matching current catalog URL if its evidence cannot identify the original
+  repository. Resume it before renaming. Ambiguous paths include those with a
+  literal `k` or `K` (as in `work`), a terminal `.` or `..` segment, or an
+  encoded clone suffix such as `proj%2Egit`.
 - **No resumable checkpoint:** a repository reset retires the old request, and
   an initial checkpoint-write failure may leave no request to resume. Inspect
   the destination and correct the error; run a fresh `--dry-run` and get fresh

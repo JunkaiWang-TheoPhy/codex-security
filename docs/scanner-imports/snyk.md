@@ -12,33 +12,60 @@ environment. Snyk requires Enterprise API access and the token permissions
 [API authentication](https://docs.snyk.io/developer-tools/snyk-api/authentication-for-api)
 and [Issues API](https://docs.snyk.io/developer-tools/snyk-api/reference/issues).
 
-Set `ORG_UUID` and `PROJECT_UUID` to the selected IDs. For Open Source, choose
-the manifest project. For Code, choose the `sast` project and set
-`product=code` below. Use the project's canonical HTTP(S) Git URL.
+To collect Open Source issues, set `ORG_UUID` and `PROJECT_UUID` to the
+organization and manifest project IDs. Supply the project's HTTP(S) Git URL.
 
 ```sh
-product=open-source
 codex-security import snyk "$PROJECT_UUID" --snyk-org "$ORG_UUID" \
-  --snyk-product "$product" --source-repository-url https://github.com/example/project \
+  --source-repository-url https://github.com/example/project \
   --format json > snyk-hosted.json &&
 codex-security publish findings snyk-hosted.json --provider snyk --to local \
-  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/$product" --dry-run
+  --repository ./project --source-key "$ORG_UUID/$PROJECT_UUID/open-source" --dry-run
 ```
 
-The defaults are `open-source` and `https://api.snyk.io`. Use `--snyk-api-origin`
-for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
+For Code, use the `sast` project's ID, add `--snyk-product code` and choose a
+separate source key. The default API origin is `https://api.snyk.io`. Use
+`--snyk-api-origin` for `https://api.us.snyk.io`, `https://api.eu.snyk.io` or `https://api.au.snyk.io`.
+Before sending `SNYK_TOKEN`, the collector checks the selected region against
+the first enabled endpoint in [Snyk's REST configuration order](https://github.com/snyk/cli/blob/5f54805f14097c22cb13f11e064247c3c522dcda/src/lib/config/index.ts#L45-L60).
+From highest to lowest priority, the settings are
+`API_V3_URL`, `SNYK_API_V3_URL`, `API_REST_URL`, `SNYK_API_REST_URL`,
+`SNYK_API`, then `SNYK_CFG_ENDPOINT`. Snyk requires the exact uppercase names
+`SNYK_API_V3_URL` and `SNYK_API_REST_URL` even on Windows. A literal
+`false` or `FALSE` disables either override. Other values expand `${NAME}`
+references once from the caller's environment. For example,
+when a REST override points to Europe and the general endpoint points to the US, select
+`--snyk-api-origin https://api.eu.snyk.io`. If the region is saved only in
+the Snyk CLI configuration file, select it explicitly here as well.
+When a Snyk user or service access token carries an API host, that host must
+also match the selected region, including for tokens supplied through the SDK.
+
 The collector checks the selected repository URL against the project target
-when Snyk supplies one. For GitHub SCM projects, a standard SSH target can match
-the selected GitHub Enterprise HTTPS URL. Other custom-host mappings require
-matching repository URLs.
+when Snyk supplies one. Standard Git SSH targets can match HTTPS repository
+URLs on GitHub.com, GitHub Enterprise Cloud (`*.ghe.com`), GitLab.com, and
+Bitbucket.org. A custom GitHub Enterprise host also requires GitHub SCM
+provenance from the Snyk project. When a separately fetched target identifies
+its integration, an SCM project requires a supported integration from the same
+provider family, such as GitHub Enterprise and its GitHub Server App.
+On custom hosts, keep the exact `.git` suffix spelling unless the project
+supplies a matching target URL from its GitHub Enterprise or GitLab integration.
+
+For Open Source projects, Snyk CLI can record a local Git path and a hosted
+repository as the same HTTP target. The importer rejects these ambiguous
+targets during collection and saved-report replay. Set the project's target
+explicitly with
+[`snyk monitor --remote-repo-url=https://git.example.test/team/repo.git`](https://docs.snyk.io/developer-tools/snyk-cli/commands/monitor#--remote-repo-urlurl)
+and collect a new export. When Snyk supplies no target URL, the collector
+uses the repository selected with `--source-repository-url`.
 
 The collector uses Snyk REST version `2026-03-25` and reads every page of open
 and resolved issues for that project and product, including ignored issues.
-Only publish a successful collection. The SDK's `collectSnykIssues` returns the
-same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
-can replay it offline. Keep the same source key across exports. The importer
+The SDK's `collectSnykIssues` returns the same `snyk-rest-issues/v1` report. `normalizeSnykIssues` and `readSnykFindings`
+can replay it offline. The export preserves [exact numeric values and their types](schema-guide.md#numeric-fields-in-hosted-exports). Keep the same source key across exports. The importer
 uses Snyk's issue key within the API origin, organization, project and product
-to identify updates. Duplicate keys in one export are excluded.
+to identify updates. Duplicate keys in one export are excluded. When preparing
+a REST export yourself, keep the UTC marker or offset in `updated_at` so replay
+uses the same timestamp in every time zone.
 
 Native evidence retains issue status, ignored state and coordinates. Package
 versions or Code locations are projected only when the issue and coordinate
