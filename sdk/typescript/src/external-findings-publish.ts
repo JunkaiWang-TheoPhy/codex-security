@@ -758,30 +758,29 @@ async function preparePublicationInput(
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
+    if (!replay || options.provider === "inspector") {
+      const binding = inspectorReportRepository(
+        options.provider,
+        findings,
+        "cloud",
+        inspectorProjectMap,
+      );
+      if (binding) requireDestination(binding.findingId, binding.url);
+    }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
-      const url = repositories
+      const projected = repositories
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
-      if (!url) continue;
-      requireDestination(id, url);
-      requireDestination(id, evidence.details?.repository?.url);
-      if (options.provider === "wiz")
-        requireDestination(id, wizFindingRepository(evidence)?.url);
-    }
-    if (replay && options.provider !== "inspector") return;
-    const binding = inspectorReportRepository(
-      options.provider,
-      findings,
-      "cloud",
-      inspectorProjectMap,
-    );
-    if (binding) requireDestination(binding.findingId, binding.url);
-    for (const finding of findings) {
-      const { source_finding_id: id, evidence } = finding;
+      if (replay && !projected && options.provider !== "inspector") continue;
       const urls = [
+        projected,
         evidence.details?.repository?.url,
-        ...(options.provider === "wiz" ? [wizCsvRepositoryUrl(evidence)] : []),
+        options.provider === "wiz"
+          ? projected
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,

@@ -365,3 +365,41 @@ test.each(["github", "inspector"] as const)(
     );
   },
 );
+
+test.each(["snyk", "endor"] as const)(
+  "%s provenance binds its own projected row and allows separate repository rows",
+  async (provider) => {
+    await using f = await localFindingsFixture();
+    const a = "https://git.example.test/team/a";
+    const b = "https://git.example.test/team/b";
+    const provenance =
+      provider === "snyk"
+        ? {
+            format: "snyk-findings-export/v1",
+            collection: { target: { repository: b } },
+          }
+        : { runContext: { versionControlProvenance: [{ repositoryUri: b }] } };
+    const prepare = (findings: ExternalFinding[], urls: string[] = []) =>
+      prepareNormalizedLocalImport(
+        { read: findings.length, findings, excluded: [] },
+        { provider, repository: f.repository, sourceKey: "example" },
+        {
+          environment: f.environment,
+          sourceRepositories: urls.map((url) => ({ url })),
+        },
+      );
+    const row = projection(a);
+    await prepare(
+      [
+        row,
+        {
+          source_finding_id: "native",
+          evidence: { ...row.evidence, source_data: provenance },
+        },
+      ],
+      [a, b],
+    );
+    row.evidence.source_data = { ...row.evidence.source_data, ...provenance };
+    await expect(prepare([row])).rejects.toThrow(/original provider finding/);
+  },
+);

@@ -461,6 +461,7 @@ function records(payload: unknown): FindingInput {
 /** The source repository retained by a Wiz package finding or CSV row. */
 export function wizFindingRepository(
   evidence: VendorFinding["evidence"],
+  target: ExternalImportTarget = "local",
 ): ExternalSourceRepository | undefined {
   const csvUrl = wizCsvRepositoryUrl(evidence);
   if (csvUrl) return { url: csvUrl, platform: "github" };
@@ -476,8 +477,16 @@ export function wizFindingRepository(
       ? { url: asset["cloudProviderURL"] }
       : undefined;
   const [, owner, repository] = url.pathname.split("/");
-  if (owner && repository)
-    return { url: `${url.origin}/${owner}/${repository}`, platform: "github" };
+  if (!owner || !repository) return;
+  // URL.origin drops explicit default ports, which the Cloud catalog retains.
+  const port =
+    target === "cloud"
+      ? /^https?:\/\/[^/?#\\]*:(\d+)(?:[/?#]|$)/iu.exec(
+          asset["cloudProviderURL"],
+        )?.[1]
+      : undefined;
+  const origin = port ? `${url.protocol}//${url.hostname}:${port}` : url.origin;
+  return { url: `${origin}/${owner}/${repository}`, platform: "github" };
 }
 
 export async function readVendorFindings(

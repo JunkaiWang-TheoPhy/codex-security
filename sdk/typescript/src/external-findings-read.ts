@@ -1,4 +1,5 @@
 import type {
+  ExternalFinding,
   ExternalFindings,
   ExternalPublicationInput,
   ExternalSourceRepository,
@@ -9,6 +10,7 @@ import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
@@ -52,6 +54,29 @@ export interface ReadExternalFindings {
   sourceRepositories?: ExternalSourceRepository[];
 }
 
+/** Repository references retained by a provider's individual finding. */
+export function localFindingRepositories(
+  provider: Provider,
+  finding: ExternalFinding,
+): ExternalSourceRepository[] {
+  const { evidence } = finding;
+  if (provider === "snyk")
+    return snykRepositoryUrls(evidence.source_data, {
+      normalizeGitRemote: false,
+    }).map((url) => ({ url }));
+  if (provider === "endor")
+    return endorRepositoryUrls(evidence.source_data).map((url) => ({ url }));
+  if (provider === "wiz") {
+    const repository = wizFindingRepository(evidence);
+    return repository ? [repository] : [];
+  }
+  if (provider === "github") {
+    const url = dependabotRepository(finding);
+    if (url) return [{ url, platform: "github" }];
+  }
+  return [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -69,14 +94,16 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  if (options.provider === "snyk") {
-    const findings = await readSnykFindings(path, target);
+  if (options.provider === "snyk" || options.provider === "endor") {
+    const provider = options.provider;
+    const findings =
+      provider === "snyk"
+        ? await readSnykFindings(path, target)
+        : await readEndorFindings(path, target);
     return {
       findings,
-      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
-        snykRepositoryUrls(evidence.source_data, {
-          normalizeGitRemote: false,
-        }).map((url) => ({ url })),
+      sourceRepositories: findings.findings.flatMap((finding) =>
+        localFindingRepositories(provider, finding),
       ),
     };
   }
@@ -105,17 +132,6 @@ export async function readExternalFindings(
     });
     return { findings, sourceRepositories };
   }
-  if (options.provider === "endor") {
-    const parsed = await readEndorFindings(path, target);
-    return {
-      findings: parsed,
-      sourceRepositories: parsed.findings.flatMap((finding) =>
-        endorRepositoryUrls(finding.evidence.source_data).map((url) => ({
-          url,
-        })),
-      ),
-    };
-  }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (options.provider === "inspector" || options.provider === "blackduck") {
@@ -132,11 +148,8 @@ export async function readExternalFindings(
     return { findings, sourceRepositories: [{ url }] };
   }
   const publication = await readVendorFindingsForPublication(path, target);
-  const sourceRepositories = publication.current.findings.flatMap(
-    ({ evidence }) => {
-      const repository = wizFindingRepository(evidence);
-      return repository ? [repository] : [];
-    },
+  const sourceRepositories = publication.current.findings.flatMap((finding) =>
+    localFindingRepositories("wiz", finding),
   );
   return {
     findings: publication.current,

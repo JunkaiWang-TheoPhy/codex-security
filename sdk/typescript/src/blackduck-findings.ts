@@ -35,7 +35,7 @@ export function projectedBlackDuckRepositoryUrl(
 ): string | undefined {
   if (!nativeId.test(finding.source_finding_id)) return;
   const url = finding.evidence.source_data?.["sourceRepositoryUrl"];
-  if (typeof url === "string" && /^https?:\/\//iu.test(url))
+  if (typeof url === "string")
     return declaredScannerRepositoryUrl(url, "Black Duck", target);
   return finding.evidence.details?.repository?.url ?? undefined;
 }

@@ -22,8 +22,11 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { wizFindingRepository } from "./wiz-findings.js";
-import { blackDuckReportRepositories } from "./blackduck-findings.js";
+import { localFindingRepositories } from "./external-findings-read.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
@@ -482,6 +485,7 @@ async function requireMatchingRepository(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   strictSources: ReadonlySet<string>,
+  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -536,10 +540,12 @@ async function requireMatchingRepository(
     remotes.push(...urls.split(/\r?\n/u));
   }
   const boundProvider = provider === "inspector" || provider === "blackduck";
-  const platformFor = localRepositoryPlatform(provider, sources, boundProvider);
+  const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   for (const source of sources) {
     const bound = boundProvider || strictSources.has(source.url);
-    const platform = platformFor(source);
+    const platform = bound
+      ? strictPlatformFor(source)
+      : loosePlatformFor(source);
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = remotes.flatMap((remote) => identity(remote) ?? []);
     if (!targets.length) continue;
@@ -667,9 +673,34 @@ export async function prepareLocalImport(
   );
   const sources = new Map<string, ExternalSourceRepository>();
   const references = [...readerSources, ...parsedSources];
+  const inspector = inspectorReportRepository(
+    options.provider,
+    current.findings,
+    "local",
+    options.inspectorProjectMap,
+  );
+  const projected =
+    options.provider === "blackduck"
+      ? []
+      : current.findings.filter((finding) =>
+          projectedBlackDuckRepositoryUrl(finding, "local"),
+        );
+  const mixed = projected.length > 0 && readerSources.length > 0;
+  const nativeSources = new Map(
+    (mixed ? current.findings : projected).map(
+      (finding) =>
+        [finding, localFindingRepositories(options.provider, finding)] as const,
+    ),
+  );
   const platformFor = localRepositoryPlatform(
     options.provider,
-    references,
+    options.inspectorProjectMap
+      ? []
+      : [
+          ...references,
+          ...Array.from(nativeSources.values()).flat(),
+          ...(inspector ? [inspector] : []),
+        ],
     true,
   );
   const identify = (url: string) =>
@@ -682,34 +713,33 @@ export async function prepareLocalImport(
   );
   const strictSources = new Set<string>();
   const known = new Set<string>(parsedSources.map(({ url }) => url));
-  const mixed =
-    options.provider !== "blackduck" &&
-    bound.size > 0 &&
-    readerSources.length > 0;
   for (const finding of current.findings) {
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
     const retained = bound.get(id);
+    const native = nativeSources.get(finding) ?? [];
     if (retained) {
-      sources.set(retained.url, retained);
-      strictSources.add(retained.url);
-      if (url) strictSources.add(url);
-    }
-    if (!retained && !mixed) continue;
-    const native =
-      options.provider === "wiz"
-        ? wizFindingRepository(evidence)?.url
-        : dependabotSource
-          ? dependabotRepository(finding)
-          : undefined;
-    if (native) {
-      if (retained && !matchingRemote(identify(native), identify(retained.url)))
+      if (
+        native.length &&
+        !sameBlackDuckRepositories(
+          [
+            retained.url,
+            ...(url ? [url] : []),
+            ...native.map((source) => source.url),
+          ].map(identify),
+        )
+      )
         throw new CodexSecurityError(
           "The retained scanner repository does not match the original provider finding.",
         );
-      known.add(native);
+      for (const source of [retained, ...native]) {
+        sources.set(source.url, source);
+        strictSources.add(source.url);
+      }
+      if (url) strictSources.add(url);
     }
+    for (const source of native) known.add(source.url);
   }
   if (mixed) {
     // A caller reference with no matching row spelling can still be a Git alias.
@@ -732,12 +762,6 @@ export async function prepareLocalImport(
     for (const { url } of references)
       if (keys.has(identify(url).key)) strictSources.add(url);
   }
-  const inspector = inspectorReportRepository(
-    options.provider,
-    current.findings,
-    "local",
-    options.inspectorProjectMap,
-  );
   if (inspector) {
     const platform = inspector.platform ?? options.provider;
     const native = remoteRepository(inspector.url, platform, true);
@@ -775,6 +799,7 @@ export async function prepareLocalImport(
     options.provider,
     [...sources.values()],
     strictSources,
+    platformFor,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,
