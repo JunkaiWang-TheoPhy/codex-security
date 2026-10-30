@@ -160,8 +160,42 @@ test("accepts collection self links while requiring navigation to identify the d
       href: page._links.self.href.replace(/&page=\d+&size=\d+/u, ""),
     };
   expect(normalize(pages)).toEqual(expected);
+  const before = pages[0]!._links.next!.href;
+  pages[0]!._links.next!.href = before.replace("&size=1", "");
+  expect(() => normalize(pages)).toThrow(/size/);
   pages[0]!._links.next!.href = pages[0]!._links.self.href;
   expect(() => normalize(pages)).toThrow(/page/);
+});
+
+test("matches row filters and equivalent HAL list and boolean selections", () => {
+  const pages = capture();
+  const expected = normalize(pages);
+  for (const page of pages) {
+    for (const [rel, link] of Object.entries(page._links)) {
+      if (rel === "application") continue;
+      link.href +=
+        rel === "self"
+          ? "&cwe=79,89&finding_category=4,20&include_annot=TRUE"
+          : "&cwe=89&cwe=79&finding_category=20,4&include_annot=true";
+    }
+  }
+  expect(normalize(pages)).toEqual(expected);
+  const row = {
+    ...veracodePolicyRow(),
+    finding_status: { ...veracodePolicyRow().finding_status, new: false },
+  };
+  for (const [query, message] of [
+    ["cwe=89", "cwe"],
+    ["finding_category=20", "finding_category"],
+    ["new=TRUE", "new"],
+  ]) {
+    const page = veracodePolicyPage([row]);
+    page._links.self.href += "&" + query;
+    expect(() => normalize(page)).toThrow(message);
+  }
+  const page = veracodePolicyPage([row]);
+  page._links.self.href += "&new=false";
+  expect(normalize(page).findings).toHaveLength(1);
 });
 
 test("accepts a scoped native empty page but rejects errors, summaries, Pipeline and raw row arrays", () => {

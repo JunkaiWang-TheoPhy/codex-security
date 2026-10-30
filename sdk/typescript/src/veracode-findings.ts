@@ -118,10 +118,10 @@ export function hasVeracodeEvidence(data: unknown, id: string): boolean {
   if (!isRecord(data)) return false;
   const row = isRecord(data["row"]) ? data["row"] : data;
   return (
-    "context_guid" in row &&
-    "context_type" in row &&
-    "scan_type" in row &&
-    "issue_id" in row
+    row["context_type"] === "APPLICATION" &&
+    row["scan_type"] === "STATIC" &&
+    applicationGuid.safeParse(row["context_guid"]).success &&
+    positive.safeParse(row["issue_id"]).success
   );
 }
 
@@ -185,22 +185,32 @@ function selection(
     throw new Error(
       "Only the Veracode STATIC APPLICATION policy selection is supported, not sandbox, DAST or SCA.",
     );
-  const violating = query.getAll("violates_policy");
-  if (
-    violating.length > 1 ||
-    violating.some((flag) => !/^(true|false)$/iu.test(flag))
-  )
-    throw new Error("Invalid Veracode violates_policy selection.");
-  if (violating[0]) query.set("violates_policy", violating[0].toLowerCase());
-  for (const [key, expected] of [
-    ["page", number],
-    ["size", size],
+  for (const key of [
+    "violates_policy",
+    "new",
+    "include_annot",
+    "include_exp_date",
+  ]) {
+    const flags = query.getAll(key);
+    if (flags.length === 1 && /^(true|false)$/iu.test(flags[0]!))
+      query.set(key, flags[0]!.toLowerCase());
+    else if (key === "violates_policy" && flags.length)
+      throw new Error("Invalid Veracode violates_policy selection.");
+  }
+  for (const key of ["cwe", "finding_category"]) {
+    const ids = query.getAll(key).flatMap((value) => value.split(","));
+    if (ids.length) query.set(key, [...new Set(ids)].sort().join(","));
+  }
+  // Collection self links may omit pagination. Navigation uses the API defaults.
+  for (const [key, expected, defaultValue] of [
+    ["page", number, 0],
+    ["size", size, 50],
   ] as const) {
     const values = query.getAll(key);
     if (
       values.length
         ? values.length !== 1 || values[0] !== String(expected)
-        : key === "page" && number !== 0 && rel !== "self"
+        : rel !== "self" && expected !== defaultValue
     )
       throw new Error(`Veracode HAL ${key} does not match the declared page.`);
     query.delete(key);
@@ -330,12 +340,42 @@ function readReport(input: unknown) {
   const minimumSeverity = severitySelection(query, "severity_gte");
   const staticOnly = query.has("scan_type");
   const violates = query.get("violates_policy");
+  const newOnly = query.get("new") === "true";
+  const cwes = query.get("cwe")?.split(",");
+  const categories = query.get("finding_category")?.split(",");
   const seen = new Set<string>();
   const rows: Record<string, unknown>[] = [];
   for (const page of pages) {
     for (const value of page.rows) {
       const row = record(value, "Veracode finding");
       requireApplication(row, scope);
+      if (
+        newOnly &&
+        record(row["finding_status"], "Veracode finding_status")["new"] ===
+          false
+      )
+        throw new Error("Veracode finding contradicts the new selection.");
+      if (cwes || categories) {
+        const details = record(
+          row["finding_details"],
+          "Veracode finding_details",
+        );
+        for (const [field, ids] of [
+          ["cwe", cwes],
+          ["finding_category", categories],
+        ] as const) {
+          const entry = details[field];
+          if (
+            ids &&
+            isRecord(entry) &&
+            typeof entry["id"] === "number" &&
+            !ids.includes(String(entry["id"]))
+          )
+            throw new Error(
+              `Veracode finding contradicts the ${field} selection.`,
+            );
+        }
+      }
       if (exactSeverity !== null || minimumSeverity !== null) {
         const details = record(
           row["finding_details"],
