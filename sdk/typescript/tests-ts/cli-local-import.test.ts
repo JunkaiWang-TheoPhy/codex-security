@@ -153,14 +153,31 @@ test.each(["local", "cloud"])(
       report: { errors: input.errors, paths: input.paths },
     });
 
-    await writeFile(f.file, JSON.stringify({ ...input, errors: [] }));
+    const path = "src/example\u001b[2J\u009b.ts";
+    const paths = { scanned: [path] };
+    await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
     const clean = createCliTest(main);
     expect(await clean.runCli(command, f.deps)).toBe(0);
     expect(JSON.parse(clean.stdout.text())).toMatchObject({
       read: 0,
       ready: 0,
-      report: { errors: [] },
+      report: { errors: [], paths },
     });
+    for (const format of ["md", "toon", "jsonl"]) {
+      const arguments_ = [...command];
+      arguments_[arguments_.indexOf("--format") + 1] = format;
+      for (const flags of [[], ["--dry-run"]]) {
+        const cli = createCliTest(main);
+        expect(await cli.runCli([...arguments_, ...flags], f.deps)).toBe(0);
+        if (format === "jsonl")
+          expect(JSON.parse(cli.stdout.text()).report.paths).toEqual(paths);
+        else {
+          expect(cli.stdout.text()).toContain("src/example");
+          expect(cli.stdout.text()).not.toContain("\u001b");
+          expect(cli.stdout.text()).not.toContain("\u009b");
+        }
+      }
+    }
     await expect(readdir(f.state)).rejects.toThrow("ENOENT");
   },
 );

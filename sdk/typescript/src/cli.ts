@@ -3627,6 +3627,13 @@ export async function main(
             format === "toon" &&
             !formatExplicit &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const emptyReportDisplay = ({
+            read,
+            report,
+          }: Pick<ExternalFindings, "read" | "report">) =>
+            !machineFormat && read === 0 && report
+              ? { report: terminalReportValue(report) }
+              : {};
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);
             for (const item of sample)
@@ -3750,14 +3757,18 @@ export async function main(
               if (options.dryRun) {
                 if (humanSummary)
                   renderedOutput = "Dry run complete. No findings stored.\n";
-                return { ...preview, dryRun: true };
+                return {
+                  ...preview,
+                  ...emptyReportDisplay(preview),
+                  dryRun: true,
+                };
               }
               if (hasNoExternalRecords(preview)) {
                 const result = await prepared.import();
                 if (humanSummary)
                   renderedOutput =
                     "The report contains no findings. Nothing was stored.\n";
-                return { ...result };
+                return { ...result, ...emptyReportDisplay(result) };
               }
               if (!(await confirmImport(preview, showPreview))) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
@@ -3848,6 +3859,7 @@ export async function main(
               else if (!structured) writeDiagnostic(message);
               return {
                 ...selection,
+                ...emptyReportDisplay(selection),
                 status: "empty",
                 published: false,
                 ready: 0,
@@ -9251,6 +9263,19 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
+
+function terminalReportValue(value: unknown): unknown {
+  if (typeof value === "string") return diagnosticValue(value);
+  if (Array.isArray(value)) return value.map(terminalReportValue);
+  if (isJsonObject(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        diagnosticValue(key),
+        terminalReportValue(item),
+      ]),
+    );
+  return value;
 }
 
 function diagnosticValue(value: unknown): string {
