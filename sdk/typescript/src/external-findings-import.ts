@@ -24,15 +24,22 @@ export async function prepareLocalExternalImport(
   options: ExternalPublicationOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
-  const { sourceRepositories: suppliedRepositories, ...workbench } =
-    dependencies;
-  workbench.signal?.throwIfAborted();
-  requireExternalImports(workbench.environment);
+  const { signal } = dependencies;
+  signal?.throwIfAborted();
+  const { environment } = dependencies;
+  requireExternalImports(environment);
+  const workbench = {
+    environment,
+    signal,
+    runWorkbench: dependencies.runWorkbench,
+  };
   const settings = snapshotImportOptions(options);
-  const verifiedRepositories = snapshotSourceRepositories(suppliedRepositories);
+  const verifiedRepositories = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  );
   const parsed = await abortable(
     () => readExternalFindings(path, settings, "local", verifiedRepositories),
-    workbench.signal,
+    signal,
   );
   const normalizedOptions = {
     ...settings,

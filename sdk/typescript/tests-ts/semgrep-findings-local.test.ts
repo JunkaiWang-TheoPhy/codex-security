@@ -101,7 +101,7 @@ test("a prepared Platform import retains its selected runner and signal", async 
   const prepared = await prepareLocalExternalImport(
     fixture.file,
     fixture.options,
-    dependencies,
+    Object.create(dependencies),
   );
   dependencies.signal = AbortSignal.abort();
   dependencies.runWorkbench = async () => {
