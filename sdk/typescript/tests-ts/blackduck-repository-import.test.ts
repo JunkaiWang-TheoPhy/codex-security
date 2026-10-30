@@ -115,6 +115,7 @@ test("Black Duck binds normalized summaries to native findings and comparable re
     "local",
   );
   const native = report.findings[0]!;
+  const sourceRepositories: { url: string; platform: "github" }[] = [];
   const prepare = (...findings: typeof report.findings) =>
     prepareNormalizedLocalImport(
       { read: findings.length, findings, excluded: [] },
@@ -123,7 +124,7 @@ test("Black Duck binds normalized summaries to native findings and comparable re
         sourceKey: "example",
         repository: fixture.repository,
       },
-      { environment: fixture.environment },
+      { environment: fixture.environment, sourceRepositories },
     );
 
   execFileSync(
@@ -188,4 +189,13 @@ test("Black Duck binds normalized summaries to native findings and comparable re
       ),
     ).rejects.toThrow(/same project version/);
   }
+
+  const alias = typed(
+    "case-alias",
+    "https://git.example.test/Team/Application",
+  );
+  await expect(prepare(native, alias)).rejects.toThrow(/same project version/);
+  sourceRepositories.push({ url: source, platform: "github" });
+  await prepare(native, alias);
+  await prepare(typed("sdk-source", source), alias);
 });

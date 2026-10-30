@@ -247,10 +247,39 @@ function matchingRemote(
   );
 }
 
-function sameBlackDuckRepositories(urls: Iterable<string>): boolean {
+function localRepositoryPlatform(
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  bound: boolean,
+) {
+  const githubKey = (url: string) =>
+    remoteRepository(url, "github", bound)?.key;
+  const githubRepositories = new Set(
+    sources.flatMap((source) => {
+      if (source.platform !== "github") return [];
+      const key = githubKey(source.url);
+      return key === undefined ? [] : [key];
+    }),
+  );
+  return (source: ExternalSourceRepository): Provider => {
+    if (source.platform === "github") return "github";
+    if (githubRepositories.size === 0) return provider;
+    const key = githubKey(source.url);
+    return key !== undefined && githubRepositories.has(key)
+      ? "github"
+      : provider;
+  };
+}
+
+function sameBlackDuckRepositories(
+  urls: Iterable<string>,
+  platformFor: (source: ExternalSourceRepository) => Provider,
+): boolean {
   let known: RemoteRepositoryIdentity | undefined;
   for (const url of urls) {
-    const remote = remoteRepository(url, "blackduck", true) ?? { key: url };
+    const remote = remoteRepository(url, platformFor({ url }), true) ?? {
+      key: url,
+    };
     if (known && !matchingRemote(known, remote)) return false;
     // HTTPS does not specify the login or path interpretation carried by SSH.
     known = {
@@ -507,31 +536,14 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const identity = (url: string, platform: Provider) =>
-    remoteRepository(
-      url,
-      platform,
-      provider === "inspector" || provider === "blackduck",
-    );
-  const githubRepositories = new Set(
-    sources.flatMap((source) => {
-      if (source.platform !== "github") return [];
-      const key = identity(source.url, "github")?.key;
-      return key === undefined ? [] : [key];
-    }),
-  );
+  const bound = provider === "inspector" || provider === "blackduck";
+  const platformFor = localRepositoryPlatform(provider, sources, bound);
   for (const source of sources) {
-    const githubKey = identity(source.url, "github")?.key;
-    const sourceProvider =
-      source.platform === "github" ||
-      (githubKey !== undefined && githubRepositories.has(githubKey))
-        ? "github"
-        : provider;
-    const targets = remotes.flatMap(
-      (remote) => identity(remote, sourceProvider) ?? [],
-    );
+    const platform = platformFor(source);
+    const identity = (url: string) => remoteRepository(url, platform, bound);
+    const targets = remotes.flatMap((remote) => identity(remote) ?? []);
     if (!targets.length) continue;
-    const target = identity(source.url, sourceProvider);
+    const target = identity(source.url);
     if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
@@ -652,11 +664,16 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
+  const platformFor = localRepositoryPlatform(
+    "blackduck",
+    dependencies.sourceRepositories ?? [],
+    true,
+  );
   const bound = blackDuckReportRepositories(
     options.provider,
     current.findings,
     "local",
-    sameBlackDuckRepositories,
+    (urls) => sameBlackDuckRepositories(urls, platformFor),
   );
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
