@@ -196,6 +196,7 @@ test.each([
     "ssh://git@gitlab.com/group/project.git",
     {},
   ],
+  ["g:org/aux.git", "ssh://g/org/aux.git", { GITLAB_HOST: "g" }],
   [
     "git@[2001:db8::1]:group/subgroup/project.git",
     "ssh://git@[2001:db8::1]/group/subgroup/project.git",

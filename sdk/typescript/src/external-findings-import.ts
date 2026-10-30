@@ -8,9 +8,13 @@ import {
   readExternalFindings,
 } from "./external-findings-read.js";
 import {
-  prepareNormalizedLocalImport,
+  prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
+import {
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+} from "./external-findings.js";
 import { abortable } from "./targets.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 
@@ -20,22 +24,32 @@ export async function prepareLocalExternalImport(
   options: ExternalPublicationOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
-  dependencies.signal?.throwIfAborted();
+  const { signal } = dependencies;
+  signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
+  const runWorkbench = dependencies.runWorkbench;
+  const settings = snapshotImportOptions(options);
+  const verifiedRepositories = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  );
   const parsed = await abortable(
-    () => readExternalFindings(path, options, "local"),
-    dependencies.signal,
+    () => readExternalFindings(path, settings, "local", verifiedRepositories),
+    signal,
   );
   const normalizedOptions = {
-    ...options,
-    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+    ...settings,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider],
   };
   let sourceRepositories = parsed.sourceRepositories ?? [];
-  if (normalizedOptions.provider === "semgrep") {
+  if (
+    normalizedOptions.provider === "semgrep" &&
+    !parsed.findings.sourceRepositoryUrl
+  ) {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
-    const source = parsed.reportRepositoryUrl!;
-    const knownGitHub = dependencies.sourceRepositories?.some(
+    const source = settings.sourceRepositoryUrl!;
+    sourceRepositories = [{ url: source }, ...sourceRepositories];
+    const knownGitHub = verifiedRepositories.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
@@ -48,24 +62,15 @@ export async function prepareLocalExternalImport(
         );
     }
     if (knownGitHub)
-      sourceRepositories = [
-        { url: source, platform: "github" },
-        ...sourceRepositories.map((reference) => ({
-          ...reference,
-          platform: "github" as const,
-        })),
-      ];
+      sourceRepositories = sourceRepositories.map(({ url }) => ({
+        url,
+        platform: "github",
+      }));
   }
-  const { environment, ...workbench } = dependencies;
-  return prepareNormalizedLocalImport(parsed.findings, normalizedOptions, {
-    ...workbench,
-    environment,
-    sourceRepositories: [
-      ...(dependencies.sourceRepositories ?? []),
-      ...(parsed.reportRepositoryUrl
-        ? [{ url: parsed.reportRepositoryUrl }]
-        : []),
-      ...sourceRepositories,
-    ],
-  });
+  return prepareLocalImport(
+    parsed.findings,
+    normalizedOptions,
+    { environment: dependencies.environment, signal, runWorkbench },
+    [...verifiedRepositories, ...sourceRepositories],
+  );
 }

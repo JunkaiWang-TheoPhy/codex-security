@@ -11,10 +11,13 @@ import {
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
   normalizeSnykFindingsExport,
+  normalizeSemgrepSarif,
+  type SemgrepImportOptions,
   collectSnykIssues,
   collectSemgrepPlatformFindings,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
+  type FindingImportRequest,
   type ExternalPublicationOptions,
   type NormalizedExternalPublicationOptions,
   type ExternalPublicationResult,
@@ -307,11 +310,14 @@ export async function externalPublication(
 ): Promise<ExternalPublicationResult> {
   const fromFile = await prepareExternalPublication(file, options);
   fromFile.preview.requests[0]?.source.provider satisfies
-    "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
+    FindingImportRequest["source"]["provider"] | undefined;
   const prepared = await prepareNormalizedExternalPublication(input, {
     ...options,
     provider: fromFile.preview.source.provider,
   });
+  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
+  prepared.preview.sourceRepositoryPlatform satisfies
+    "github" | "other" | undefined;
   return prepared.publish();
 }
 
@@ -423,6 +429,9 @@ export async function importLocalEvidence(
   options: NormalizedLocalImportOptions,
 ): Promise<StoredExternalFinding[]> {
   const prepared = await prepareNormalizedLocalImport(input, options);
+  prepared.preview.sourceRepositoryUrl satisfies string | undefined;
+  prepared.preview.sourceRepositoryPlatform satisfies
+    "github" | "other" | undefined;
   await prepared.import();
   return listLocalExternalFindings({ repository: options.repository });
 }
@@ -437,6 +446,15 @@ export async function importLocalFile(
 
 export function snykPluginFindings(bundle: unknown): ExternalFindings {
   return normalizeSnykFindingsExport(bundle);
+}
+
+export function semgrepSarifFindings(
+  report: unknown,
+  options: Parameters<typeof normalizeSemgrepSarif>[1],
+): ExternalFindings {
+  const declared: SemgrepImportOptions = options;
+  declared.sourceRepositoryUrl satisfies string;
+  return normalizeSemgrepSarif(report, declared);
 }
 
 export const hostedCollectors = {

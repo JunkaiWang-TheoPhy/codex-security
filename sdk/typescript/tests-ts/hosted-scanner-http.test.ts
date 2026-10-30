@@ -1,10 +1,17 @@
 import { setImmediate } from "node:timers/promises";
 import { afterEach, expect, jest, mock, test } from "bun:test";
-import { getHostedJson } from "../src/hosted-scanner-http.js";
+import {
+  hostedScannerHttp,
+  type HostedScannerHttpOptions,
+} from "../src/hosted-scanner-http.js";
 
 const url = new URL(
   "https://semgrep.dev/api/v1/deployments/example/findings?page=1",
 );
+function get(options: HostedScannerHttpOptions) {
+  return hostedScannerHttp(options).getJson(url, "Bearer synthetic");
+}
+
 const now = Date.UTC(2026, 10, 6, 8, 49, 20, 250);
 afterEach(() => jest.useRealTimers());
 
@@ -33,7 +40,7 @@ test.each([
     const response = limited(hint, released.resolve);
     if (serverDate) response.headers.set("Date", serverDate);
     fetch.mockResolvedValueOnce(response);
-    const result = getHostedJson(url, "Bearer synthetic", { fetch });
+    const result = get({ fetch });
     await released.promise;
     if (delay > 0) {
       jest.advanceTimersByTime(delay - 1);
@@ -46,6 +53,20 @@ test.each([
   },
 );
 
+test("retries the same URL when a transport rewrites its request path", async () => {
+  const paths: string[] = [];
+  await get({
+    fetch: async (requestUrl) => {
+      requestUrl.pathname = `/proxy${requestUrl.pathname}`;
+      paths.push(requestUrl.pathname);
+      return paths.length === 1
+        ? new Response(null, { status: 429, headers: { "Retry-After": "0" } })
+        : Response.json({});
+    },
+  });
+  expect(paths).toEqual([`/proxy${url.pathname}`, `/proxy${url.pathname}`]);
+});
+
 test.each(["cancel", "timeout"])(
   "a %s during Retry-After prevents the second GET",
   async (mode) => {
@@ -55,7 +76,7 @@ test.each(["cancel", "timeout"])(
       mode === "timeout" ? AbortSignal.timeout(500) : controller.signal;
     const released = Promise.withResolvers<void>();
     const fetch = mock(async () => limited("10", released.resolve));
-    const result = getHostedJson(url, "Bearer synthetic", {
+    const result = get({
       fetch,
       signal,
     }).catch((error: unknown) => error);
@@ -97,9 +118,7 @@ test("unusable or long hints and other HTTP errors fail on the first response wi
           headers: hint === null ? {} : { "Retry-After": hint },
         }),
     );
-    await expect(
-      getHostedJson(url, "Bearer synthetic", { fetch }),
-    ).rejects.toThrow(
+    await expect(get({ fetch })).rejects.toThrow(
       `GET ${url.origin}${url.pathname} failed (HTTP ${status})${hint ? `; Retry-After: ${hint}` : ""}: ${detail}`,
     );
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -111,8 +130,6 @@ test("does not retry a fetch rejection", async () => {
   const fetch = mock(async () => {
     throw error;
   });
-  await expect(getHostedJson(url, "Bearer synthetic", { fetch })).rejects.toBe(
-    error,
-  );
+  await expect(get({ fetch })).rejects.toBe(error);
   expect(fetch).toHaveBeenCalledTimes(1);
 });

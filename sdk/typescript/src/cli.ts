@@ -114,6 +114,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   externalImportsDisabledMessage,
   externalImportsEnabled,
@@ -219,10 +220,12 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 import { collectSnykIssues } from "./snyk-rest-findings.js";
 import {
   collectSemgrepPlatformFindings,
@@ -1293,8 +1296,7 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importGitHubAdvisories?: typeof importGitHubAdvisories;
-  collectSnykIssues?: typeof collectSnykIssues;
-  collectSemgrepPlatformFindings?: typeof collectSemgrepPlatformFindings;
+  hostedScannerFetch?: HostedScannerHttpOptions["fetch"];
   importScan?: typeof importScan;
   readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
@@ -3552,15 +3554,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep, OpenGrep, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For hosted Snyk Open Source or Code, or Semgrep Platform findings, save complete JSON from import snyk or import semgrep. For Snyk CLI Open Source, use native snyk test JSON, plugin snyk-findings-export/v1, or Open Source SARIF. For Semgrep CLI Code, supply native JSON or SARIF and --source-repository-url. For OpenGrep, supply native JSON and --source-repository-url; imports use the semgrep storage provider and preserve OpenGrep as the scanner origin. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import a saved scanner report locally or to Cloud.",
+      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; OpenGrep native JSON; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Saved report in a format accepted by the selected reader.",
           ),
       }),
       options: z.object({
@@ -3573,12 +3575,17 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Report reader; OpenGrep uses the semgrep storage provider.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider.",
           ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep CLI JSON/SARIF and OpenGrep JSON; hosted reports carry their source repository. Checked against the Cloud destination or configured local Git remotes.",
+            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+          ),
+        inspectorProjectArn: optionValue("--inspector-project-arn")
+          .optional()
+          .describe(
+            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3680,24 +3687,38 @@ export async function main(
           try {
             if (!importsEnabled)
               throw new CodexSecurityError(externalImportsDisabledMessage);
+            const { inspectorProjectArn, ...readerOptions } = options;
+            let inspectorProjectMap: Map<string, string> | undefined;
+            if (inspectorProjectArn !== undefined) {
+              if (options.provider !== "inspector")
+                throw new CodexSecurityError(
+                  "--inspector-project-arn requires --provider inspector.",
+                );
+              const url = validateInspectorProjectMapping(
+                inspectorProjectArn,
+                options.sourceRepositoryUrl,
+              );
+              inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
+            }
+            const directory = dependencies.currentDirectory();
+            const report = resolveCliPath(directory, args.file);
+            const repository =
+              options.to === "local"
+                ? resolveCliPath(directory, options.repository)
+                : options.repository;
+            const publicationOptions = {
+              ...readerOptions,
+              repository,
+              inspectorProjectMap,
+            };
             if (options.to === "local") {
               const prepared = await (
                 dependencies.prepareLocalExternalImport ??
                 prepareLocalExternalImport
-              )(
-                resolveCliPath(dependencies.currentDirectory(), args.file),
-                {
-                  ...options,
-                  repository: resolveCliPath(
-                    dependencies.currentDirectory(),
-                    options.repository,
-                  ),
-                },
-                {
-                  environment: dependencies.environment,
-                  signal: controller.signal,
-                },
-              );
+              )(report, publicationOptions, {
+                environment: dependencies.environment,
+                signal: controller.signal,
+              });
               const { preview } = prepared;
               const showPreview = () => {
                 showScannerReport(preview);
@@ -3734,8 +3755,8 @@ export async function main(
               return { ...result };
             }
             const prepared = await prepareExternalPublication(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
-              options,
+              report,
+              publicationOptions,
               {
                 environment: dependencies.environment,
                 fetch: dependencies.cloudFetch,
@@ -3945,7 +3966,46 @@ export async function main(
       }
     },
   });
-  function registerGitHubAdvisories() {
+  function registerOptInCollectors() {
+    async function collect<T>(
+      provider: "GitHub advisory" | "Snyk" | "Semgrep",
+      fail: (error: {
+        code: string;
+        message: string;
+        exitCode: number;
+      }) => never,
+      run: (signal: AbortSignal) => Promise<T>,
+    ) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        if (!importsEnabled)
+          throw new CodexSecurityError(externalImportsDisabledMessage);
+        return await run(controller.signal);
+      } catch (error) {
+        const interrupted = interruptedExitCode(controller.signal);
+        exitCode = interrupted ?? 2;
+        const message = diagnosticValue(error);
+        const diagnostic = interrupted
+          ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
+          : message;
+        errorOutput.write(`codex-security: ${diagnostic}\n`);
+        if (argv.includes("--full-output")) {
+          structuredError = true;
+          return fail({
+            code:
+              provider === "GitHub advisory"
+                ? "GITHUB_IMPORT_FAILED"
+                : "HOSTED_IMPORT_FAILED",
+            message,
+            exitCode,
+          });
+        }
+        return undefined;
+      } finally {
+        removeSignals();
+      }
+    }
     imports.command("github-advisories", {
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
@@ -3963,7 +4023,7 @@ export async function main(
         githubAdvisory: z
           .array(
             optionValue("--github-advisory").regex(
-              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+              GHSA_ID,
               "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
             ),
           )
@@ -3997,83 +4057,30 @@ export async function main(
           }),
         )
         .optional(),
-      async run({ args, options, error: incurError }) {
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        try {
-          if (!importsEnabled)
-            throw new CodexSecurityError(externalImportsDisabledMessage);
-          return await (
-            dependencies.importGitHubAdvisories ?? importGitHubAdvisories
-          )(
+      run: ({ args, options, error }) =>
+        collect("GitHub advisory", error, (signal) =>
+          (dependencies.importGitHubAdvisories ?? importGitHubAdvisories)(
             {
               repository: args.repository,
               advisoryIds: options.githubAdvisory,
               source: options.githubAdvisorySource,
               state: options.githubState,
-              signal: controller.signal,
+              signal,
             },
             {
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory(),
             },
-          );
-        } catch (error) {
-          const signal = controller.signal.reason;
-          if (signal === "SIGINT" || signal === "SIGTERM") {
-            exitCode = signal === "SIGINT" ? 130 : 143;
-            errorOutput.write(
-              `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
-            );
-          } else {
-            exitCode = 2;
-            errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          }
-          if (argv.includes("--full-output")) {
-            structuredError = true;
-            return incurError({
-              code: "GITHUB_IMPORT_FAILED",
-              message: diagnosticValue(error),
-              exitCode,
-            });
-          }
-          return undefined;
-        } finally {
-          removeSignals();
-        }
-      },
+          ),
+        ),
     });
-  }
-  function registerHostedScannerImports() {
-    const output = z.record(z.string(), z.unknown()).optional();
-    async function collect(
-      run: (signal: AbortSignal) => Promise<object>,
-      fail: (error: {
-        code: string;
-        message: string;
-        exitCode: number;
-      }) => never,
-    ) {
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(dependencies, controller);
-      try {
-        if (!importsEnabled)
-          throw new CodexSecurityError(externalImportsDisabledMessage);
-        return { ...(await run(controller.signal)) };
-      } catch (error) {
-        const reason: unknown = controller.signal.reason;
-        exitCode = reason === "SIGINT" ? 130 : reason === "SIGTERM" ? 143 : 2;
-        const message = diagnosticValue(error);
-        errorOutput.write(`codex-security: ${message}\n`);
-        if (argv.includes("--full-output")) {
-          structuredError = true;
-          return fail({ code: "HOSTED_IMPORT_FAILED", exitCode, message });
-        }
-        return undefined;
-      } finally {
-        removeSignals();
-      }
-    }
+    const http = {
+      environment: dependencies.environment,
+      fetch: dependencies.hostedScannerFetch,
+    };
+    const output: z.ZodType<object | undefined> = z
+      .record(z.string(), z.unknown())
+      .optional();
     imports.command("snyk", {
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
@@ -4100,21 +4107,18 @@ export async function main(
       }),
       output,
       run: ({ args, options, error }) =>
-        collect(
-          (signal) =>
-            (dependencies.collectSnykIssues ?? collectSnykIssues)(
-              {
-                projectId: args.project,
-                organizationId: options.snykOrg,
-                product: options.snykProduct,
-                apiOrigin: options.snykApiOrigin,
-                sourceRepositoryUrl: options.sourceRepositoryUrl,
-                token: dependencies.environment["SNYK_TOKEN"],
-                signal,
-              },
-              { environment: dependencies.environment },
-            ),
-          error,
+        collect("Snyk", error, (signal) =>
+          collectSnykIssues(
+            {
+              projectId: args.project,
+              organizationId: options.snykOrg,
+              product: options.snykProduct,
+              apiOrigin: options.snykApiOrigin,
+              sourceRepositoryUrl: options.sourceRepositoryUrl,
+              signal,
+            },
+            http,
+          ),
         ),
     });
     imports.command("semgrep", {
@@ -4147,30 +4151,22 @@ export async function main(
       }),
       output,
       run: ({ args, options, error }) =>
-        collect(
-          (signal) =>
-            (
-              dependencies.collectSemgrepPlatformFindings ??
-              collectSemgrepPlatformFindings
-            )(
-              {
-                project: args.project,
-                deployment: options.semgrepDeployment,
-                ref: options.semgrepRef,
-                product: options.semgrepProduct,
-                sourceRepositoryUrl: options.sourceRepositoryUrl,
-                signal,
-              },
-              { environment: dependencies.environment },
-            ),
-          error,
+        collect("Semgrep", error, (signal) =>
+          collectSemgrepPlatformFindings(
+            {
+              project: args.project,
+              deployment: options.semgrepDeployment,
+              ref: options.semgrepRef,
+              product: options.semgrepProduct,
+              sourceRepositoryUrl: options.sourceRepositoryUrl,
+              signal,
+            },
+            http,
+          ),
         ),
     });
   }
-  if (importsEnabled) {
-    registerGitHubAdvisories();
-    registerHostedScannerImports();
-  }
+  if (importsEnabled) registerOptInCollectors();
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
@@ -6923,13 +6919,10 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-    if (
+    const optInCollector =
       command === "import" &&
-      ["github", "github-advisories", "semgrep", "snyk"].includes(
-        subcommand ?? "",
-      ) &&
-      frameworkFlags.rawCollector
-    ) {
+      ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "");
+    if (command === "import" && frameworkFlags.rawCollector) {
       // Incur's skill-sync notice turns a saved collector array into an object.
       cliOptions.sync = false;
     }
@@ -6937,8 +6930,7 @@ export async function main(
       !importsEnabled &&
       ((command === "publish" && subcommand === "findings") ||
         (command === "findings" && subcommand === "imported") ||
-        (command === "import" &&
-          ["github-advisories", "snyk", "semgrep"].includes(subcommand ?? "")))
+        optInCollector)
     ) {
       if (
         process.env["COMPLETE"] ||
@@ -6958,8 +6950,7 @@ export async function main(
         // This route only formats a disabled command; it is not an installed skill.
         cliOptions.sync = false;
         if (command === "publish") registerFindingPublication();
-        else if (subcommand === "github-advisories") registerGitHubAdvisories();
-        else registerHostedScannerImports();
+        else registerOptInCollectors();
         valueOptions = cliValueOptions(commands);
       }
     }
@@ -9638,7 +9629,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
@@ -11015,7 +11006,7 @@ function protectedRootErrorMessage(
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
+        ? "Choose an output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."

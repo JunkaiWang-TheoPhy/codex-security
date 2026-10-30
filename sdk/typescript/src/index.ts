@@ -234,6 +234,7 @@ export type {
 export type {
   ExternalFinding,
   ExternalFindings,
+  HostedExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
@@ -249,6 +250,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,
@@ -330,6 +332,10 @@ export {
   readOpenGrepFindings,
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
 export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,

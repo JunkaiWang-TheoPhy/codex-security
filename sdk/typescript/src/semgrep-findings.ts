@@ -1,12 +1,19 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
+import { isRecord } from "./record.js";
 import {
+  type ExternalImportTarget,
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  HOSTED_FINDINGS_FORMATS,
+  snapshotSourceRepositories,
+  type ExternalFindings,
+  type HostedExternalFindings,
+  type ExternalSourceRepository,
+} from "./external-findings.js";
 import {
   isSemgrepPlatformReport,
-  normalizeSemgrepPlatformFindings,
+  normalizePlatformReport,
 } from "./semgrep-platform-findings.js";
 import {
   messageText,
@@ -20,6 +27,7 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
@@ -32,10 +40,12 @@ import {
 
 export interface SemgrepImportOptions {
   /** Source repository declared by the caller; never inferred from the destination. */
-  sourceRepositoryUrl?: string;
+  sourceRepositoryUrl: string;
+  /** Independently resolved sources used to verify GitHub Enterprise URLs in Platform reports. */
+  sourceRepositories?: readonly ExternalSourceRepository[];
 }
 
-function sourceRepository(options: SemgrepImportOptions): string {
+function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
@@ -149,19 +159,43 @@ function sarifIdentity(
 
 export function normalizeSemgrepFindings(
   input: unknown,
-  options: SemgrepImportOptions = {},
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
+): HostedExternalFindings {
+  return normalizeSemgrepReport(input, options, target);
+}
+
+export function semgrepSarifSourceRepositories(
+  data?: Record<string, unknown> | null,
+) {
+  const context = data?.["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [{ url: reference["repositoryUri"] }]
+          : [],
+      )
+    : [];
+}
+
+/** @internal The file importer supplies its destination-specific repository comparison. */
+export function normalizeSemgrepReport(
+  input: unknown,
+  options: Partial<SemgrepImportOptions>,
+  target: ExternalImportTarget,
+  isGitHub?: (url: string) => boolean,
+): HostedExternalFindings {
   const document = record(input, "Semgrep report");
   if (isSemgrepPlatformReport(document))
-    return normalizeSemgrepPlatformFindings(
-      document,
-      options.sourceRepositoryUrl,
-      target,
-    );
-  if (document["version"] === "2.1.0" && document["runs"] !== undefined)
-    return normalizeSemgrepSarif(document, options, target);
+    return normalizePlatformReport(document, options, target, isGitHub);
   const repositoryUrl = sourceRepository(options);
+  if (document["version"] === "2.1.0" && document["runs"] !== undefined)
+    return normalizeSarif(document, repositoryUrl, target);
   requiredText(document["version"], "Semgrep version");
   if (array(document["errors"] ?? [], "Semgrep errors").length)
     throw new Error(
@@ -170,19 +204,14 @@ export function normalizeSemgrepFindings(
   const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
     array(results, "Semgrep results"),
-    (value, sourceFindingId) => ({
-      source_finding_id: sourceFindingId,
-      evidence: projectNativeJsonResult(
-        parseNativeJsonResult(value, "Semgrep"),
-        {
-          origin: "Semgrep",
-          repositoryUrl,
-          severity,
-          reportContext: context,
-          target,
-        },
-      ),
-    }),
+    (value) =>
+      projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
+        origin: "Semgrep",
+        repositoryUrl,
+        severity,
+        reportContext: context,
+        target,
+      }),
     jsonIdentity,
     target,
   );
@@ -194,7 +223,14 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
-  const document = record(input, "Semgrep SARIF");
+  return normalizeSarif(record(input, "Semgrep SARIF"), repositoryUrl, target);
+}
+
+function normalizeSarif(
+  document: Record<string, unknown>,
+  repositoryUrl: string,
+  target: ExternalImportTarget,
+): ExternalFindings {
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Semgrep SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
@@ -244,14 +280,7 @@ export function normalizeSemgrepSarif(
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    for (const [index, rule] of rules.entries()) {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    }
+    const rulesById = indexSarifRules(rules);
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -268,7 +297,7 @@ export function normalizeSemgrepSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }, sourceFindingId) => {
+    ({ result: value, rulesById, hasRules, ...context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -345,56 +374,53 @@ export function normalizeSemgrepSarif(
         /^[a-z][a-z\d+.-]*:/iu.test(artifact["uri"]);
       const path =
         rawPath === null || absoluteUri ? null : relativePath(rawPath);
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: ruleId,
-            description:
-              text(message["markdown"]) ??
-              messageText(message["text"], "Semgrep"),
-            severity: mappedSeverity,
-            locations: path ? [{ path, line }] : [],
-            details: {
-              kind: "sast",
-              repository: { url: repositoryUrl },
-              scanner_origin: "Semgrep",
-              rule: { id: ruleId },
-              weakness_ids: weaknessIds(
-                record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
+      return validateExternalEvidence(
+        {
+          title: ruleId,
+          description:
+            text(message["markdown"]) ??
+            messageText(message["text"], "Semgrep"),
+          severity: mappedSeverity,
+          locations: path ? [{ path, line }] : [],
+          details: {
+            kind: "sast",
+            repository: { url: repositoryUrl },
+            scanner_origin: "Semgrep",
+            rule: { id: ruleId },
+            weakness_ids: weaknessIds(
+              record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
+            ),
+            code: {
+              end_line: path ? endLine : null,
+              snippet: ungatedText(
+                record(region["snippet"] ?? {}, "Snippet")["text"],
               ),
-              code: {
-                end_line: path ? endLine : null,
-                snippet: ungatedText(
-                  record(region["snippet"] ?? {}, "Snippet")["text"],
-                ),
-              },
-              source_status:
-                Array.isArray(result["suppressions"]) &&
-                result["suppressions"].some((value) => {
-                  const status = record(value, "Suppression")["status"];
-                  return status === undefined || status === "accepted";
-                })
-                  ? "suppressed"
-                  : null,
             },
-            source_data: structuredClone({
-              ...context,
-              runContext: sarifRunContextForResult(
-                context.runContext,
-                result,
-                rule,
-                context.driverContext,
-                context.toolContext,
-                context.documentContext,
-              ),
-              ...(rule ? { rule } : {}),
-              result,
-            }),
+            source_status:
+              Array.isArray(result["suppressions"]) &&
+              result["suppressions"].some((value) => {
+                const status = record(value, "Suppression")["status"];
+                return status === undefined || status === "accepted";
+              })
+                ? "suppressed"
+                : null,
           },
-          target,
-        ),
-      };
+          source_data: structuredClone({
+            ...context,
+            runContext: sarifRunContextForResult(
+              context.runContext,
+              result,
+              rule,
+              context.driverContext,
+              context.toolContext,
+              context.documentContext,
+            ),
+            ...(rule ? { rule } : {}),
+            result,
+          }),
+        },
+        target,
+      );
     },
     ({ result, runContext }) => sarifIdentity(result, runContext),
     target,
@@ -403,8 +429,19 @@ export function normalizeSemgrepSarif(
 
 export async function readSemgrepFindings(
   path: string,
-  options: SemgrepImportOptions = {},
+  {
+    sourceRepositoryUrl,
+    sourceRepositories,
+  }: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeSemgrepFindings(await readScannerJson(path), options, target);
+): Promise<HostedExternalFindings> {
+  const options = {
+    sourceRepositoryUrl,
+    sourceRepositories: snapshotSourceRepositories(sourceRepositories),
+  };
+  return normalizeSemgrepFindings(
+    await readScannerJson(path, HOSTED_FINDINGS_FORMATS.semgrep),
+    options,
+    target,
+  );
 }
