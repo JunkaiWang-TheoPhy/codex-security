@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -236,6 +237,9 @@ function extractedArchiveFiles() {
   );
   try {
     chmodSync(extractionRoot, 0o700);
+    // The package member list can exceed the Windows command-line limit.
+    const memberList = join(extractionRoot, "members");
+    writeFileSync(memberList, [...logicalSizes.keys()].join("\0") + "\0");
     try {
       tar([
         "-m",
@@ -248,8 +252,11 @@ function extractedArchiveFiles() {
         "-",
         "-C",
         extractionRoot,
-        ...logicalSizes.keys(),
+        "--null",
+        "-T",
+        memberList,
       ]);
+      rmSync(memberList);
     } finally {
       privateExtractionDirectories(extractionRoot);
     }
