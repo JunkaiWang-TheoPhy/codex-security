@@ -4,7 +4,7 @@ import {
   hostedRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
   isGitHubCloudHost,
   normalizeGitRepositoryUrl,
@@ -31,6 +31,27 @@ const javaArchiveAncestor = /\.(?:jar|war|ear|par)\//iu;
 
 const sshProtocols = new Set(["ssh:", "git+ssh:", "ssh+git:"]);
 
+const curlUrlPrefix = /^(?:(?:https?|ftps?)::)?(?:https?|ftps?):\/{1,3}/iu;
+const unsafeRepositoryUrl =
+  "Use a Trivy repository URL without credentials, a query, or a fragment.";
+
+function hasHttpUserinfo(
+  value: string | null,
+  allowImplicitHttps: boolean,
+): boolean {
+  if (!value) return false;
+  const prefix = curlUrlPrefix.exec(value)?.[0];
+  if (!prefix && (!allowImplicitHttps || /^[a-z]:[\\/]/iu.test(value)))
+    return false;
+  // Git's HTTP transport treats backslashes before @ as part of userinfo.
+  const authority = value.slice(prefix?.length ?? 0).split(/[/?#]/u, 1)[0]!;
+  const at = authority.lastIndexOf("@");
+  const colon = authority.indexOf(":");
+  const scp = colon > authority.indexOf("@");
+  // A bare user@host:path is Git's SSH form. Trivy reads user@host/path as HTTPS.
+  return at > 0 && (!!prefix || (!scp && !authority.includes("\\", at + 1)));
+}
+
 function networkRepository(value: unknown): string | null {
   const source = text(value);
   if (!source || /^(?:[a-z]:|[./\\])/iu.test(source)) return null;
@@ -39,9 +60,7 @@ function networkRepository(value: unknown): string | null {
   const { url } = remote;
   const ssh = sshProtocols.has(url.protocol);
   if (url.password || (!ssh && url.username) || /[?#\t\r\n]/u.test(source))
-    throw new Error(
-      "Use a Trivy repository URL without credentials, a query, or a fragment.",
-    );
+    throw new Error(unsafeRepositoryUrl);
   if (url.protocol === "file:") return null;
   if (
     !url.hostname ||
@@ -118,6 +137,37 @@ function requireTrivySshUsers(urls: readonly string[]): void {
     );
 }
 
+/** A canonical occurrence ID can identify a projected native repository declaration. */
+export function retainedTrivyReport({
+  source_finding_id: id,
+  evidence,
+}: ExternalFinding): unknown {
+  const report = evidence.source_data?.["report"];
+  if (
+    !isRecord(report) ||
+    report["SchemaVersion"] !== undefined ||
+    !/^trivy:[a-f0-9]{64}$/u.test(id)
+  )
+    return report;
+  const metadata = report["Metadata"];
+  return isRecord(metadata) && typeof metadata["RepoURL"] === "string"
+    ? { ...report, SchemaVersion: 2 }
+    : report;
+}
+
+export function identifiesTrivyReport(report: unknown): boolean {
+  if (!isRecord(report) || report["SchemaVersion"] !== 2) return false;
+  const scanner = report["Trivy"];
+  const metadata = report["Metadata"];
+  return (
+    (isRecord(scanner) && typeof scanner["Version"] === "string") ||
+    ((report["ArtifactType"] === "repository" ||
+      report["ArtifactType"] === "filesystem") &&
+      isRecord(metadata) &&
+      typeof metadata["RepoURL"] === "string")
+  );
+}
+
 /** Each selected finding must retain the repository asserted by a native batch header. */
 export function trivyBatchSourceUrls(
   input: ExternalFindings,
@@ -125,9 +175,9 @@ export function trivyBatchSourceUrls(
 ): string[] {
   const batch = trivyReportRemotes(input.report);
   if (bind) requireTrivyBinding(batch);
-  for (const { evidence } of input.findings) {
-    const typedUrl = evidence.details?.repository?.url;
-    const row = trivyReportRemotes(evidence.source_data?.["report"]);
+  for (const finding of input.findings) {
+    const typedUrl = finding.evidence.details?.repository?.url;
+    const row = trivyReportRemotes(retainedTrivyReport(finding));
     if (typedUrl && (bind || batch.urls.length || row.urls.length))
       validateHostedRepositoryUrl(typedUrl);
     if (bind) requireTrivyBinding(row);
@@ -172,13 +222,18 @@ function escapedHttpTarget(target: string): string {
 }
 
 export function trivyReportRemotes(report: unknown) {
-  if (!isRecord(report) || report["SchemaVersion"] !== 2) return { urls: [] };
+  if (!isRecord(report)) return { urls: [] };
   const metadata = report["Metadata"];
-  const repository = networkRepository(
-    isRecord(metadata) && metadata["RepoURL"],
-  );
+  const repoUrl = text(isRecord(metadata) && metadata["RepoURL"]);
   const name = text(report["ArtifactName"]);
+  if (
+    hasHttpUserinfo(repoUrl, true) ||
+    hasHttpUserinfo(name, report["ArtifactType"] !== "filesystem")
+  )
+    throw new Error(unsafeRepositoryUrl);
+  const repository = networkRepository(repoUrl);
   let artifact = name && urlScheme.test(name) ? networkRepository(name) : null;
+  if (report["SchemaVersion"] !== 2) return { urls: [] };
   // A filesystem display label is validated but never identifies the repository.
   if (report["ArtifactType"] === "filesystem")
     return { urls: repository ? [repository] : [] };

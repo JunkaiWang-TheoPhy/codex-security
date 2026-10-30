@@ -1086,43 +1086,60 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   expect(f.posts).toHaveLength(2);
 });
 
-test("Wiz can import, resume and update its own occurrence with upstream Inspector evidence", async () => {
-  const record = {
-    id: "wiz-vulnerability-1",
-    name: "CVE-2099-1234",
-    detailedName: "example-package",
-    vendorSeverity: "HIGH",
-    vulnerableAsset: { id: "example-asset" },
-    finding: inspectorPackageFinding(),
-  };
-  const f = await fixture([record]);
-  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
-  const first = await prepare();
-  f.state.loseResponse = true;
-  const error = await first.publish().catch((error: unknown) => error);
-  if (!(error instanceof ExternalPublicationError)) throw error;
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+test.each(["Inspector", "Trivy"] as const)(
+  "Wiz can import, resume and update its own occurrence with upstream %s evidence",
+  async (upstream) => {
+    const trivy = selectedTrivyRows(trivyReport()).findings[0]!;
+    const record = {
+      id:
+        upstream === "Trivy" ? trivy.source_finding_id : "wiz-vulnerability-1",
+      name: "CVE-2099-1234",
+      detailedName: "example-package",
+      vendorSeverity: "HIGH",
+      vulnerableAsset: { id: "example-asset" },
+      ...(upstream === "Trivy"
+        ? trivy.evidence.source_data
+        : { finding: inspectorPackageFinding() }),
+    };
+    const f = await fixture([record]);
+    await using local = await localFindingsFixture({
+      remote: foreignArtifactUrl,
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      await readVendorFindings(f.file),
+      { ...options, repository: local.repository },
+      { environment: local.environment },
+    );
+    expect((await prepared.import()).counts.created).toBe(1);
 
-  // A pre-Inspector checkpoint can contain the original requests without their input projection.
-  const path = error.result.savedSubmission!;
-  const saved = JSON.parse(await readFile(path, "utf8"));
-  delete saved.inputProjection;
-  await writeFile(path, JSON.stringify(saved));
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const first = await prepare();
+    f.state.loseResponse = true;
+    const error = await first.publish().catch((error: unknown) => error);
+    if (!(error instanceof ExternalPublicationError)) throw error;
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 
-  record.vendorSeverity = "MEDIUM";
-  await writeFile(f.file, JSON.stringify([record]));
-  const updated = await prepareNormalizedExternalPublication(
-    await readVendorFindings(f.file),
-    options,
-    f.deps,
-  );
-  expect((await updated.publish()).counts.updated).toBe(1);
-  expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
-});
+    // Older checkpoints can contain the original requests without their input projection.
+    const path = error.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    delete saved.inputProjection;
+    await writeFile(path, JSON.stringify(saved));
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+
+    record.vendorSeverity = "MEDIUM";
+    await writeFile(f.file, JSON.stringify([record]));
+    const updated = await prepareNormalizedExternalPublication(
+      await readVendorFindings(f.file),
+      options,
+      f.deps,
+    );
+    expect((await updated.publish()).counts.updated).toBe(1);
+    expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
+  },
+);
 
 test.each(["example/project", inspectorRepositoryUrl])(
   "pending Inspector requests for %s recheck their project mapping and destination host",
@@ -4930,25 +4947,155 @@ function selectedTrivyRows(report: unknown) {
   return { findings, read, excluded };
 }
 
-test("retained Trivy rows require the Trivy provider for local and Cloud imports", async () => {
-  const input = selectedTrivyRows(trivyReport());
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  "retained Trivy rows require their provider after renaming the ID (%j) or projecting the artifact type (%j)",
+  async (renamed, projected) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    if (renamed) row.source_finding_id = "selected-occurrence";
+    if (projected)
+      delete (row.evidence.source_data!["report"] as Record<string, unknown>)[
+        "ArtifactType"
+      ];
+    const input = renamed && projected ? { ...rows, report: {} } : rows;
+    await expectTrivyOwnership(input);
+  },
+);
+
+const foreignTrivyTarget = {
+  remote: foreignArtifactUrl,
+  cloudRepository: foreignArtifactUrl,
+};
+
+async function expectTrivyOwnership(
+  input: ReturnType<typeof normalizeTrivyFindings>,
+) {
+  await expectTrivyReplay(
+    input,
+    "Retained Trivy evidence requires the trivy provider.",
+    { ...foreignTrivyTarget, provider: "wiz" },
+  );
+  await expectTrivyReplay(input);
+  await expectTrivyReplay(input, /does not match/u, foreignTrivyTarget);
+}
+
+test.each(["native header", "repository URL"] as const)(
+  "selected Trivy rows bind their retained %s after projecting other scanner fields",
+  async (retained) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    if (retained === "native header") {
+      row.source_finding_id = "selected-occurrence";
+      row.evidence.source_data = {
+        report: row.evidence.source_data!["report"],
+      };
+    } else {
+      row.evidence.source_data = {
+        report: { Metadata: { RepoURL: gitHubProject } },
+      };
+    }
+    await expectTrivyOwnership(rows);
+  },
+);
+
+test("a native Trivy batch header retains its provider when rows have no source data", async () => {
+  const rows = selectedTrivyRows(trivyReport());
+  const row = rows.findings[0]!;
+  const report = row.evidence.source_data!["report"] as Record<string, unknown>;
+  row.source_finding_id = "selected-occurrence";
+  delete row.evidence.source_data;
+  await expectTrivyReplay(
+    { ...rows, report },
+    "Retained Trivy evidence requires the trivy provider.",
+    { ...foreignTrivyTarget, provider: "wiz" },
+  );
+});
+
+test.each(["sast", "package"] as const)(
+  "adding Wiz %s fields to a native Trivy row cannot rebind its repository",
+  async (kind) => {
+    const rows = selectedTrivyRows(trivyReport());
+    const row = rows.findings[0]!;
+    const id = "selected-occurrence";
+    row.source_finding_id = kind === "sast" ? `sast:${id}` : id;
+    Object.assign(row.evidence.source_data!, { id });
+    if (kind === "sast") {
+      row.evidence.details = {
+        kind: "sast",
+        repository: { id: "wiz-repository", url: foreignArtifactUrl },
+      };
+    } else {
+      Object.assign(row.evidence.source_data!, {
+        name: "CVE-2099-0001",
+        detailedName: "example-package",
+        vendorSeverity: "HIGH",
+        vulnerableAsset: { id: "example-asset" },
+      });
+    }
+    await expectTrivyReplay(
+      rows,
+      "Retained Trivy evidence requires the trivy provider.",
+      {
+        provider: "wiz",
+        remote: foreignArtifactUrl,
+        cloudRepository: foreignArtifactUrl,
+      },
+    );
+  },
+);
+
+test("Wiz SAST can carry upstream Trivy evidence while binding its own repository through inventory", async () => {
+  const record = {
+    ...selectedTrivyRows(trivyReport()).findings[0]!.evidence.source_data,
+    id: "example-occurrence",
+    name: "Synthetic finding",
+    severity: "HIGH",
+    repository: { id: "wiz-repository" },
+  };
+  const cloud = await fixture(
+    {
+      data: {
+        sastFindings: { nodes: [record] },
+        versionControlResources: {
+          nodes: [
+            {
+              platform: "GITHUB",
+              repository: { ...record.repository, url: foreignArtifactUrl },
+            },
+          ],
+        },
+      },
+    },
+    foreignArtifactUrl,
+  );
+  const rows = await readVendorFindings(cloud.file);
+  expect(rows.findings[0]).toMatchObject({
+    source_finding_id: `sast:${record.id}`,
+    evidence: {
+      details: { repository: { url: foreignArtifactUrl } },
+      source_data: record,
+    },
+  });
   await using local = await localFindingsFixture({
     remote: foreignArtifactUrl,
   });
-  const cloud = await fixture(undefined, foreignArtifactUrl);
-  const wrongProvider = { ...options, provider: "wiz" as const };
-  const message = "Retained Trivy evidence requires the trivy provider.";
-  await expect(
-    prepareNormalizedLocalImport(
-      input,
-      { ...wrongProvider, repository: local.repository },
-      { environment: local.environment },
-    ),
-  ).rejects.toThrow(message);
-  await expect(
-    prepareNormalizedExternalPublication(input, wrongProvider, cloud.deps),
-  ).rejects.toThrow(message);
-  expect(cloud.posts).toHaveLength(0);
+  const prepared = await prepareNormalizedLocalImport(
+    rows,
+    { ...options, repository: local.repository },
+    { environment: local.environment },
+  );
+  expect((await prepared.import()).counts.created).toBe(1);
+  const publication = await prepareExternalPublication(
+    cloud.file,
+    options,
+    cloud.deps,
+  );
+  expect((await publication.publish()).counts.created).toBe(1);
 });
 
 async function expectTrivyReplay(
@@ -4958,12 +5105,15 @@ async function expectTrivyReplay(
     remote = gitHubProject,
     cloudRepository = gitHubProject,
     cloudError = error,
+    provider = "trivy",
   }: {
     remote?: string;
     cloudRepository?: string;
     cloudError?: string | RegExp;
+    provider?: "trivy" | "wiz";
   } = {},
 ) {
+  const selected = { ...options, provider };
   const local = await localFindingsFixture({ remote });
   cleanups.push(local.dispose);
   const cloud = await fixture(undefined, cloudRepository);
@@ -4972,14 +5122,13 @@ async function expectTrivyReplay(
       () =>
         prepareNormalizedLocalImport(
           input,
-          { ...trivyOptions, repository: local.repository },
+          { ...selected, repository: local.repository },
           { environment: local.environment },
         ),
       error,
     ],
     [
-      () =>
-        prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+      () => prepareNormalizedExternalPublication(input, selected, cloud.deps),
       cloudError,
     ],
   ] as const) {

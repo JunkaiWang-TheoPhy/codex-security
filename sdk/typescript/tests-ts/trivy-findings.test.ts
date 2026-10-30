@@ -787,6 +787,7 @@ test.each([
   ["\\\\server\\share\\checkout", "D:mirrors/project.git", null],
   ["//server/share/checkout", "D:mirror.git", null],
   [".", "r:org/repo", null],
+  [".", "git@host:org@ver/repo", "git@host:org@ver/repo"],
   [".", "user@r:org/repo", "user@r:org/repo"],
   [".", "ssh://r/org/repo", "ssh://r/org/repo"],
 ] as const)(
@@ -812,7 +813,10 @@ test("binding rejects conflicting repository claims; clean reports still reject 
   ).toThrow(/different repositories/);
   for (const source of [
     "https://synthetic-user@example.invalid/repo",
+    "https://example\\scanner:fixture@example.invalid/repo",
+    "http:///example\\scanner:fixture@example.invalid/repo",
     "ssh://git:fixture@example.invalid/repo",
+    "git://fixture@example.invalid/repo",
     "https://example.invalid/repo?token=fixture",
     "ssh://git@github.com/example/project?",
   ]) {
@@ -826,6 +830,42 @@ test("binding rejects conflicting repository claims; clean reports still reject 
     expect(() =>
       normalizeTrivyFindings({ ...report, ArtifactName: source }, "cloud", "."),
     ).toThrow(/without credentials/);
+    expect(() => trivyRepositoryUrl({ ArtifactName: source })).toThrow(
+      /without credentials/,
+    );
+    expect(() => trivyRepositoryUrl({ Metadata: { RepoURL: source } })).toThrow(
+      /without credentials/,
+    );
+  }
+});
+
+test("a repository target can carry an HTTPS account without an explicit scheme", () => {
+  const report = trivyReport();
+  for (const ArtifactName of [
+    "fixture@example.invalid/repo",
+    "example:fixture@example.invalid/repo",
+    "example:fixture@example.invalid:443/repo",
+    ".fixture@example.invalid/repo",
+    "\\fixture@example.invalid/repo",
+  ]) {
+    const header = { ArtifactName, Metadata: {} };
+    expect(() =>
+      normalizeAtRoot({ ...report, ...header, Results: [] }),
+    ).toThrow(/without credentials/);
+    expect(() => trivyRepositoryUrl(header)).toThrow(/without credentials/);
+    expect(() =>
+      trivyRepositoryUrl({ Metadata: { RepoURL: ArtifactName } }),
+    ).toThrow(/without credentials/);
+  }
+  for (const ArtifactName of [
+    "/checkout/team@local/repo",
+    "apps/team@local/repo",
+    "\\\\server\\builds@nightly\\checkout",
+    "git@example.invalid:group/repo",
+  ]) {
+    expect(
+      normalizeAtRoot({ ...report, ArtifactName, Results: [] }).report,
+    ).toHaveProperty("ArtifactName", ArtifactName);
   }
 });
 

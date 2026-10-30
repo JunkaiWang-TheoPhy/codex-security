@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import {
+  retainedTrivyReport,
   trivyBatchSourceUrls,
   trivyRemoteKey,
   trivyReportRemotes,
@@ -701,10 +702,10 @@ function localTrivySources(
   references: readonly ExternalSourceRepository[],
 ) {
   const urls = new Set(trivyBatchSourceUrls(input, false));
-  for (const { evidence } of input.findings) {
-    const typedUrl = evidence.details?.repository?.url;
+  for (const finding of input.findings) {
+    const typedUrl = finding.evidence.details?.repository?.url;
     if (typedUrl) urls.add(trivyUrlArgument(typedUrl));
-    for (const url of trivyReportRemotes(evidence.source_data?.["report"]).urls)
+    for (const url of trivyReportRemotes(retainedTrivyReport(finding)).urls)
       urls.add(url);
   }
   for (const { platform, url } of references)
@@ -930,7 +931,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
-    checkRetainedFindingProvider(options.provider, finding);
+    checkRetainedFindingProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;

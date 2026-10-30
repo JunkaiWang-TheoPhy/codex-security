@@ -42,6 +42,7 @@ import { canonicalJson, isRecord } from "./record.js";
 import { hostedNumber, restoreHostedNumbers } from "./scanner-import.js";
 import {
   isTrivyReportHeader,
+  retainedTrivyReport,
   trivyBatchSourceUrls,
   trivyRemoteKey,
   trivyRepositoryUrl,
@@ -1041,12 +1042,12 @@ async function preparePublicationInput(
     };
     for (const url of trivyReportUrls) checkRemote(url);
     checkRepositories(parsed.findings, repositoryUrl);
-    for (const { source_finding_id: id, evidence } of parsed.findings) {
+    for (const finding of parsed.findings) {
       const url = trivyRepositoryUrl(
-        evidence.source_data?.["report"],
+        retainedTrivyReport(finding),
         repositoryUrl,
       );
-      if (url) checkRemote(url, id);
+      if (url) checkRemote(url, finding.source_finding_id);
     }
   } else if (!saved) {
     if (reportSource) requireRepository(reportSource, destination.url);
