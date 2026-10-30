@@ -745,8 +745,10 @@ when the report is empty. Local and Cloud imports check it against retained
 repository evidence. Preserve `snykRestContext` when combining normalized Snyk
 findings so an empty hosted project can still verify its repository.
 Use `sourceRepositoryPlatform: "other"` for case-sensitive
-paths on a custom host. If the checkout uses an opaque Git remote helper,
-configure a separate matching remote that the importer can verify without running the helper.
+paths on a custom host. Local import compares the configured fetch URLs after Git
+applies URL rewrites. It does this offline, regardless of SSH commands or installed
+transport helpers. If a custom helper takes an opaque argument, configure a
+separate remote with a matching URL.
 
 The Snyk REST and Semgrep Platform readers generate a `source_finding_id` for
 each occurrence within its scanner project. The normalized SDK uses the ID

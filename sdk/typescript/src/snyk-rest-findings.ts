@@ -684,10 +684,16 @@ export function normalizeSnykIssues(
         throw new Error(
           "Snyk issue must have a source status and an ignored flag.",
         );
-      const updated = Date.parse(
-        requiredText(attributes["updated_at"], "Snyk updated_at"),
+      const updatedAt = requiredText(
+        attributes["updated_at"],
+        "Snyk updated_at",
       );
-      if (!Number.isFinite(updated) || updated < 0)
+      const updated = Date.parse(updatedAt);
+      if (
+        !/(?:z|[+-]\d{2}:\d{2})$/iu.test(updatedAt) ||
+        !Number.isFinite(updated) ||
+        updated < 0
+      )
         throw new Error("Invalid Snyk issue updated_at.");
       const severity = requiredText(
         attributes["effective_severity_level"],

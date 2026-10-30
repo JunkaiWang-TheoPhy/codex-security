@@ -2,14 +2,13 @@ import { existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFile,
-  link,
   mkdir,
   mkdtemp,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
@@ -1748,6 +1747,20 @@ describe("local normalized scanner findings", () => {
           "origin",
           "opaque::part\nhttps://github.com/example/other\npart",
         ],
+        [
+          "config",
+          "--file",
+          rewriteConfig,
+          "url.https://unused.example/.insteadOf",
+          "unused\nprefix",
+        ],
+        [
+          "config",
+          "--file",
+          rewriteConfig,
+          "url.opaque::rewritten.insteadOf",
+          "opaque::part\n",
+        ],
         ["remote", "set-url", "--add", "origin", "gh:example/secondary.git"],
         ["remote", "add", "upstream", "gh:example/library.git"],
       ]) {
@@ -1873,6 +1886,8 @@ describe("local normalized scanner findings", () => {
       false,
       ["", `example::foreign\n${sourceUrl}\nforeign`],
     ],
+    [sourceUrl.replace("https:", "HTTPS:"), true, []],
+    [`HTTPS::${sourceUrl}`, false, []],
     ["ftp://github.com/example/project", true, []],
     ["ftp::ftp://github.com/example/project", false, []],
     [`ftp::${sourceUrl}`, true, []],
@@ -1931,51 +1946,6 @@ describe("local normalized scanner findings", () => {
         ),
       ).rejects.toThrow("does not match a configured remote");
       expect(existsSync(stateDirectory)).toBe(false);
-    },
-  );
-
-  test.each([sourceUrl.replace("https:", "HTTPS:"), `HTTPS::${sourceUrl}`])(
-    "recognizes %s when its helper is the installed HTTPS helper",
-    async (remote) => {
-      const { repository, root, environment } = await fixture({ remote });
-      const execPath = join(root, "git-helpers");
-      const path = join(root, "helper-path");
-      await mkdir(execPath);
-      await mkdir(path);
-      const suffix = process.platform === "win32" ? ".exe" : "";
-      const stock = join(execPath, `git-remote-https${suffix}`);
-      const requested = join(execPath, `git-remote-HTTPS${suffix}`);
-      await writeFile(stock, "synthetic standard helper", { mode: 0o755 });
-      const prepare = (directory = repository, gitExecPath = execPath) =>
-        prepareNormalizedLocalImport(
-          input(),
-          { repository: directory, ...source },
-          {
-            environment: {
-              ...environment,
-              GIT_EXEC_PATH: gitExecPath,
-              PATH: [path, process.env["PATH"]].join(delimiter),
-            },
-            sourceRepositories: [{ url: sourceUrl }],
-          },
-        );
-      if (!existsSync(requested)) {
-        await link(stock, join(path, basename(requested)));
-        await writeFile(requested, "synthetic alternate helper", {
-          mode: 0o755,
-        });
-        await expect(prepare()).rejects.toThrow("does not match");
-        const sub = join(repository, "sub");
-        await mkdir(sub);
-        await link(stock, join(sub, basename(stock)));
-        await link(stock, join(sub, basename(requested)));
-        await link(requested, join(repository, basename(requested)));
-        await expect(prepare(sub, ".")).rejects.toThrow("does not match");
-        await rm(requested);
-        if (process.platform !== "win32")
-          await writeFile(requested, "non-executable shadow", { mode: 0o644 });
-      }
-      await prepare();
     },
   );
 

@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
-import { lstat, readFile, readlink, realpath, stat } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { snykRepositoryScope } from "./snyk-findings.js";
@@ -51,7 +51,6 @@ import {
 } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
-import { isWithin } from "./trusted-executable.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
@@ -60,7 +59,6 @@ import {
   expandHome,
   requireOutputOutsideRepositories,
   runWorkbench,
-  sameFile,
   workbenchEnvironment,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
@@ -552,113 +550,18 @@ async function requireMatchingRepository(
       "config",
       "--null",
       "--get-regexp",
-      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof|alias\\.\\.?remote-.*|help\\.autocorrect)$",
+      "^(remote\\..*\\.(url|vcs)|url\\..*\\.insteadof)$",
     ]).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === 1)
         return "";
       throw error;
     })
   ).split("\0");
-  let execPath = environmentEntry(environment ?? process.env, "GIT_EXEC_PATH");
-  let installedExecPath: string | undefined;
-  const configKeys = new Set(
-    remoteConfig.map((entry) => entry.split("\n", 1)[0]),
-  );
-  const autocorrect = remoteConfig.findLast(
-    (entry) => entry.split("\n", 1)[0] === "help.autocorrect",
-  );
-  // Git also accepts zero with an integer suffix. A helper subprocess has no
-  // terminal for interactive correction.
-  const offlineUrl =
-    autocorrect === undefined ||
-    /^help\.autocorrect\n(?:no|false|off|never|show|prompt|[+-]?(?:0x)?0+[kmg]?)?$/iu.test(
-      autocorrect,
-    );
-  const installedPath = async () =>
-    (installedExecPath ||= utf8(await readGit(["--exec-path"])));
-  const independentHelper = async (path: string): Promise<boolean> => {
-    const physical = await realpath(path).catch(() => undefined);
-    if (
-      !physical ||
-      gitProtectedRoots.some(
-        (root) => isWithin(root, path) || isWithin(root, physical),
-      )
-    )
-      return false;
-    const parent = dirname(path);
-    if (physical === resolve(path) || parent === path) return true;
-    // A link can leave the checkout again. Check each changed directory and
-    // link target before treating the terminal file as independently installed.
-    if (!(await independentHelper(parent))) return false;
-    const target = await readlink(path).catch(() => undefined);
-    if (!target) return true;
-    return independentHelper(
-      isAbsolute(target) ? target : (await realpath(parent)) + sep + target,
-    );
-  };
-  const isCurlHelper = async (name: string) => {
-    const standard = name.toLowerCase();
-    if (!/^(?:https?|ftps?)$/u.test(standard)) return false;
-    // Plain alias names ignore case; named alias sections use the exact command name.
-    const hasAlias =
-      configKeys.has(`alias.remote-${standard}`) ||
-      configKeys.has(`alias..remote-${standard}`) ||
-      configKeys.has(`alias.remote-${name}.command`);
-    execPath ||= await installedPath();
-    if (!execPath) return false;
-    const path = environmentEntry(environment ?? process.env, "PATH");
-    let search = path === undefined ? execPath : execPath + delimiter + path;
-    let cwd = repository;
-    if (search.split(delimiter).some((dir) => !isAbsolute(dir))) {
-      const cdup = utf8(await readGit(["rev-parse", "--show-cdup"]));
-      if (cdup === undefined) return false;
-      cwd = resolve(repository, cdup);
-      // Git enters the worktree root before starting its remote helper subprocess.
-      // Each Git process prepends its exec path from its own working directory.
-      if (!isAbsolute(execPath)) {
-        search = repository + sep + search;
-        if (cwd !== repository)
-          search = cwd + sep + execPath + delimiter + search;
-      }
-    }
-    const windows = process.platform === "win32";
-    const findHelper = async (helper: string) => {
-      for (const dir of search.split(delimiter)) {
-        if (windows && !dir) continue;
-        const directory = isAbsolute(dir) ? dir : cwd + sep + dir;
-        for (const suffix of windows ? [".exe", ""] : [""]) {
-          const candidate = directory + sep + "git-remote-" + helper + suffix;
-          const file = await stat(candidate).catch(() => null);
-          if (file?.isFile() && (windows || (file.mode & 0o100) !== 0))
-            return candidate;
-          if (windows && suffix && file) return undefined;
-        }
-      }
-      return undefined;
-    };
-    const requested = await findHelper(name);
-    // An ordinary URL still identifies an offline checkout when Git has no
-    // helper and cannot dispatch to a differently named command.
-    if (!requested)
-      return name === standard && !hasAlias && offlineUrl ? undefined : false;
-    let stock = name === standard ? requested : await findHelper(standard);
-    // A checkout cannot choose its own transport. Git can also dispatch to an
-    // alias when an executable's interpreter is missing. Prove either against
-    // the helper in this Git installation, independently of the checkout.
-    if (hasAlias || !stock || !(await independentHelper(stock))) {
-      const installed = await installedPath();
-      if (!installed) return false;
-      stock = join(installed, `git-remote-${standard}${windows ? ".exe" : ""}`);
-      if (!(await independentHelper(stock))) return false;
-    }
-    return requested === stock || sameFile(requested, stock);
-  };
-  const checkedHelpers = new Map<string, boolean | undefined>();
-  const multilineRewrite = remoteConfig.some(
-    (entry) =>
-      entry.startsWith("url.") &&
-      entry.indexOf("\n") !== entry.lastIndexOf("\n"),
-  );
+  const multilinePrefixes = remoteConfig
+    .filter((entry) => entry.startsWith("url."))
+    .map((entry) => entry.slice(entry.indexOf("\n") + 1))
+    .filter((prefix) => prefix.includes("\n"))
+    .sort((a, b) => b.length - a.length);
   const remotes: { url: string; forcedHelper: boolean }[] = [];
   let hasUnverifiedRemote = false;
   for (const rawName of remoteNames.split("\n").filter(Boolean)) {
@@ -683,18 +586,24 @@ async function requireMatchingRepository(
       lines.length > 1 &&
       configured.slice(-lines.length).some((url) => url.includes("\n"))
     ) {
-      // Ordinary insteadOf prefixes preserve the number of lines in each URL.
+      // A rewrite can consume line breaks in its longest matching insteadOf prefix.
+      // Git config keys (including the replacement URL) cannot contain a newline.
       // Git emits either the full list or the suffix after the last empty URL.
       const afterReset = configured.lastIndexOf("") + 1;
       const records: string[] = [];
       let end = lines.length;
       for (let i = configured.length - 1; i >= 0 && end > 0; i--) {
-        const start = end - configured[i]!.split("\n").length;
+        const original = configured[i]!;
+        const prefix = multilinePrefixes.find((value) =>
+          original.startsWith(value),
+        );
+        const start =
+          end - original.slice(prefix?.length ?? 0).split("\n").length;
         if (start < 0 || (start === 0 && i !== 0 && i !== afterReset)) break;
         records.push(lines.slice(start, end).join("\n"));
         end = start;
       }
-      if (!multilineRewrite && end === 0) urls = records.reverse();
+      if (end === 0) urls = records.reverse();
       else {
         hasUnverifiedRemote = true;
         urls = [await readGit(["remote", "get-url", "--", name])];
@@ -713,11 +622,10 @@ async function requireMatchingRepository(
       }
       const transport = /^([a-z0-9][a-z0-9+.-]*:)\/\//iu.exec(url)?.[1] ?? "";
       const curl = /^(?:https?|ftps?):$/u.test(transport.toLowerCase());
-      const curlHelper = helper ?? transport.slice(0, -1);
-      if (curl && !checkedHelpers.has(curlHelper))
-        checkedHelpers.set(curlHelper, await isCurlHelper(curlHelper));
+      // Match Git's configured URL without running or locating a transport.
+      // The standard curl helpers take a URL; custom helpers take opaque arguments.
       const recognized = curl
-        ? (checkedHelpers.get(curlHelper) ?? helper === undefined)
+        ? helper === undefined || /^(?:https?|ftps?)$/u.test(helper)
         : helper === undefined &&
           (!url.includes("://") ||
             Object.hasOwn(gitTransportPorts, transport) ||
