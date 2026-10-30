@@ -55940,23 +55940,43 @@ async function runProcess(executable, args, options) {
 }
 
 // ../sdk/typescript/src/git-remote.ts
+var scpRemote = /^(?:([^@/:\s?#]+)@)?(\[[^\]]+\]|[^@/:\s?#]+):(?!\/\/)(.+)$/u;
+function isLocalGitRemote(remote) {
+  if (remote.includes("://")) return remote.startsWith("file://");
+  const colon = remote.indexOf(":");
+  return colon < 0 || remote.slice(0, colon).includes("/");
+}
+function parseScpRemote(remote) {
+  return !isLocalGitRemote(remote) && !remote.includes("://") && !/^[a-z\d][a-z\d+.-]*::/iu.test(remote) ? scpRemote.exec(remote) : null;
+}
+function sshAuthority(host) {
+  if (/[\/\\?#@\s\x00-\x1f\x7f]/u.test(host)) return null;
+  const parse4 = (authority) => URL.parse("ssh://" + authority.replace(/:\+(\d+)$/u, ":$1"));
+  const parsed = parse4(host);
+  if (parsed) return parsed;
+  const bracketed = /^\[([^\]]+)\](?::(\+?\d*))?$/u.exec(host);
+  if (!bracketed || bracketed[1].endsWith(":")) return null;
+  const [, name, port] = bracketed;
+  return parse4(name + (port ? `:${port}` : ""));
+}
 function parseGitRemote(remote) {
   if (remote.includes("://")) {
-    const url2 = new URL(remote);
+    const url3 = new URL(remote);
     return {
-      url: url2,
-      path: url2.pathname.slice(1),
+      url: url3,
+      path: url3.pathname.slice(1),
       scpStyle: false
     };
   }
-  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
-    remote
-  );
-  if (scp === null) return void 0;
+  const scp = parseScpRemote(remote);
+  if (!scp) return void 0;
+  const url2 = sshAuthority(scp[2]);
+  if (!url2?.hostname) throw new TypeError("Invalid Git SCP authority.");
+  if (scp[1]) url2.username = scp[1];
   return {
-    url: new URL(`ssh://${scp[1]}`),
+    url: url2,
     // An SCP path's ?, #, and dot segments are literal Git path characters.
-    path: scp[2],
+    path: scp[3],
     scpStyle: true
   };
 }

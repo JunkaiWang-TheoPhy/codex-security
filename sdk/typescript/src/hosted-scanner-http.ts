@@ -51,16 +51,21 @@ function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
       if (key !== name) continue;
       const raw = environment[key];
       if (raw === "false" || raw === "FALSE") return undefined;
-      return raw?.replace(/\$\{(.*?)\}/gu, (_, reference: string) => {
-        const requested =
-          process.platform === "win32" ? reference.toUpperCase() : reference;
-        const value = importEnvironmentSetting(environment, requested)?.value;
-        if (value === undefined)
-          throw new Error(
-            `${name} references missing environment variable ${reference}.`,
-          );
-        return value;
-      });
+      return raw?.replace(
+        /\$\{([^}\r\n\u2028\u2029]*)\}?/gu,
+        (match, reference: string) => {
+          // Consume an unterminated reference once, leaving it literal.
+          if (!match.endsWith("}")) return match;
+          const requested =
+            process.platform === "win32" ? reference.toUpperCase() : reference;
+          const value = importEnvironmentSetting(environment, requested)?.value;
+          if (value === undefined)
+            throw new Error(
+              `${name} references missing environment variable ${reference}.`,
+            );
+          return value;
+        },
+      );
     }
     return undefined;
   }

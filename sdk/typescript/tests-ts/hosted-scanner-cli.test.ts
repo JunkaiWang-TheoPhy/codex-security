@@ -184,6 +184,18 @@ test("Snyk checks the effective REST endpoint before sending an environment toke
   expect(requests).toEqual([`${eu} token explicit`]);
 });
 
+test("Snyk leaves unterminated endpoint references literal and resumes on the next line", async () => {
+  const { collect, settings } = snykRequestProbe();
+  settings["SNYK_API_V3_URL"] = "https://api.snyk.io/" + "${a".repeat(16_384);
+  await expect(collect("https://api.snyk.io")).rejects.toThrow(
+    "requested project",
+  );
+  settings["SNYK_API_V3_URL"] += "\n${missing}";
+  await expect(collect("https://api.snyk.io")).rejects.toThrow(
+    "missing environment variable missing",
+  );
+});
+
 test("Snyk sends access tokens only to their embedded API host", async () => {
   const eu = "https://api.eu.snyk.io";
   const us = "https://api.snyk.io";
