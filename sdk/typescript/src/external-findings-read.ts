@@ -125,20 +125,15 @@ export async function readExternalFindings(
     options.provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
-    const read =
-      options.provider === "veracode"
-        ? readVeracodeFindings
-        : readBlackDuckFindings;
-    const findings =
-      options.provider === "inspector"
-        ? await readInspectorFindings(
-            path,
-            url,
-            target,
-            options.inspectorProjectMap,
-          )
-        : await read(path, url, target);
-    return { findings, sourceRepositories: [{ url }] };
+    const read = {
+      inspector: readInspectorFindings,
+      blackduck: readBlackDuckFindings,
+      veracode: readVeracodeFindings,
+    }[options.provider];
+    return {
+      findings: await read(path, url, target, options.inspectorProjectMap),
+      sourceRepositories: [{ url }],
+    };
   }
   const publication = await readVendorFindingsForPublication(path, target);
   // Raw package exports keep repository-branch URLs in retained source data.
