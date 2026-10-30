@@ -531,10 +531,12 @@ async function checkoutRemotes(
   let remoteNames: string;
   try {
     if (provider === "trivy") {
-      const root = Buffer.from(
-        await readGit(["rev-parse", "--show-toplevel"]),
-        "latin1",
-      ).toString("utf8");
+      const root = resolve(
+        Buffer.from(
+          await readGit(["rev-parse", "--show-toplevel"]),
+          "latin1",
+        ).toString("utf8"),
+      );
       if (
         root !== repository &&
         !(await abortable(() => sameFile(root, repository), signal))
