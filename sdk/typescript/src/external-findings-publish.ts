@@ -740,6 +740,14 @@ async function preparePublicationInput(
     );
 
   function checkRepositories(findings: ExternalFindings["findings"]) {
+    // Other providers' validated checkpoints retain their original repository ID.
+    if (
+      saved &&
+      options.provider !== "inspector" &&
+      options.provider !== "blackduck" &&
+      options.provider !== "veracode"
+    )
+      return;
     const blackDuck = blackDuckReportRepositories(
       options.provider,
       findings,
@@ -750,14 +758,6 @@ async function preparePublicationInput(
       findings,
       "cloud",
     );
-    // Other providers' validated checkpoints retain their original repository ID.
-    if (
-      saved &&
-      options.provider !== "inspector" &&
-      options.provider !== "blackduck" &&
-      options.provider !== "veracode"
-    )
-      return;
     const binding = inspectorReportRepository(
       options.provider,
       findings,

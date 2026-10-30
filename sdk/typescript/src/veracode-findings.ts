@@ -113,7 +113,7 @@ function occurrenceId(row: Record<string, unknown>, scope: Scope): string {
   ]);
 }
 
-export function hasVeracodeEvidence(data: unknown, id: string): boolean {
+function hasVeracodeEvidence(data: unknown, id: string): boolean {
   if (/^veracode-static-policy:[a-f0-9]{64}$/u.test(id)) return true;
   if (!isRecord(data)) return false;
   const row = isRecord(data["row"]) ? data["row"] : data;
@@ -471,7 +471,6 @@ export function normalizeVeracodeFindings(
     },
     (row) => occurrenceId(row, scope),
     target,
-    "reject",
   );
 }
 

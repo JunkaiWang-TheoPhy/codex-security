@@ -180,22 +180,26 @@ test("matches row filters and equivalent HAL list and boolean selections", () =>
     }
   }
   expect(normalize(pages)).toEqual(expected);
-  const row = {
-    ...veracodePolicyRow(),
-    finding_status: { ...veracodePolicyRow().finding_status, new: false },
-  };
+  const row = veracodePolicyRow();
+  const status = (isNew: boolean) => ({
+    ...row,
+    finding_status: { ...row.finding_status, new: isNew },
+  });
   for (const [query, message] of [
     ["cwe=89", "cwe"],
     ["finding_category=20", "finding_category"],
     ["new=TRUE", "new"],
-  ]) {
-    const page = veracodePolicyPage([row]);
+  ] as const) {
+    const page = veracodePolicyPage([status(false)]);
     page._links.self.href += "&" + query;
     expect(() => normalize(page)).toThrow(message);
   }
-  const page = veracodePolicyPage([row]);
+  const page = veracodePolicyPage([
+    status(false),
+    { ...status(true), issue_id: 2 },
+  ]);
   page._links.self.href += "&new=false";
-  expect(normalize(page).findings).toHaveLength(1);
+  expect(normalize(page).findings).toHaveLength(2);
 });
 
 test("accepts a scoped native empty page but rejects errors, summaries, Pipeline and raw row arrays", () => {

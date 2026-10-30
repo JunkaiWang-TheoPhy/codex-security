@@ -115,16 +115,18 @@ test("replay keeps native occurrence identity when package coordinates and advis
   expect(replay.evidence.packages).toMatchObject([
     { name: "@example/library", ecosystem: "npm", installed_version: "2.0" },
   ]);
-  const purl = {
-    ...updated,
-    packageUrl: "pkg:npm/%40example/other@3.0?tag=preview#dist",
-  };
-  expect(
-    normalizeBlackDuckFindings([purl], repository).findings[0]!.evidence
-      .packages,
-  ).toMatchObject([
-    { name: "@example/other", ecosystem: "npm", installed_version: "3.0" },
-  ]);
+  for (const scope of ["%40example", "@example"]) {
+    const purl = {
+      ...updated,
+      packageUrl: `pkg:npm/${scope}/other@3.0?tag=preview#dist`,
+    };
+    expect(
+      normalizeBlackDuckFindings([purl], repository).findings[0]!.evidence
+        .packages,
+    ).toMatchObject([
+      { name: "@example/other", ecosystem: "npm", installed_version: "3.0" },
+    ]);
+  }
   const opaque = {
     ...updated,
     componentVersionOriginName: "custom",
@@ -152,6 +154,7 @@ test("uses the full generic package path and keeps the origin fallback for an in
     "pkg:npm/unscoped/library@2.0",
     "pkg:maven/extra/group/library@2.0",
     "pkg:pypi/extra/library@2.0",
+    "pkg:pypi/extra%2Flibrary@2.0",
   ])
     expect(packages(invalid)).toMatchObject([
       { name: "example:library", ecosystem: "maven", installed_version: "1.0" },
@@ -280,6 +283,36 @@ test("selected array replay keeps distinct advisories, origins and sources; evid
     [1, ids[0]!],
     [3, ids[0]!],
   ]);
+});
+
+test("rejects overlapping complete pages even when a repeated row has no occurrence ID", () => {
+  const row = blackDuckBomRow();
+  const incomplete = { ...row, _meta: { links: [] } };
+  const reversed = Object.fromEntries(Object.entries(incomplete).reverse());
+  const report = blackDuckBomReport([row, incomplete]);
+  expect(normalizeBlackDuckFindings(report, repository).excluded).toHaveLength(
+    1,
+  );
+  expect(() =>
+    normalizeBlackDuckFindings(
+      { ...report, totalCount: 3, items: [...report.items, reversed] },
+      repository,
+    ),
+  ).toThrow(/pages may overlap/);
+});
+
+test("unrelated provider columns can share Black Duck field names", () => {
+  const finding = {
+    source_finding_id: "wiz-finding",
+    evidence: {
+      title: "Example",
+      severity: "unknown" as const,
+      source_data: {
+        row: { componentVersion: "1.0", vulnerabilityWithRemediation: "none" },
+      },
+    },
+  };
+  expect(blackDuckReportRepositories("wiz", [finding], "cloud").size).toBe(0);
 });
 
 test("collection and every selected occurrence must identify the same server, project and version", () => {

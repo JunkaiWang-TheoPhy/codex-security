@@ -1221,6 +1221,59 @@ test("a normalized Inspector retry checks its typed repository without native ev
   expect(f.posts).toHaveLength(1);
 });
 
+test("resumes a saved Wiz request containing Black Duck evidence from before provider checks", async () => {
+  const f = await fixture();
+  const row = normalized();
+  const finding = {
+    source_finding_id: row.source_finding_id,
+    evidence: validateExternalEvidence({
+      ...row.evidence,
+      source_data: { format: "blackduck-bom-6" },
+    }),
+  };
+  const input = { read: 1, excluded: [], findings: [finding] };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(input, options, f.deps);
+
+  // The previous publisher accepted this opaque Wiz evidence. Keep its checkpoint
+  // filename and digests so this exercises recovery across the provider change.
+  const directory = join(
+    f.environment.CODEX_SECURITY_STATE_DIR,
+    "external-finding-publications",
+  );
+  const filename =
+    "2dfdb44c2c7494f4eed20e59244df967598fc3a284589ec2f6c3a24bfff7b2d0.pending.json";
+  const digest =
+    "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346";
+  const request = {
+    request_id: "efbc3c2e-0462-4411-89aa-9ced1d34223c",
+    repository: {
+      id: options.repository,
+      repo_connector_id: "github",
+      environment_id: f.state.environmentId,
+      reset_marker: f.state.marker,
+    },
+    source: { provider: options.provider, source_key: options.sourceKey },
+    items: [{ client_id: "item-1", ...finding, expected_version: 0 }],
+  };
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(directory, filename),
+    JSON.stringify({
+      accountId: "synthetic-account",
+      requests: [request],
+      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    }),
+    { mode: 0o600 },
+  );
+
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).counts.created).toBe(1);
+  expect(f.posts.map((body) => JSON.parse(body))).toEqual([request]);
+  await expect(prepare()).rejects.toThrow("requires the blackduck provider");
+});
+
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
     ...blackDuckBomRow(),

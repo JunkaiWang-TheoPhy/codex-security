@@ -21,15 +21,9 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import {
-  blackDuckReportRepositories,
-  hasBlackDuckEvidence,
-} from "./blackduck-findings.js";
+import { blackDuckReportRepositories } from "./blackduck-findings.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
-import {
-  hasVeracodeEvidence,
-  veracodeReportRepositories,
-} from "./veracode-findings.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -424,7 +418,6 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
-  nativeSources: ReadonlySet<string>,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -478,35 +471,33 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const identity = (
-    source: ExternalSourceRepository,
-    platform: Provider,
-    url = source.url,
-  ) =>
+  const identity = (url: string, platform: Provider) =>
     remoteRepository(
       url,
       platform,
-      provider === "inspector" || nativeSources.has(source.url),
+      provider === "inspector" ||
+        provider === "blackduck" ||
+        provider === "veracode",
     );
   const githubRepositories = new Set(
     sources.flatMap((source) => {
       if (source.platform !== "github") return [];
-      const key = identity(source, "github")?.key;
+      const key = identity(source.url, "github")?.key;
       return key === undefined ? [] : [key];
     }),
   );
   for (const source of sources) {
-    const githubKey = identity(source, "github")?.key;
+    const githubKey = identity(source.url, "github")?.key;
     const sourceProvider =
       source.platform === "github" ||
       (githubKey !== undefined && githubRepositories.has(githubKey))
         ? "github"
         : provider;
     const targets = remotes.flatMap(
-      (remote) => identity(source, sourceProvider, remote) ?? [],
+      (remote) => identity(remote, sourceProvider) ?? [],
     );
     if (!targets.length) continue;
-    const target = identity(source, sourceProvider);
+    const target = identity(source.url, sourceProvider);
     if (
       !target ||
       !targets.some(
@@ -650,17 +641,9 @@ export async function prepareLocalImport(
     current.findings,
     "local",
   );
-  const nativeSources = new Set<string>();
-  for (const { source_finding_id: id, evidence } of current.findings) {
+  for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
-    const source = blackDuck.get(id) ?? veracode.get(id);
-    if (
-      source &&
-      (hasBlackDuckEvidence(evidence.source_data) ||
-        hasVeracodeEvidence(evidence.source_data, id))
-    )
-      nativeSources.add(source.url);
   }
   const inspector = inspectorReportRepository(
     options.provider,
@@ -700,7 +683,6 @@ export async function prepareLocalImport(
     repository,
     options.provider,
     [...sources.values()],
-    nativeSources,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

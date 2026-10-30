@@ -1,10 +1,11 @@
 import { z } from "zod";
+import { CodexSecurityError } from "./errors.js";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
@@ -23,15 +24,16 @@ import {
 const format = "blackduck-bom-6";
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
 
-export function hasBlackDuckEvidence(data: unknown): boolean {
+function hasBlackDuckEvidence(data: unknown): boolean {
   if (!isRecord(data)) return false;
-  const row = data["row"];
   return (
     data["format"] === format ||
-    ("vulnerabilityWithRemediation" in data && "componentVersion" in data) ||
-    (isRecord(row) &&
-      "vulnerabilityWithRemediation" in row &&
-      "componentVersion" in row)
+    [data, data["row"]].some(
+      (row) =>
+        isRecord(row) &&
+        typeof row["componentVersion"] === "string" &&
+        isRecord(row["vulnerabilityWithRemediation"]),
+    )
   );
 }
 
@@ -269,7 +271,7 @@ const nameVersionForges = new Map([
 ]);
 
 function packageUrlName(ecosystem: string, parts: string[]) {
-  if (parts.includes("")) return;
+  if (parts.some((part) => !part || part.includes("/"))) return;
   if (ecosystem === "maven")
     return parts.length === 2 ? parts.join(":") : undefined;
   if (
@@ -286,7 +288,7 @@ function packageUrlName(ecosystem: string, parts: string[]) {
 function blackDuckPackages(row: Record<string, unknown>) {
   const version = text(row["componentVersionName"]);
   const purl =
-    /^pkg:([a-z][a-z0-9.+-]*)\/([^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
+    /^pkg:([a-z][a-z0-9.+-]*)\/((?:@[^/@?#]+\/)?[^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
       text(row["packageUrl"]) ?? "",
     );
   if (purl) {
@@ -372,7 +374,7 @@ export function normalizeBlackDuckFindings(
       "An empty Black Duck selection cannot identify a project version. Supply its complete collection envelope.",
     );
   const projectVersion = scope;
-  return normalizeRecords(
+  const result = normalizeRecords(
     rows,
     ({ row, vulnerability }) => {
       const advisory = requiredText(
@@ -405,8 +407,23 @@ export function normalizeBlackDuckFindings(
     },
     (entry) => occurrenceId(entry, projectVersion),
     target,
-    selected ? "exclude" : "reject",
   );
+  if (!selected) {
+    // normalizeRecords excludes every collision. An unidentified row can also
+    // repeat across pages, so compare its original JSON when it has no ID.
+    const seen = new Set<string>();
+    for (const excluded of result.excluded) {
+      const key =
+        excluded.source_finding_id ??
+        canonicalJson(items[excluded.position - 1]);
+      if (seen.has(key))
+        throw new CodexSecurityError(
+          "Duplicate row in a collection with a declared total; pages may overlap. Retrieve the complete export again.",
+        );
+      seen.add(key);
+    }
+  }
+  return result;
 }
 
 export async function readBlackDuckFindings(

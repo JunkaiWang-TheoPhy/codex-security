@@ -78,27 +78,28 @@ export function repositoryScopeValidator(
       return repositories;
     }
     const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
-    let scope: string | undefined;
-    let repository: string | undefined;
+    const scopes = new Set<string>();
+    const sources = new Set<string>();
     for (const { source_finding_id: id, evidence } of findings) {
       const retained = retainedRepository(evidence.source_data, id, target);
-      if (!retained) continue;
       const declared = evidence.details?.repository?.url;
-      const repositoryKey = key(retained.url);
-      if (retained.scope) {
-        if (scope && (scope !== retained.scope || repository !== repositoryKey))
-          throw new Error(
-            `${scanner.label} occurrences must belong to the same ${scanner.scope} and source repository.`,
-          );
-        scope = retained.scope;
-        repository = repositoryKey;
+      // A Black Duck BOM binds its entire report. A Veracode application binds its native rows.
+      if (scanner.provider === "blackduck" || retained?.scope) {
+        const url = retained?.url ?? declared;
+        if (url) sources.add(key(url));
       }
-      if (declared && key(declared) !== repositoryKey)
+      if (!retained) continue;
+      if (retained.scope) scopes.add(retained.scope);
+      if (declared && key(declared) !== key(retained.url))
         throw new Error(
           "Retained scanner repository does not match the normalized evidence repository.",
         );
       repositories.set(id, { url: retained.url });
     }
+    if (scopes.size > 1 || (scopes.size === 1 && sources.size > 1))
+      throw new Error(
+        `${scanner.label} occurrences must belong to the same ${scanner.scope} and source repository.`,
+      );
     return repositories;
   };
 }

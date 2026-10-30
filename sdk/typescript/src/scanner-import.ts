@@ -192,7 +192,6 @@ export function normalizeRecords<T>(
   projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
-  duplicates: "exclude" | "reject" = "exclude",
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -226,10 +225,6 @@ export function normalizeRecords<T>(
   }
   for (const { position, value, id } of identified) {
     if (counts.get(id)! > 1) {
-      if (duplicates === "reject")
-        throw new CodexSecurityError(
-          "Duplicate source identity in a collection with a declared total; pages may overlap. Retrieve the complete export again.",
-        );
       result.excluded.push({
         position,
         source_finding_id: id,

@@ -104,3 +104,52 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
     prepareNormalizedLocalImport(first.preview, options, dependencies),
   ).rejects.toThrow(/does not match a configured remote/);
 });
+
+test("Black Duck binds normalized summaries to native findings and comparable remotes", async () => {
+  const source = "https://git.example.test/team/application";
+  await using fixture = await localFindingsFixture({ remote: source });
+  const other = "https://git.example.test/team/other";
+  const report = normalizeBlackDuckFindings(
+    [blackDuckBomRow()],
+    source,
+    "local",
+  );
+  const native = report.findings[0]!;
+  const prepare = (...findings: typeof report.findings) =>
+    prepareNormalizedLocalImport(
+      { read: findings.length, findings, excluded: [] },
+      {
+        provider: "blackduck",
+        sourceKey: "example",
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+
+  execFileSync(
+    "git",
+    ["remote", "add", "upstream", other + "?repo=different"],
+    {
+      cwd: fixture.repository,
+    },
+  );
+  for (const declaration of [
+    { details: { kind: "sast" as const, repository: { url: other } } },
+    { source_data: { sourceRepositoryUrl: other } },
+  ]) {
+    const summary = {
+      source_finding_id: "sdk-summary",
+      evidence: {
+        title: "Example",
+        severity: "unknown" as const,
+        ...declaration,
+      },
+    };
+    await expect(prepare(summary, native)).rejects.toThrow(
+      /same project version/,
+    );
+    await expect(prepare(summary)).rejects.toThrow(
+      /does not match a configured remote/,
+    );
+  }
+});
