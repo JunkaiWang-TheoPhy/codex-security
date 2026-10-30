@@ -1284,6 +1284,38 @@ test.each([
   },
 );
 
+test.each(["wiz", "inspector"] as const)(
+  "rechecks a projected Black Duck repository on a saved %s publication",
+  async (provider) => {
+    const f = await fixture();
+    const source = f.state.repositoryUrl;
+    const input = normalizeBlackDuckFindings([blackDuckBomRow()], source);
+    input.findings[0]!.evidence.source_data = { sourceRepositoryUrl: source };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider },
+        f.deps,
+      );
+
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    f.state.repositoryUrl = "https://github.com/example/different";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = source;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    await retry.publish();
+    expect(f.posts).toHaveLength(2);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
     ...blackDuckBomRow(),
@@ -1351,6 +1383,23 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     ),
   ).rejects.toThrow(/requires the blackduck provider/);
   const stripped = structuredClone(native);
+  const data = stripped.findings[0]!.evidence.source_data!;
+  delete data["row"];
+  delete data["format"];
+  const wiz = { ...selected, provider: "wiz" as const };
+  const matching = await fixture();
+  for (const sourceData of [
+    data,
+    { sourceRepositoryUrl: selected.sourceRepositoryUrl },
+  ]) {
+    stripped.findings[0]!.evidence.source_data = sourceData;
+    await expect(
+      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+    ).rejects.toThrow(/does not match the selected Cloud repository/);
+    await prepareNormalizedExternalPublication(stripped, wiz, matching.deps);
+  }
+  stripped.findings[0]!.evidence.source_data = { upstream: data };
+  await prepareNormalizedExternalPublication(stripped, wiz, foreign.deps);
   delete stripped.findings[0]!.evidence.source_data;
   await expect(
     prepareNormalizedExternalPublication(stripped, selected, foreign.deps),

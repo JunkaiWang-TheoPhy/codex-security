@@ -29,6 +29,17 @@ const format = "blackduck-bom-6";
 const componentVersionPath = /^components\/[^/]+\/versions\/[^/]+$/u;
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
 
+export function projectedBlackDuckRepositoryUrl(
+  finding: ExternalFinding,
+  target: ExternalImportTarget,
+): string | undefined {
+  if (!nativeId.test(finding.source_finding_id)) return;
+  const url = finding.evidence.source_data?.["sourceRepositoryUrl"];
+  if (typeof url === "string" && /^https?:\/\//iu.test(url))
+    return declaredScannerRepositoryUrl(url, "Black Duck", target);
+  return finding.evidence.details?.repository?.url ?? undefined;
+}
+
 function hasBlackDuckEvidence(data: unknown): boolean {
   if (!isRecord(data)) return false;
   return (
@@ -43,11 +54,24 @@ function hasBlackDuckEvidence(data: unknown): boolean {
 }
 
 function retainedRepository(
-  data: unknown,
-  id: string,
+  provider: Provider,
+  finding: ExternalFinding,
   target: ExternalImportTarget,
 ): { url: string; projectVersion?: string } | undefined {
-  const native = hasBlackDuckEvidence(data) || nativeId.test(id);
+  const {
+    source_finding_id: id,
+    evidence: { source_data: data },
+  } = finding;
+  const nativeEvidence = hasBlackDuckEvidence(data);
+  if (provider !== "blackduck") {
+    if (nativeEvidence)
+      throw new CodexSecurityError(
+        "Retained Black Duck evidence requires the blackduck provider.",
+      );
+    const url = projectedBlackDuckRepositoryUrl(finding, target);
+    return url ? { url } : undefined;
+  }
+  const native = nativeEvidence || nativeId.test(id);
   if (native && (!isRecord(data) || !isRecord(data["row"])))
     throw new Error("Expected retained Black Duck BOM occurrence evidence.");
   if (!isRecord(data) || (!native && !("sourceRepositoryUrl" in data))) return;
@@ -91,21 +115,11 @@ export function blackDuckReportRepositories(
     ).size <= 1,
 ): Map<string, ExternalSourceRepository> {
   const repositories = new Map<string, ExternalSourceRepository>();
-  if (provider !== "blackduck") {
-    if (
-      findings.some(({ evidence }) =>
-        hasBlackDuckEvidence(evidence.source_data),
-      )
-    )
-      throw new CodexSecurityError(
-        "Retained Black Duck evidence requires the blackduck provider.",
-      );
-    return repositories;
-  }
   const projects = new Set<string>();
   const sources = new Set<string>();
-  for (const { source_finding_id: id, evidence } of findings) {
-    const retained = retainedRepository(evidence.source_data, id, target);
+  for (const finding of findings) {
+    const { source_finding_id: id, evidence } = finding;
+    const retained = retainedRepository(provider, finding, target);
     const declared = evidence.details?.repository?.url;
     if (declared) sources.add(declared);
     if (!retained) continue;
@@ -121,6 +135,7 @@ export function blackDuckReportRepositories(
     if (retained.projectVersion) projects.add(retained.projectVersion);
     repositories.set(id, { url: retained.url });
   }
+  if (provider !== "blackduck") return repositories;
   if (
     projects.size > 1 ||
     ((target === "local" || projects.size > 0) &&

@@ -5,7 +5,8 @@ import {
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
-import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
+import { isGitHubCloudHost } from "./git-remote.js";
+import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
@@ -455,6 +456,28 @@ function records(payload: unknown): FindingInput {
   throw new Error(
     "Unsupported Wiz export. Supply repository vulnerability CSV, vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. Other CSV reports need an explicit normalized JSONL mapping.",
   );
+}
+
+/** The source repository retained by a Wiz package finding or CSV row. */
+export function wizFindingRepository(
+  evidence: VendorFinding["evidence"],
+): ExternalSourceRepository | undefined {
+  const csvUrl = wizCsvRepositoryUrl(evidence);
+  if (csvUrl) return { url: csvUrl, platform: "github" };
+  const asset = object(evidence.source_data?.["vulnerableAsset"]);
+  if (!asset || typeof asset["cloudProviderURL"] !== "string") return;
+  const url = URL.parse(asset["cloudProviderURL"]);
+  if (!url) return;
+  const github =
+    asset["nativeType"] === "github#repositoryBranch" ||
+    (asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname));
+  if (!github)
+    return asset["type"] === "REPOSITORY_BRANCH"
+      ? { url: asset["cloudProviderURL"] }
+      : undefined;
+  const [, owner, repository] = url.pathname.split("/");
+  if (owner && repository)
+    return { url: `${url.origin}/${owner}/${repository}`, platform: "github" };
 }
 
 export async function readVendorFindings(

@@ -32,10 +32,14 @@ import {
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { wizFindingRepository } from "./wiz-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
-import { blackDuckReportRepositories } from "./blackduck-findings.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import {
   snapshotImportOptions,
@@ -748,18 +752,24 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
-    if (!saved || options.provider === "blackduck") {
-      const repositories = blackDuckReportRepositories(
-        options.provider,
-        findings,
-        "cloud",
-      );
-      for (const [id, source] of repositories)
-        requireDestination(id, source.url);
-    } else if (options.provider !== "inspector") {
-      // Other providers' validated checkpoints retain their original repository ID.
-      return;
+    // Historical checkpoints already fixed the provider and request bytes.
+    // Recheck any projected source against the destination discovered for this retry.
+    const replay = saved && options.provider !== "blackduck";
+    const repositories = replay
+      ? undefined
+      : blackDuckReportRepositories(options.provider, findings, "cloud");
+    for (const finding of findings) {
+      const { source_finding_id: id, evidence } = finding;
+      const url = repositories
+        ? repositories.get(id)?.url
+        : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      if (!url) continue;
+      requireDestination(id, url);
+      requireDestination(id, evidence.details?.repository?.url);
+      if (options.provider === "wiz")
+        requireDestination(id, wizFindingRepository(evidence)?.url);
     }
+    if (replay && options.provider !== "inspector") return;
     const binding = inspectorReportRepository(
       options.provider,
       findings,

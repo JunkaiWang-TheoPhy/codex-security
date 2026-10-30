@@ -9,7 +9,17 @@ import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import type { ExternalFinding } from "../src/external-findings.js";
+import { normalizeInspectorFindings } from "../src/inspector-findings.js";
+import {
+  localFindingsFixture,
+  localReportFixture,
+} from "./external-findings-local-helpers.js";
+import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
+import {
+  inspectorPackageFinding,
+  inspectorRepositoryUrl,
+} from "./support/inspector-import-fixtures.js";
 import {
   blackDuckBomReport,
   blackDuckBomRow,
@@ -198,4 +208,160 @@ test("Black Duck binds normalized summaries to native findings and comparable re
   sourceRepositories.push({ url: source, platform: "github" });
   await prepare(native, alias);
   await prepare(typed("sdk-source", source), alias);
+
+  execFileSync("git", ["remote", "set-url", "upstream", other], {
+    cwd: fixture.repository,
+  });
+  const reference = { url: other, platform: "github" as const };
+  sourceRepositories.push(reference);
+  const pending = prepare(native);
+  reference.url = source;
+  await expect(pending).rejects.toThrow(/same project version/);
+
+  const projected = {
+    source_finding_id: native.source_finding_id,
+    evidence: {
+      title: "Example",
+      severity: "unknown" as const,
+      source_data: { sourceRepositoryUrl: source },
+    },
+  };
+  const prepareWiz = (findings: typeof report.findings, urls: string[]) =>
+    prepareNormalizedLocalImport(
+      { read: findings.length, findings, excluded: [] },
+      { provider: "wiz", sourceKey: "example", repository: fixture.repository },
+      {
+        environment: fixture.environment,
+        sourceRepositories: urls.map((url) => ({ url })),
+      },
+    );
+  const second = typed("wiz-row", other);
+  await expect(
+    prepareWiz(
+      [
+        {
+          ...projected,
+          evidence: { ...projected.evidence, details: second.evidence.details },
+        },
+      ],
+      [],
+    ),
+  ).rejects.toThrow(/retained scanner repository/i);
+  await expect(prepareWiz([projected], [other])).rejects.toThrow(
+    /reader repository/i,
+  );
+  await expect(prepareWiz([projected], [source, other])).rejects.toThrow(
+    /reader repository/i,
+  );
+  await prepareWiz([projected, second], [source, other]);
 });
+
+function projection(url: string): ExternalFinding {
+  return {
+    source_finding_id: "blackduck-bom:" + "a".repeat(64),
+    evidence: {
+      title: "Projected package",
+      severity: "high",
+      source_data: { sourceRepositoryUrl: url },
+    },
+  };
+}
+
+test.each([
+  [
+    "https://git.example.test/Team/Project",
+    "https://git.example.test/Team/Project?repo=other",
+  ],
+  [
+    "https://git.example.test/Team/Project%20data",
+    "git@git.example.test:Team/Project%20data",
+  ],
+])(
+  "projected source %s cannot use checkout remote %s",
+  async (source, remote) => {
+    await using f = await localFindingsFixture({ remote });
+    await expect(
+      prepareNormalizedLocalImport(
+        { read: 1, findings: [projection(source)], excluded: [] },
+        { provider: "wiz", repository: f.repository, sourceKey: "example" },
+        { environment: f.environment },
+      ),
+    ).rejects.toThrow(/does not match a configured remote/);
+  },
+);
+
+test("a Wiz file can combine projected and native package repositories", async () => {
+  await using f = await localReportFixture("wiz.json", {
+    provider: "wiz",
+    sourceKey: "example",
+  });
+  const record = {
+    id: "wiz-1",
+    name: "CVE-2099-0001",
+    detailedName: "example",
+    vendorSeverity: "HIGH",
+    vulnerableAsset: {
+      id: "branch-1",
+      nativeType: "github#repositoryBranch",
+      cloudProviderURL: "https://github.com/example/other/tree/main",
+    },
+  };
+  await f.writeJson([projection(inspectorRepositoryUrl), record]);
+  expect((await (await f.prepare()).import()).counts.created).toBe(2);
+});
+
+test("GitHub owns the casing of a projected Enterprise repository", async () => {
+  const source = "https://git.example.test/Team/Project";
+  await using f = await localFindingsFixture({ remote: source });
+  const report = { read: 1, findings: [projection(source)], excluded: [] };
+  const settings = { repository: f.repository, sourceKey: "example" };
+  const dependencies = {
+    environment: f.environment,
+    sourceRepositories: [{ url: source.toLowerCase() }],
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      report,
+      { ...settings, provider: "wiz" },
+      dependencies,
+    ),
+  ).rejects.toThrow(/reader repository/i);
+  await prepareNormalizedLocalImport(
+    report,
+    { ...settings, provider: "github" },
+    dependencies,
+  );
+});
+
+test.each(["github", "inspector"] as const)(
+  "%s native repository also binds the projected source",
+  async (provider) => {
+    await using f = await localFindingsFixture();
+    const findings = (url: string) => {
+      const row = projection(url);
+      if (provider === "inspector")
+        return [
+          ...normalizeInspectorFindings(
+            { findings: [inspectorPackageFinding()] },
+            inspectorRepositoryUrl,
+            "local",
+          ).findings,
+          row,
+        ];
+      row.evidence.url = githubDependabotAlert().html_url;
+      return [row];
+    };
+    const prepare = (url: string) => {
+      const rows = findings(url);
+      return prepareNormalizedLocalImport(
+        { read: rows.length, findings: rows, excluded: [] },
+        { provider, sourceKey: "example", repository: f.repository },
+        { environment: f.environment },
+      );
+    };
+    await prepare(inspectorRepositoryUrl);
+    await expect(prepare("https://github.com/example/other")).rejects.toThrow(
+      /repository|Dependabot alert/i,
+    );
+  },
+);

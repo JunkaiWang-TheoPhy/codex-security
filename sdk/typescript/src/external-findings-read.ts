@@ -5,7 +5,6 @@ import type {
 } from "./external-findings.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
@@ -13,9 +12,11 @@ import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
-import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
-import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import {
+  readVendorFindingsForPublication,
+  wizFindingRepository,
+} from "./wiz-findings.js";
 
 /** File reader names mapped to their stored and Cloud source provider. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
@@ -131,33 +132,10 @@ export async function readExternalFindings(
     return { findings, sourceRepositories: [{ url }] };
   }
   const publication = await readVendorFindingsForPublication(path, target);
-  // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(
     ({ evidence }) => {
-      const csvUrl = wizCsvRepositoryUrl(evidence);
-      if (csvUrl) return [{ url: csvUrl, platform: "github" as const }];
-      const asset = evidence.source_data?.["vulnerableAsset"];
-      if (!isRecord(asset) || typeof asset["cloudProviderURL"] !== "string")
-        return [];
-      const url = URL.parse(asset["cloudProviderURL"]);
-      if (!url) return [];
-      const github =
-        asset["nativeType"] === "github#repositoryBranch" ||
-        (asset["type"] === "REPOSITORY_BRANCH" &&
-          isGitHubCloudHost(url.hostname));
-      if (!github)
-        return asset["type"] === "REPOSITORY_BRANCH"
-          ? [{ url: asset["cloudProviderURL"] }]
-          : [];
-      const [, owner, repository] = url.pathname.split("/");
-      return owner && repository
-        ? [
-            {
-              url: `${url.origin}/${owner}/${repository}`,
-              platform: "github" as const,
-            },
-          ]
-        : [];
+      const repository = wizFindingRepository(evidence);
+      return repository ? [repository] : [];
     },
   );
   return {
