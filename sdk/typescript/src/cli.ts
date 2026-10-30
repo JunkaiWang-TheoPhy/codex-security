@@ -115,6 +115,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   externalImportsDisabledMessage,
   externalImportsEnabled,
@@ -125,6 +126,7 @@ import {
   EXTERNAL_FINDINGS_READERS,
 } from "./external-findings-read.js";
 import {
+  hasScannerDiagnostics,
   isEmptyExternalReport,
   type ExternalFindings,
 } from "./external-findings.js";
@@ -226,6 +228,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { GHSA_ID } from "./github-identifiers.js";
 import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
@@ -1271,6 +1274,7 @@ interface CliDependencies {
   exportFindings(
     arguments_: ArtifactExportArguments,
     output?: Writable,
+    diagnostics?: Writable,
   ): Promise<string | Uint8Array | undefined>;
   runCodex(
     args: readonly string[],
@@ -3551,15 +3555,15 @@ export async function main(
   function registerFindingPublication() {
     publication.command("findings", {
       description:
-        "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
-      hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+        "Preview and import a saved scanner report locally or to Cloud.",
+      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
         file: z
           .string()
           .describe(
-            "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+            "Saved report in a format accepted by the selected reader.",
           ),
       }),
       options: z.object({
@@ -3571,11 +3575,18 @@ export async function main(
         ),
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
-          .describe("Provider that produced these findings."),
+          .describe(
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider.",
+          ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
           .describe(
-            "Required for Semgrep: source repository URL, checked against the Cloud destination or configured local Git remotes.",
+            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+          ),
+        inspectorProjectArn: optionValue("--inspector-project-arn")
+          .optional()
+          .describe(
+            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -3650,6 +3661,20 @@ export async function main(
               controller.signal,
             );
           };
+          const showScannerReport = (preview: ExternalFindings) => {
+            if (options.provider !== "opengrep") return;
+            writeDiagnostic("Reader: OpenGrep (stored provider: semgrep)\n");
+            const diagnostics = preview.report?.["errors"];
+            if (Array.isArray(diagnostics) && diagnostics.length) {
+              writeDiagnostic(
+                `Scanner diagnostics: ${diagnostics.length}. Scan coverage may be incomplete.\n`,
+              );
+              for (const diagnostic of diagnostics)
+                writeDiagnostic(
+                  `${diagnosticValue(JSON.stringify(diagnostic))}\n`,
+                );
+            }
+          };
           let lastProgress = "";
           const onProgress = (event: ExternalPublicationProgress) => {
             if (errorOutput.isTTY !== true) return;
@@ -3674,26 +3699,41 @@ export async function main(
           try {
             if (!importsEnabled)
               throw new CodexSecurityError(externalImportsDisabledMessage);
+            const { inspectorProjectArn, ...readerOptions } = options;
+            let inspectorProjectMap: Map<string, string> | undefined;
+            if (inspectorProjectArn !== undefined) {
+              if (options.provider !== "inspector")
+                throw new CodexSecurityError(
+                  "--inspector-project-arn requires --provider inspector.",
+                );
+              const url = validateInspectorProjectMapping(
+                inspectorProjectArn,
+                options.sourceRepositoryUrl,
+              );
+              inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
+            }
+            const directory = dependencies.currentDirectory();
+            const report = resolveCliPath(directory, args.file);
+            const repository =
+              options.to === "local"
+                ? resolveCliPath(directory, options.repository)
+                : options.repository;
+            const publicationOptions = {
+              ...readerOptions,
+              repository,
+              inspectorProjectMap,
+            };
             if (options.to === "local") {
               const prepared = await (
                 dependencies.prepareLocalExternalImport ??
                 prepareLocalExternalImport
-              )(
-                resolveCliPath(dependencies.currentDirectory(), args.file),
-                {
-                  ...options,
-                  repository: resolveCliPath(
-                    dependencies.currentDirectory(),
-                    options.repository,
-                  ),
-                },
-                {
-                  environment: dependencies.environment,
-                  signal: controller.signal,
-                },
-              );
+              )(report, publicationOptions, {
+                environment: dependencies.environment,
+                signal: controller.signal,
+              });
               const { preview } = prepared;
               const showPreview = () => {
+                showScannerReport(preview);
                 writeDiagnostic(
                   `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
                 );
@@ -3712,6 +3752,8 @@ export async function main(
                   renderedOutput = "Dry run complete. No findings stored.\n";
                 return { ...preview, dryRun: true };
               }
+              if (!preview.read && hasScannerDiagnostics(preview))
+                throw new NoPublishableFindingsError(preview);
               if (isEmptyExternalReport(preview)) {
                 controller.signal.throwIfAborted();
                 if (humanSummary)
@@ -3719,6 +3761,7 @@ export async function main(
                     "The report contains no findings. Nothing was stored.\n";
                 return {
                   repository: preview.repository,
+                  ...(preview.report && { report: preview.report }),
                   read: 0,
                   ready: 0,
                   excluded: [],
@@ -3738,8 +3781,8 @@ export async function main(
               return { ...result };
             }
             const prepared = await prepareExternalPublication(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
-              options,
+              report,
+              publicationOptions,
               {
                 environment: dependencies.environment,
                 fetch: dependencies.cloudFetch,
@@ -3749,6 +3792,7 @@ export async function main(
             );
             const { preview } = prepared;
             const showPreview = () => {
+              showScannerReport(preview);
               writeDiagnostic(
                 `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
@@ -3848,6 +3892,7 @@ export async function main(
                 read: selection.read,
                 ready: 0,
                 excluded: selection.excluded,
+                ...(selection.report && { report: selection.report }),
               }),
             };
             if (
@@ -3998,7 +4043,7 @@ export async function main(
         githubAdvisory: z
           .array(
             optionValue("--github-advisory").regex(
-              /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+              GHSA_ID,
               "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
             ),
           )
@@ -5588,18 +5633,23 @@ export async function main(
           scan: optionValue("--scan")
             .optional()
             .describe(
-              "Saved scan ID or unique prefix; cannot be combined with a result directory.",
+              "Saved scan ID, unique prefix, or latest completed scan ('latest').",
             ),
           exportFormat: z
-            .enum(["csv", "json", "sarif", "md"])
+            .enum(["csv", "json", "sarif", "md", "servicenow-avit"])
             .optional()
             .describe(
-              "Findings: csv, json, or sarif (default); threat-model: md (default).",
+              "Findings: csv, json, servicenow-avit, or sarif (default). Threat models use md.",
+            ),
+          avitTemplate: optionValue("--avit-template")
+            .optional()
+            .describe(
+              "Per-application CSV template required for servicenow-avit exports.",
             ),
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, or threatmodel.md).",
+              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md).",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -5633,6 +5683,7 @@ export async function main(
           const format = resolveArtifactFormat(
             options.artifact,
             options.exportFormat,
+            options.avitTemplate,
           );
           const sourceRoot =
             options.sourceRoot === undefined
@@ -5644,16 +5695,20 @@ export async function main(
               : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
-            const scanId =
-              options.scan ??
-              (
-                await latestScans(1, "complete", options.python, protectedRoot)
-              )?.[0]?.scanId;
+            let scanId = options.scan;
+            if (!scanId || scanId === "latest") {
+              const scans = await latestScans(
+                1,
+                "complete",
+                options.python,
+                protectedRoot,
+              );
+              scanId = scans?.[0]?.scanId;
+            }
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
               options.artifact,
-              format,
               (args) =>
                 dependencies.runWorkbench(
                   args,
@@ -5664,33 +5719,34 @@ export async function main(
                 ),
             );
           }
-          const arguments_: ArtifactExportArguments = {
-            scanDir: resolveCliPath(currentDirectory, scanDir),
-            artifact: options.artifact,
-            format,
-            output:
-              options.output === "-"
-                ? "-"
-                : resolveCliPath(
-                    currentDirectory,
-                    options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
-                  ),
-            sourceRoot,
-            pythonPath: options.python,
-          };
+          const destination = options.output ?? EXPORT_DEFAULT_OUTPUTS[format];
+          const outputPath =
+            destination === "-"
+              ? "-"
+              : resolveCliPath(currentDirectory, destination);
           const prepared = await resolveArtifactExportOutput(
-            arguments_,
-            dependencies.currentDirectory(),
+            {
+              scanDir: resolveCliPath(currentDirectory, scanDir),
+              artifact: options.artifact,
+              format,
+              output: outputPath,
+              sourceRoot,
+              avitTemplate: options.avitTemplate,
+              pythonPath: options.python,
+            },
+            currentDirectory,
           );
-          const contents = await dependencies.exportFindings(prepared, output);
-          if (arguments_.output === "-") {
+          const contents = await dependencies.exportFindings(
+            prepared,
+            output,
+            errorOutput,
+          );
+          if (outputPath === "-") {
             if (contents !== undefined) {
               await writeCliOutput(output, Buffer.from(contents));
             }
           } else {
-            errorOutput.write(
-              `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-            );
+            errorOutput.write(`${format.toUpperCase()}: ${outputPath}\n`);
           }
           exitCode = 0;
         } catch (error) {
@@ -6769,41 +6825,30 @@ export async function main(
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--export-format=csv" ||
-          value === "--exportFormat=csv" ||
-          ((value === "--export-format" || value === "--exportFormat") &&
-            argv[index + 1] === "csv"),
-      )
-    ) {
-      return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-    }
-    if (
-      command === "export" &&
-      structuredOutput &&
-      argv.some(
-        (value, index) =>
-          value === "--output=-" ||
-          (value === "--output" && argv[index + 1] === "-"),
-      ) &&
-      argv.some(
-        (value, index) =>
-          value === "--artifact=threat-model" ||
-          (value === "--artifact" && argv[index + 1] === "threat-model") ||
-          value === "--export-format=md" ||
-          (value === "--export-format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+    if (command === "export" && structuredOutput) {
+      const hasValue = (flag: string, value: string) =>
+        argv.some(
+          (arg, index) =>
+            arg === `${flag}=${value}` ||
+            (arg === flag && argv[index + 1] === value),
+        );
+      if (hasValue("--output", "-")) {
+        if (
+          ["csv", "servicenow-avit"].some(
+            (format) =>
+              hasValue("--export-format", format) ||
+              hasValue("--exportFormat", format),
+          )
+        ) {
+          return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
+        }
+        if (
+          hasValue("--artifact", "threat-model") ||
+          hasValue("--export-format", "md")
+        ) {
+          return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
+        }
+      }
     }
     if (command === "scan" && !argv.includes("--schema")) {
       if (
@@ -7807,7 +7852,6 @@ async function readSavedFindings(
   const directory = await resolveSavedArtifactDirectory(
     scanId,
     "findings",
-    "json",
     workbench,
   );
   const { findings } = await loadContract(directory, {
@@ -9563,7 +9607,7 @@ async function executeScan(
     );
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
-        repository,
+        repository: resolveCliPath(directory, repository),
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
@@ -10940,7 +10984,7 @@ function protectedRootErrorMessage(
     `  Reason:         ${reason}`,
     error.pathKind === "output"
       ? suggestion === undefined
-        ? "Choose a private output directory outside the protected root."
+        ? "Choose an output directory outside the protected root."
         : `Re-run with --output-dir ${quoteCliPath(suggestion)}.`
       : suggestion === undefined
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."

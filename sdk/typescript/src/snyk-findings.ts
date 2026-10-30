@@ -81,11 +81,10 @@ export function normalizeSnykFindingsExport(
     throw new Error("Expected a snyk-findings-export/v1 bundle from Snyk.");
   const collection = record(document["collection"], "Snyk collection");
   const sourceTarget = record(collection["target"], "Snyk target");
-  const findings = array(document["findings"], "Snyk findings");
-  const { findings: _findings, ...context } = document;
+  const { findings, ...context } = document;
   const parsed = normalizeRecords(
-    findings,
-    (value, sourceFindingId) => {
+    array(findings, "Snyk findings"),
+    (value) => {
       const finding = record(value, "Snyk plugin finding");
       const observation = record(finding["observation"], "Snyk observation");
       if (
@@ -109,46 +108,42 @@ export function normalizeSnykFindingsExport(
         record(finding["severity"], "Snyk severity")["value"],
       )?.toLowerCase();
       const revision = text(sourceTarget["revision"]);
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(finding["title"], "Snyk title"),
-            description: text(
-              record(finding["description"] ?? {}, "Snyk description")["text"],
-            ),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
-            advisory_ids: [
-              ...new Set([
-                requiredText(rule["id"], "Snyk advisory ID"),
-                ...strings(aliases["cve"]),
-              ]),
-            ],
-            packages: [
-              {
-                name: requiredText(pkg["name"], "Snyk package name"),
-                ecosystem: text(pkg["ecosystem"]),
-                installed_version: text(pkg["version"]),
-                // Plugin v1 manifests are target-relative, without a Git-root offset.
-                manifest_path: null,
-                fixed_versions: strings(remediation["fixedIn"]),
-              },
-            ],
-            locations: [],
-            code_revision:
-              sourceTarget["workingTreeDirty"] === false &&
-              revision !== "unknown"
-                ? revision
-                : null,
-            source_data: structuredClone({ ...context, finding }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(finding["title"], "Snyk title"),
+          description: text(
+            record(finding["description"] ?? {}, "Snyk description")["text"],
+          ),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
+          advisory_ids: [
+            ...new Set([
+              requiredText(rule["id"], "Snyk advisory ID"),
+              ...strings(aliases["cve"]),
+            ]),
+          ],
+          packages: [
+            {
+              name: requiredText(pkg["name"], "Snyk package name"),
+              ecosystem: text(pkg["ecosystem"]),
+              installed_version: text(pkg["version"]),
+              // Plugin v1 manifests are target-relative, without a Git-root offset.
+              manifest_path: null,
+              fixed_versions: strings(remediation["fixedIn"]),
+            },
+          ],
+          locations: [],
+          code_revision:
+            sourceTarget["workingTreeDirty"] === false && revision !== "unknown"
+              ? revision
+              : null,
+          source_data: structuredClone({ ...context, finding }),
+        },
+        target,
+      );
     },
     pluginIdentity,
     target,
@@ -327,10 +322,13 @@ export function normalizeSnykSarif(
   });
   return normalizeRecords(
     entries,
-    (
-      { result: value, rulesById, runContext, driverContext, documentContext },
-      sourceFindingId,
-    ) => {
+    ({
+      result: value,
+      rulesById,
+      runContext,
+      driverContext,
+      documentContext,
+    }) => {
       const result = record(value, "SARIF result");
       const id = requiredText(result["ruleId"], "Snyk advisory ruleId");
       const match = rulesById.get(id);
@@ -405,44 +403,41 @@ export function normalizeSnykSarif(
       }
       const description = [message, help].join("\n\n");
       // Use the project, advisory group, and literal manifest set within the caller's namespace.
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title,
-            description,
-            severity,
-            advisory_ids: [
-              ...new Set([
-                id,
-                ...(text(
-                  record(rule["fullDescription"] ?? {}, "Full description")[
-                    "text"
-                  ],
-                )?.match(/\bCVE-\d{4}-\d+\b/gu) ?? []),
-              ]),
-            ],
-            packages,
-            // Snyk emits target-relative paths without a Git-root offset and may
-            // synthesize startLine=1. Keep both only in the original evidence.
-            locations: [],
-            source_data: structuredClone({
-              document: documentContext,
-              run: sarifRunContextForResult(
-                runContext,
-                result,
-                rule,
-                driverContext,
-                documentContext,
-              ),
-              driver: driverContext,
-              rule,
+      return validateExternalEvidence(
+        {
+          title,
+          description,
+          severity,
+          advisory_ids: [
+            ...new Set([
+              id,
+              ...(text(
+                record(rule["fullDescription"] ?? {}, "Full description")[
+                  "text"
+                ],
+              )?.match(/\bCVE-\d{4}-\d+\b/gu) ?? []),
+            ]),
+          ],
+          packages,
+          // Snyk emits target-relative paths without a Git-root offset and may
+          // synthesize startLine=1. Keep both only in the original evidence.
+          locations: [],
+          source_data: structuredClone({
+            document: documentContext,
+            run: sarifRunContextForResult(
+              runContext,
               result,
-            }),
-          },
-          target,
-        ),
-      };
+              rule,
+              driverContext,
+              documentContext,
+            ),
+            driver: driverContext,
+            rule,
+            result,
+          }),
+        },
+        target,
+      );
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
@@ -489,7 +484,7 @@ export function normalizeSnykJson(
   });
   return normalizeRecords(
     entries,
-    ({ value, context, manager }, sourceFindingId) => {
+    ({ value, context, manager }) => {
       const vulnerability = record(value, "Snyk vulnerability");
       if (vulnerability["type"] === "license")
         throw new Error(
@@ -500,45 +495,42 @@ export function normalizeSnykJson(
         "Snyk identifiers",
       );
       const severity = text(vulnerability["severity"])?.toLowerCase();
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(
-              vulnerability["title"],
-              "Snyk vulnerability title",
-            ),
-            description: text(vulnerability["description"]),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
-            advisory_ids: [
-              ...new Set([
-                requiredText(vulnerability["id"], "Snyk advisory ID"),
-                ...strings(identifiers["CVE"]),
-              ]),
-            ],
-            packages: [
-              {
-                name: requiredText(
-                  vulnerability["name"] ?? vulnerability["packageName"],
-                  "Snyk package name",
-                ),
-                ecosystem: manager,
-                installed_version: text(vulnerability["version"]),
-                // Native test paths are scan-target-relative, without a Git-root offset.
-                manifest_path: null,
-                fixed_versions: strings(vulnerability["fixedIn"]),
-              },
-            ],
-            locations: [],
-            source_data: structuredClone({ project: context, vulnerability }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(
+            vulnerability["title"],
+            "Snyk vulnerability title",
+          ),
+          description: text(vulnerability["description"]),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
+          advisory_ids: [
+            ...new Set([
+              requiredText(vulnerability["id"], "Snyk advisory ID"),
+              ...strings(identifiers["CVE"]),
+            ]),
+          ],
+          packages: [
+            {
+              name: requiredText(
+                vulnerability["name"] ?? vulnerability["packageName"],
+                "Snyk package name",
+              ),
+              ecosystem: manager,
+              installed_version: text(vulnerability["version"]),
+              // Native test paths are scan-target-relative, without a Git-root offset.
+              manifest_path: null,
+              fixed_versions: strings(vulnerability["fixedIn"]),
+            },
+          ],
+          locations: [],
+          source_data: structuredClone({ project: context, vulnerability }),
+        },
+        target,
+      );
     },
     ({ value, manager, manifest }) => {
       const vulnerability = record(value, "Snyk vulnerability");
