@@ -757,6 +757,23 @@ test("an entirely excluded report fails with all positions intact and a short di
   expect(f.posts).toHaveLength(0);
 });
 
+test("excluded record IDs stay intact in JSON and out of terminal markup", async () => {
+  const id = "id-\x1b[2Jexample";
+  const f = await fixture([normalized(id, "unsupported")]);
+  for (const format of ["md", "json", "jsonl"]) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli([...f.command.slice(0, -1), format], f.cliDeps),
+    ).toBe(2);
+    expect(cli.stdout.text()).not.toContain("\x1b[");
+    expect(cli.stderr.text()).not.toContain("\x1b[");
+    if (format !== "md")
+      expect(JSON.parse(cli.stdout.text()).excluded[0].source_finding_id).toBe(
+        id,
+      );
+  }
+});
+
 test("normalized SDK callers can distinguish an empty report from exclusions without authenticating", async () => {
   for (const selection of [
     { read: 0, findings: [], excluded: [] },
@@ -973,7 +990,7 @@ test("failed or malformed vendor collections never report a successful empty imp
         },
         scans: [
           { category: "sca", outcome: "succeeded", issueCount: 0 },
-          { category: "code", outcome: "denied" },
+          { category: "code", outcome: "denied", error: "Code scan denied" },
         ],
       },
     }),
@@ -985,7 +1002,18 @@ test("failed or malformed vendor collections never report a successful empty imp
       f.cliDeps,
     ),
   ).toBe(0);
-  expect(JSON.parse(cleanSca.stdout.text()).status).toBe("empty");
+  expect(JSON.parse(cleanSca.stdout.text())).toMatchObject({
+    status: "empty",
+    report: {
+      collection: {
+        completeness: { collection: "partial" },
+        scans: [
+          { category: "sca", outcome: "succeeded" },
+          { category: "code", outcome: "denied", error: "Code scan denied" },
+        ],
+      },
+    },
+  });
   const unsupported = plugin.findings[0]!;
   await writeFile(
     f.file,

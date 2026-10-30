@@ -28,9 +28,7 @@ export function successfulSarifInvocations(
   function validateInvocation(value: unknown): Record<string, unknown> {
     const invocation = record(value, `${producer} invocation`);
     const successful = invocation["executionSuccessful"];
-    if (successful === false)
-      throw new Error(`${producer} SARIF contains an unsuccessful invocation.`);
-    if (successful !== true)
+    if (typeof successful !== "boolean")
       throw new Error(
         `${producer} SARIF executionSuccessful must be a boolean.`,
       );
@@ -50,6 +48,8 @@ export function successfulSarifInvocations(
           );
       }
     }
+    if (!successful)
+      throw new Error(`${producer} SARIF contains an unsuccessful invocation.`);
     return invocation;
   }
   if (run["conversion"] !== undefined) {
@@ -70,6 +70,27 @@ export function requiredText(value: unknown, label: string): string {
   const result = text(value);
   if (!result) throw new Error(`${label} must be nonempty text.`);
   return result;
+}
+
+/** SARIF repository claims must be checked even when a run has no results. */
+export function sarifRepositoryUrls(
+  run: unknown,
+  producer: "Endor" | "Semgrep" | "Snyk",
+): string[] {
+  if (run == null) return [];
+  return array(
+    record(run, `${producer} run context`)["versionControlProvenance"] ?? [],
+    `${producer} version control provenance`,
+  ).flatMap((entry) => {
+    const uri = record(entry, `${producer} repository provenance`)[
+      "repositoryUri"
+    ];
+    const url =
+      producer === "Semgrep"
+        ? text(uri)
+        : requiredText(uri, `${producer} repository URI`);
+    return url === null ? [] : [url];
+  });
 }
 
 export function strings(value: unknown): string[] {
@@ -97,16 +118,18 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string): Promise<Buffer> {
+async function readScannerBytes(path: string) {
   const bytes = await readFile(path);
-  const gzip =
-    (bytes[0] === 0x1f && bytes[1] === 0x8b) ||
-    (!bytes.length && /\.gz$/iu.test(path));
-  return gzip ? gunzipAsync(bytes) : bytes;
+  const gzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
+  return { gzip, bytes: gzip ? await gunzipAsync(bytes) : bytes };
 }
 
 export async function readScannerText(path: string): Promise<string> {
-  return strictUtf8.decode(await readScannerBytes(path));
+  const { bytes, gzip } = await readScannerBytes(path);
+  const contents = strictUtf8.decode(bytes);
+  if (!gzip && /\.gz$/iu.test(path) && !contents.trim())
+    throw new Error("The report is blank and contains no gzip stream.");
+  return contents;
 }
 
 export function parseJsonOrJsonl(contents: string, path: string): unknown {
@@ -120,7 +143,7 @@ export function parseJsonOrJsonl(contents: string, path: string): unknown {
 }
 
 export async function readScannerJson(path: string): Promise<unknown> {
-  const bytes = await readScannerBytes(path);
+  const { bytes } = await readScannerBytes(path);
   let decoded: string;
   try {
     decoded = strictUtf8.decode(bytes);

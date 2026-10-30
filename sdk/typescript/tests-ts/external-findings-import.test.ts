@@ -6,7 +6,12 @@ import { expect, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import {
+  localFindingsFixture,
+  localReportFixture,
+} from "./external-findings-local-helpers.js";
+import { endorSarif } from "./support/endor-import-fixtures.js";
+import { snykSarif } from "./support/snyk-import-fixtures.js";
 
 test("requires opt-in before reading the source file", async () => {
   await using fixture = await localFindingsFixture();
@@ -132,6 +137,35 @@ test("cancels preparation while the source file read is pending", async () => {
   expect(result.stdout.trim()).toBe("CANCELLED");
   await expect(access(fixture.stateDirectory)).rejects.toThrow();
 });
+
+test.each(["snyk", "endor"] as const)(
+  "%s SARIF rejects malformed repository provenance for full and empty runs",
+  async (provider) => {
+    await using fixture = await localReportFixture("report.sarif", {
+      provider,
+      sourceKey: "example-project",
+    });
+    const sarif = provider === "snyk" ? snykSarif() : endorSarif();
+    const run = sarif.runs[0]!;
+    for (const results of [run.results, []]) {
+      await fixture.writeJson({
+        ...sarif,
+        runs: [
+          {
+            ...run,
+            results,
+            versionControlProvenance: {
+              repositoryUri: "https://github.com/example/project",
+            },
+          },
+        ],
+      });
+      await expect(fixture.prepare()).rejects.toThrow(
+        "version control provenance must be an array",
+      );
+    }
+  },
+);
 
 test("an empty Semgrep file still binds the declared source to the local checkout", async () => {
   await using fixture = await localFindingsFixture({

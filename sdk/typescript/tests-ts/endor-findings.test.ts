@@ -52,6 +52,9 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
 });
 
 test("an Endor response with no objects and unrecognized list data is not an empty export", () => {
+  expect(() =>
+    normalizeEndorFindings({ list: { response: { next_page_id: 2 } } }),
+  ).toThrow("next_page_id");
   for (const list of [
     { items: [endorFinding()] },
     { response: { total_size: 13 } },
@@ -60,6 +63,30 @@ test("an Endor response with no objects and unrecognized list data is not an emp
       "Endor list.objects",
     );
   }
+});
+
+test("an Endor summary reporting matches cannot substitute for finding objects", () => {
+  for (const summary of [
+    { count_response: { count: 13 } },
+    { count_response: { count: "13" } },
+    {
+      group_response: {
+        groups: { example: { aggregation_count: { count: 2 } } },
+      },
+    },
+  ]) {
+    for (const list of [{}, { objects: [] }])
+      expect(() => normalizeEndorFindings({ list, ...summary })).toThrow(
+        "summary",
+      );
+  }
+  expect(
+    normalizeEndorFindings({
+      list: {},
+      count_response: { count: "0" },
+      group_response: { groups: {} },
+    }),
+  ).toEqual(normalizeEndorFindings([]));
 });
 
 test.each(["sast_data", "ai_sast_data"])(

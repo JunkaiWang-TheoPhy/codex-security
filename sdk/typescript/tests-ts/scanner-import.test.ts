@@ -116,14 +116,14 @@ test("SARIF validates converter failures separately from scanner invocations", (
     "unsuccessful invocation",
   );
   const failedConversion = {
-    executionSuccessful: true,
     toolExecutionNotifications: [
       { level: "error", message: { text: "Synthetic conversion failure" } },
     ],
   };
-  expect(() => converted(failedConversion)).toThrow(
-    "Synthetic conversion failure",
-  );
+  for (const executionSuccessful of [true, false])
+    expect(() =>
+      converted({ ...failedConversion, executionSuccessful }),
+    ).toThrow("Synthetic conversion failure");
 });
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {

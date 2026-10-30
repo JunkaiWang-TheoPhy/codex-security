@@ -10,6 +10,7 @@ import {
   readScannerJson,
   record,
   requiredText,
+  sarifRepositoryUrls,
   sarifRunContextForResult,
   stableId,
   strings,
@@ -164,11 +165,12 @@ export function normalizeSnykFindingsExport(
       );
     successfulSca = true;
   }
-  if (!parsed.read && !successfulSca)
+  if (parsed.read) return parsed;
+  if (!successfulSca)
     throw new Error(
       "An empty Snyk plugin bundle must identify a successful SCA scan.",
     );
-  return parsed;
+  return { ...parsed, report: { collection: structuredClone(collection) } };
 }
 
 function normalizeGitRepositoryUrl(
@@ -250,20 +252,10 @@ export function snykRepositoryUrls(
     driver["name"] !== "Snyk Open Source"
   )
     return [];
-  const run = source["run"];
-  if (run == null) return [];
-  return array(
-    record(run, "Snyk run context")["versionControlProvenance"] ?? [],
-    "Snyk version control provenance",
-  ).map((entry) => {
-    const repository = requiredText(
-      record(entry, "Snyk repository provenance")["repositoryUri"],
-      "Snyk repository URI",
-    );
-    return normalizeGitRemote
-      ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
-      : repository;
-  });
+  const urls = sarifRepositoryUrls(source["run"], "Snyk");
+  return normalizeGitRemote
+    ? urls.map((url) => normalizeGitRepositoryUrl(url, cloudRepositoryUrl))
+    : urls;
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */

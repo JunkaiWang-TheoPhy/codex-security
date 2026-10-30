@@ -149,6 +149,7 @@ test.each(["github", "wiz"] as const)(
         ["report.json", ""],
         ["report.csv.gz", gzipSync(" \n")],
         ["report.jsonl.gz", ""],
+        ["report.jsonl.gz", " \n"],
       ] as const) {
         const path = join(root, name);
         await writeFile(path, data);

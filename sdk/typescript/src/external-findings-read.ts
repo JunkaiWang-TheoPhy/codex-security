@@ -4,7 +4,7 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import { hasNoExternalRecords } from "./external-findings.js";
-import { readScannerJson } from "./scanner-import.js";
+import { readScannerJson, sarifRepositoryUrls } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
@@ -54,21 +54,6 @@ export interface ReadExternalFindings {
   sourceRepositories?: ExternalSourceRepository[];
 }
 
-function sarifRunRepositories(run: unknown): ExternalSourceRepository[] {
-  const references = isRecord(run)
-    ? run["versionControlProvenance"]
-    : undefined;
-  return Array.isArray(references)
-    ? references.flatMap((reference) =>
-        isRecord(reference) &&
-        typeof reference["repositoryUri"] === "string" &&
-        reference["repositoryUri"].trim()
-          ? [{ url: reference["repositoryUri"] }]
-          : [],
-      )
-    : [];
-}
-
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -93,18 +78,18 @@ export async function readExternalFindings(
   ) {
     const input = await readScannerJson(path);
     let findings: ExternalFindings;
-    let sourceRepositories: ExternalSourceRepository[];
+    let repositoryUrls: string[];
     if (options.provider === "snyk") {
       findings = normalizeSnykFindings(input, target);
-      sourceRepositories = findings.findings.flatMap(({ evidence }) =>
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
         snykRepositoryUrls(evidence.source_data, {
           normalizeGitRemote: false,
-        }).map((url) => ({ url })),
+        }),
       );
     } else if (options.provider === "endor") {
       findings = normalizeEndorFindings(input, target);
-      sourceRepositories = findings.findings.flatMap(({ evidence }) =>
-        endorRepositoryUrls(evidence.source_data).map((url) => ({ url })),
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
+        endorRepositoryUrls(evidence.source_data),
       );
     } else {
       findings = normalizeSemgrepFindings(
@@ -112,8 +97,8 @@ export async function readExternalFindings(
         { sourceRepositoryUrl: options.sourceRepositoryUrl ?? "" },
         target,
       );
-      sourceRepositories = findings.findings.flatMap(({ evidence }) =>
-        sarifRunRepositories(evidence.source_data?.["runContext"]),
+      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
+        sarifRepositoryUrls(evidence.source_data?.["runContext"], "Semgrep"),
       );
     }
     if (
@@ -125,13 +110,22 @@ export async function readExternalFindings(
         options.provider === "snyk" &&
         input["format"] === "snyk-findings-export/v1"
       )
-        sourceRepositories = snykRepositoryUrls(input, {
+        repositoryUrls = snykRepositoryUrls(input, {
           normalizeGitRemote: false,
-        }).map((url) => ({ url }));
-      else if (input["version"] === "2.1.0" && Array.isArray(input["runs"]))
-        sourceRepositories = input["runs"].flatMap(sarifRunRepositories);
+        });
+      else if (input["version"] === "2.1.0" && Array.isArray(input["runs"])) {
+        const producer = (
+          { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
+        )[options.provider];
+        repositoryUrls = input["runs"].flatMap((run) =>
+          sarifRepositoryUrls(run, producer),
+        );
+      }
     }
-    return { findings, sourceRepositories };
+    return {
+      findings,
+      sourceRepositories: repositoryUrls.map((url) => ({ url })),
+    };
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };

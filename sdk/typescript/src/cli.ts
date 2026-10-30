@@ -3874,16 +3874,17 @@ export async function main(
                 renderedOutput = renderExternalPublicationSummary(error.result);
               return { ...error.result };
             }
-            if (selection && !structured) showExclusions(selection.excluded);
+            if (selection && !machineFormat) showExclusions(selection.excluded);
             const failure = {
               status: "failed",
               error: diagnosticValue(error),
-              ...(selection && {
-                read: selection.read,
-                ready: 0,
-                excluded: selection.excluded,
-                ...(selection.report && { report: selection.report }),
-              }),
+              ...(machineFormat &&
+                selection && {
+                  read: selection.read,
+                  ready: 0,
+                  excluded: selection.excluded,
+                  ...(selection.report && { report: selection.report }),
+                }),
             };
             if (
               machineFormat &&

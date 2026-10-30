@@ -12,6 +12,7 @@ import {
   record,
   relativePath,
   requiredText,
+  sarifRepositoryUrls,
   sarifRunContextForResult,
   strings,
   successfulSarifInvocations,
@@ -20,18 +21,9 @@ import {
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
 export function endorRepositoryUrls(sourceData: unknown): string[] {
-  if (!isRecord(sourceData)) return [];
-  const run = sourceData["runContext"];
-  if (run == null) return [];
-  return array(
-    record(run, "Endor run context")["versionControlProvenance"] ?? [],
-    "Endor version control provenance",
-  ).map((entry) =>
-    requiredText(
-      record(entry, "Endor repository provenance")["repositoryUri"],
-      "Endor repository URI",
-    ),
-  );
+  return isRecord(sourceData)
+    ? sarifRepositoryUrls(sourceData["runContext"], "Endor")
+    : [];
 }
 
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
@@ -47,8 +39,11 @@ export function normalizeEndorFindings(
   if (list) {
     const response = record(list["response"] ?? {}, "Endor list response");
     const token = response["next_page_token"];
+    const nextPageId = response["next_page_id"];
+    if (nextPageId != null && typeof nextPageId !== "string")
+      throw new Error("Endor next_page_id must be a string.");
     if (
-      text(response["next_page_id"]) ||
+      text(nextPageId) ||
       (token != null && token !== 0 && token !== "0" && token !== "")
     ) {
       throw new Error(
@@ -70,6 +65,24 @@ export function normalizeEndorFindings(
     : Array.isArray(input)
       ? input
       : [input];
+  if (list && values.length === 0) {
+    const count = record(
+      root?.["count_response"] ?? {},
+      "Endor count response",
+    )["count"];
+    const groups = record(
+      root?.["group_response"] ?? {},
+      "Endor group response",
+    )["groups"];
+    if (
+      ((typeof count === "number" || typeof count === "string") &&
+        Number(count) > 0) ||
+      (groups != null && Object.keys(record(groups, "Endor groups")).length > 0)
+    )
+      throw new Error(
+        "The Endor report contains a summary without finding objects. Supply the complete finding export.",
+      );
+  }
   return normalizeRecords(
     values,
     (value) => {

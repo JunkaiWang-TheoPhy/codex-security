@@ -23,6 +23,7 @@ import {
   record,
   relativePath,
   requiredText,
+  sarifRepositoryUrls,
   sarifRunContextForResult,
   stableId,
   successfulSarifInvocations,
@@ -190,15 +191,8 @@ export function normalizeSemgrepSarif(
     throw new Error("Expected Semgrep SARIF 2.1.0.");
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
-    for (const entry of array(
-      run["versionControlProvenance"] ?? [],
-      "Version control provenance",
-    )) {
-      const declared = text(
-        record(entry, "Repository provenance")["repositoryUri"],
-      );
+    for (const declared of sarifRepositoryUrls(run, "Semgrep")) {
       if (
-        declared &&
         cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
       )
         throw new Error(

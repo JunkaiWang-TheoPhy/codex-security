@@ -1362,7 +1362,8 @@ exports.
 ## Import Endor Labs findings
 
 For local or Cloud import, prefer complete native Finding JSON from authenticated
-`endorctl`, scoped to one project and context. Omit `--field-mask` and use
+`endorctl`, scoped to one project and context. The `list.objects` field holds
+an array of findings. An empty `endorctl` response can omit the field. Omit `--field-mask` and use
 `--list-all` to finish pagination:
 
 ```sh
@@ -1758,9 +1759,10 @@ still checked, but no workbench database is created and all counts are zero.
 An unreadable or unsuccessful scan is not an empty import. If every record is
 excluded from Cloud, the command fails; JSON and JSONL include the full
 `excluded` array with each record's position, source ID if known, and reason.
-A SARIF log may have an empty `runs` array. Every run it does contain must
-include a results array. Failed execution, error notifications, and malformed
-result collections stop the import. An empty Snyk plugin bundle must show a
+SARIF imports read results from scanner runs. A log with an empty `runs` array
+has no selected results, even if it contains an unreferenced pool of external
+properties. Every run must include a results array. Failed execution, error
+notifications, and malformed result collections stop the import. An empty Snyk plugin bundle must show a
 successful Open Source (SCA) scan.
 
 For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
