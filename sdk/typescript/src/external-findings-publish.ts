@@ -739,24 +739,6 @@ async function preparePublicationInput(
     );
 
   function checkRepositories(findings: ExternalFindings["findings"]) {
-    // Other providers' validated checkpoints retain their original repository ID.
-    if (
-      saved &&
-      options.provider !== "inspector" &&
-      options.provider !== "blackduck"
-    )
-      return;
-    const blackDuck = blackDuckReportRepositories(
-      options.provider,
-      findings,
-      "cloud",
-    );
-    const binding = inspectorReportRepository(
-      options.provider,
-      findings,
-      "cloud",
-      inspectorProjectMap,
-    );
     function requireDestination(id: string, url: string | null | undefined) {
       if (
         url &&
@@ -766,8 +748,25 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    if (!saved || options.provider === "blackduck") {
+      const repositories = blackDuckReportRepositories(
+        options.provider,
+        findings,
+        "cloud",
+      );
+      for (const [id, source] of repositories)
+        requireDestination(id, source.url);
+    } else if (options.provider !== "inspector") {
+      // Other providers' validated checkpoints retain their original repository ID.
+      return;
+    }
+    const binding = inspectorReportRepository(
+      options.provider,
+      findings,
+      "cloud",
+      inspectorProjectMap,
+    );
     if (binding) requireDestination(binding.findingId, binding.url);
-    for (const [id, source] of blackDuck) requireDestination(id, source.url);
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
       const urls = [

@@ -155,10 +155,24 @@ test("uses the full generic package path and keeps the origin fallback for an in
     "pkg:maven/extra/group/library@2.0",
     "pkg:pypi/extra/library@2.0",
     "pkg:pypi/extra%2Flibrary@2.0",
+    "pkg:composer/library@2.0",
   ])
     expect(packages(invalid)).toMatchObject([
       { name: "example:library", ecosystem: "maven", installed_version: "1.0" },
     ]);
+});
+
+test("uses the matching native coordinate for a versionless package URL", () => {
+  const row = { ...blackDuckBomRow(), componentVersionName: "display label" };
+  const packages = (packageUrl: string) =>
+    normalizeBlackDuckFindings([{ ...row, packageUrl }], repository)
+      .findings[0]!.evidence.packages;
+  expect(packages("pkg:maven/example/library")).toMatchObject([
+    { name: "example:library", installed_version: "1.0" },
+  ]);
+  expect(packages("pkg:maven/another/library")).toMatchObject([
+    { name: "another:library", installed_version: "display label" },
+  ]);
 });
 
 test("adding or omitting an unrelated row and changing collection paging metadata do not version retained evidence", () => {
@@ -308,7 +322,10 @@ test("unrelated provider columns can share Black Duck field names", () => {
       title: "Example",
       severity: "unknown" as const,
       source_data: {
-        row: { componentVersion: "1.0", vulnerabilityWithRemediation: "none" },
+        row: {
+          componentVersion: "1.0",
+          vulnerabilityWithRemediation: { status: "open" },
+        },
       },
     },
   };
@@ -384,19 +401,33 @@ test("invalid components and non-vulnerability rows are diagnosed without invent
           ),
         },
         noOrigin,
+        { ...row, _meta: { links: null } },
       ],
-      totalCount: 5,
+      totalCount: 6,
     },
     repository,
   );
   expect(result.findings).toHaveLength(1);
-  expect(result.excluded.map(({ position }) => position)).toEqual([2, 3, 4, 5]);
+  expect(result.excluded.map(({ position }) => position)).toEqual([
+    2, 3, 4, 5, 6,
+  ]);
   expect(result.excluded.map(({ reason }) => reason)).toEqual([
     expect.stringContaining("vulnerabilityWithRemediation"),
     expect.stringContaining("vulnerabilityWithRemediation"),
     expect.stringContaining("contradicts"),
     expect.stringContaining("origin"),
+    expect.stringContaining("_meta.links"),
   ]);
+  const other = blackDuckBomRow(undefined, "release-b");
+  expect(() =>
+    normalizeBlackDuckFindings(
+      {
+        ...report,
+        items: [{ ...other, _meta: { links: [null, ...other._meta.links] } }],
+      },
+      repository,
+    ),
+  ).toThrow(/same project version/);
   const large = { ...row, extra: "x".repeat(270_000) };
   expect(normalizeBlackDuckFindings([large], repository).excluded).toHaveLength(
     1,
@@ -525,6 +556,20 @@ test("reads JSON and gzip by content and rejects a truncated collection in eithe
     await expect(
       readBlackDuckFindings(path, repository, target),
     ).rejects.toThrow(/totalCount/);
+});
+
+test("checks the component even when a vulnerabilities link omits the origin", () => {
+  const row = blackDuckBomRow();
+  const link = {
+    rel: "vulnerabilities",
+    href: row.componentVersion + "/vulnerabilities",
+  };
+  row._meta.links.push(link);
+  expect(normalizeBlackDuckFindings([row], repository).excluded).toEqual([]);
+  link.href = link.href.replace("component-a", "component-b");
+  expect(
+    normalizeBlackDuckFindings([row], repository).excluded[0]!.reason,
+  ).toMatch(/contradicts componentVersion/);
 });
 
 test("binds row remediation URLs to the project version, component version and origin", () => {

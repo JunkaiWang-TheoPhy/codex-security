@@ -133,6 +133,25 @@ test("Black Duck binds normalized summaries to native findings and comparable re
       cwd: fixture.repository,
     },
   );
+  const typed = (id: string, url: string) => ({
+    source_finding_id: id,
+    evidence: {
+      title: "Example",
+      severity: "unknown" as const,
+      details: { kind: "sast" as const, repository: { url } },
+    },
+  });
+  for (const alias of [
+    "ssh://git@git.example.test/team/application.git",
+    "https://git.example.test:443/team/application.git",
+  ]) {
+    const summary = typed("sdk-source", alias);
+    await prepare(native, summary);
+    await prepare({
+      ...native,
+      evidence: { ...native.evidence, details: summary.evidence.details },
+    });
+  }
   for (const declaration of [
     { details: { kind: "sast" as const, repository: { url: other } } },
     { source_data: { sourceRepositoryUrl: other } },
@@ -145,11 +164,28 @@ test("Black Duck binds normalized summaries to native findings and comparable re
         ...declaration,
       },
     };
+    await expect(prepare(summary, typed("sdk-source", source))).rejects.toThrow(
+      /same project version/,
+    );
     await expect(prepare(summary, native)).rejects.toThrow(
       /same project version/,
     );
     await expect(prepare(summary)).rejects.toThrow(
       /does not match a configured remote/,
     );
+  }
+
+  // An HTTPS row between two SSH rows cannot erase a conflicting login or path mode.
+  for (const conflicting of [
+    "bob@git.example.test:team/application.git",
+    "ssh://alice@git.example.test/team/application.git",
+  ]) {
+    await expect(
+      prepare(
+        typed("first", "alice@git.example.test:team/application.git"),
+        native,
+        typed("second", conflicting),
+      ),
+    ).rejects.toThrow(/same project version/);
   }
 });

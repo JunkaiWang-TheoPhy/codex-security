@@ -119,11 +119,17 @@ const gitTransportPorts: Readonly<Record<string, string>> = {
 };
 
 /** Compare transport forms without changing retained scanner evidence. */
+interface RemoteRepositoryIdentity {
+  key: string;
+  account?: string;
+  homeRelative?: boolean;
+}
+
 function remoteRepository(
   value: string,
   provider: Provider,
   bound: boolean,
-): { key: string; account?: string; homeRelative?: boolean } | undefined {
+): RemoteRepositoryIdentity | undefined {
   if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   const transport = bound
     ? /^(?:ssh|git\+ssh|ssh\+git|git):\/\/([^/]*)(.*)$/isu.exec(value)
@@ -223,6 +229,37 @@ function remoteRepository(
         ? homeRelative
         : undefined,
   };
+}
+
+function matchingRemote(
+  left: RemoteRepositoryIdentity,
+  right: RemoteRepositoryIdentity,
+) {
+  return (
+    left.key === right.key &&
+    (left.homeRelative === undefined ||
+      right.homeRelative === undefined ||
+      left.homeRelative === right.homeRelative) &&
+    ((left.homeRelative === false && right.homeRelative === false) ||
+      left.account === undefined ||
+      right.account === undefined ||
+      left.account === right.account)
+  );
+}
+
+function sameBlackDuckRepositories(urls: Iterable<string>): boolean {
+  let known: RemoteRepositoryIdentity | undefined;
+  for (const url of urls) {
+    const remote = remoteRepository(url, "blackduck", true) ?? { key: url };
+    if (known && !matchingRemote(known, remote)) return false;
+    // HTTPS does not specify the login or path interpretation carried by SSH.
+    known = {
+      key: remote.key,
+      account: remote.account ?? known?.account,
+      homeRelative: remote.homeRelative ?? known?.homeRelative,
+    };
+  }
+  return true;
 }
 
 async function bareMetadataRoots(
@@ -495,20 +532,7 @@ async function requireMatchingRepository(
     );
     if (!targets.length) continue;
     const target = identity(source.url, sourceProvider);
-    if (
-      !target ||
-      !targets.some(
-        ({ key, account, homeRelative }) =>
-          key === target.key &&
-          (homeRelative === undefined ||
-            target.homeRelative === undefined ||
-            homeRelative === target.homeRelative) &&
-          ((homeRelative === false && target.homeRelative === false) ||
-            account === undefined ||
-            target.account === undefined ||
-            account === target.account),
-      )
-    )
+    if (!target || !targets.some((remote) => matchingRemote(remote, target)))
       throw new CodexSecurityError(
         `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
       );
@@ -632,6 +656,7 @@ export async function prepareLocalImport(
     options.provider,
     current.findings,
     "local",
+    sameBlackDuckRepositories,
   );
   for (const { evidence } of current.findings) {
     const url = evidence.details?.repository?.url;
