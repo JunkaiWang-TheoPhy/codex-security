@@ -243,10 +243,19 @@ export function renderScanHistory(
           `  ${clean(scan["scanId"]).padEnd(36)} ${started.padEnd(10)} ${clean(scan["mode"]).padEnd(8)}${multipleRepositories ? ` ${fitCell(scanRepository, 18, "")}` : ""} ${findings.padEnd(8)} ${statusLabel}`,
         );
       } else {
-        lines.push(
-          `  ${clean(scan["scanId"])}`,
-          `    ${started}${multipleRepositories ? `  ${accent("·")}  ${scanRepository}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
-        );
+        lines.push(`  ${clean(scan["scanId"])}`);
+        const separator = `  ${accent("·")}  `;
+        const summary = `${findings} findings${separator}${statusLabel}`;
+        const location = multipleRepositories
+          ? `${scanRepository}${separator}`
+          : "";
+        const line = `    ${started}${separator}${location}${summary}`;
+        if (multipleRepositories && stringWidth(line) > width) {
+          lines.push(`    ${started}${separator}${summary}`);
+          wrap([scanRepository], 4);
+        } else {
+          lines.push(line);
+        }
       }
     }
   } else if (command === "findings") {

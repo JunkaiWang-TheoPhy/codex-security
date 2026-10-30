@@ -351,6 +351,11 @@ describe("scan history renderer", () => {
       { name: `${combining}🚀-tail`, cell: `${combining} ` },
       { name: `${joined}-tail`, cell: joined },
       { name: "中", cell: "中" + " ".repeat(16) },
+      {
+        name: "界".repeat(45) + joined,
+        cell: "界".repeat(9),
+        compact: `7 findings  ·  ✓ COMPLETE\n    ${"界".repeat(45)}\n    ${joined}`,
+      },
     ];
     const scans = repositories.map(({ name }, index) => ({
       scanId: String(index + 1).repeat(36),
@@ -372,10 +377,10 @@ describe("scan history renderer", () => {
     expect(narrow).toContain("results");
     expect(narrow).not.toContain("REPOSITORY");
     expect(wide).toContain("REPOSITORY         FINDINGS STATUS");
-    for (const [index, { name, cell }] of repositories.entries()) {
+    for (const [index, { name, cell, compact }] of repositories.entries()) {
       const id = scans[index]!.scanId;
       expect(narrow).toContain(id);
-      expect(narrow).toContain(name);
+      expect(narrow).toContain(compact ?? name);
       expect(wide).toContain(
         `${id} 2026-07-24 standard ${cell} 7        ✓ COMPLETE`,
       );
