@@ -145,9 +145,13 @@ test.each(["github", "wiz"] as const)(
   async (provider) => {
     const root = await temporaryDirectory("scanner-import-contract-");
     try {
-      for (const name of ["report.json", "report.csv.gz"]) {
+      for (const [name, data] of [
+        ["report.json", ""],
+        ["report.csv.gz", gzipSync(" \n")],
+        ["report.jsonl.gz", ""],
+      ] as const) {
         const path = join(root, name);
-        await writeFile(path, name.endsWith(".gz") ? gzipSync(" \n") : "");
+        await writeFile(path, data);
         await expect(
           readExternalFindings(path, { provider }),
         ).rejects.toThrow();

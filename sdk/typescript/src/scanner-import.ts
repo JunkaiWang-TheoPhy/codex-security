@@ -43,9 +43,10 @@ export function successfulSarifInvocations(
         `${producer} ${property}`,
       );
       for (const entry of notifications) {
-        if (record(entry, `${producer} notification`)["level"] === "error")
+        const notification = record(entry, `${producer} notification`);
+        if (notification["level"] === "error")
           throw new Error(
-            `${producer} SARIF contains scan error notifications.`,
+            `${producer} SARIF contains scan error notifications: ${JSON.stringify(notification)}`,
           );
       }
     }
@@ -98,7 +99,10 @@ const gunzipAsync = promisify(gunzip);
 
 async function readScannerBytes(path: string): Promise<Buffer> {
   const bytes = await readFile(path);
-  return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
+  const gzip =
+    (bytes[0] === 0x1f && bytes[1] === 0x8b) ||
+    (!bytes.length && /\.gz$/iu.test(path));
+  return gzip ? gunzipAsync(bytes) : bytes;
 }
 
 export async function readScannerText(path: string): Promise<string> {

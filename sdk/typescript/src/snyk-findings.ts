@@ -556,7 +556,14 @@ export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+  return normalizeSnykFindings(await readScannerJson(path), target);
+}
+
+/** @internal Dispatch an already read report to the same Snyk adapter as the file reader. */
+export function normalizeSnykFindings(
+  input: unknown,
+  target: ExternalImportTarget,
+): ExternalFindings {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
   if (document["format"] === "snyk-findings-export/v1")
