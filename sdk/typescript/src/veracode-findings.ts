@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { CodexSecurityError } from "./errors.js";
+import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -146,10 +148,21 @@ function hasVeracodeEvidence(data: unknown, id: string): boolean {
 }
 
 function retainedRepository(
-  sourceData: unknown,
-  id: string,
+  provider: Provider,
+  finding: ExternalFinding,
   target: ExternalImportTarget,
 ): { url: string; scope?: string } | undefined {
+  const {
+    source_finding_id: id,
+    evidence: { source_data: sourceData },
+  } = finding;
+  if (provider !== "veracode") {
+    if (hasVeracodeEvidence(sourceData, id))
+      throw new CodexSecurityError(
+        "Retained Veracode evidence requires the veracode provider.",
+      );
+    return;
+  }
   const data = isRecord(sourceData) ? sourceData : {};
   const native =
     nativeId.test(id) ||
@@ -175,7 +188,6 @@ function retainedRepository(
 
 export const veracodeReportRepositories = repositoryScopeValidator(
   { provider: "veracode", label: "Veracode", scope: "application" },
-  hasVeracodeEvidence,
   retainedRepository,
 );
 

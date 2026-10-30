@@ -9,6 +9,7 @@ import {
 } from "./external-imports-feature.js";
 import {
   snapshotImportOptions,
+  snapshotSourceRepositories,
   type ExternalFindings,
   type ExternalSourceRepository,
 } from "./external-findings.js";
@@ -21,9 +22,13 @@ import type {
   ExternalFindingEvidence,
   Provider,
 } from "./external-import-models.js";
-import { blackDuckReportRepositories } from "./blackduck-findings.js";
-import { veracodeReportRepositories } from "./veracode-findings.js";
+import { localFindingRepositories } from "./external-findings-read.js";
+import {
+  blackDuckReportRepositories,
+  projectedBlackDuckRepositoryUrl,
+} from "./blackduck-findings.js";
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -273,14 +278,10 @@ function localRepositoryPlatform(
 }
 
 function sameScannerRepositories(
-  urls: Iterable<string>,
-  platformFor: (source: ExternalSourceRepository) => Provider,
+  remotes: Iterable<RemoteRepositoryIdentity>,
 ): boolean {
   let known: RemoteRepositoryIdentity | undefined;
-  for (const url of urls) {
-    const remote = remoteRepository(url, platformFor({ url }), true) ?? {
-      key: url,
-    };
+  for (const remote of remotes) {
     if (known && !matchingRemote(known, remote)) return false;
     // HTTPS does not specify the login or path interpretation carried by SSH.
     known = {
@@ -484,6 +485,8 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  strictSources: ReadonlyMap<string, Provider>,
+  strictPlatformFor: (source: ExternalSourceRepository) => Provider,
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
@@ -537,13 +540,16 @@ async function requireMatchingRepository(
     const urls = await readGit(["remote", "get-url", "--all", "--", name]);
     remotes.push(...urls.split(/\r?\n/u));
   }
-  const bound =
+  const boundProvider =
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
-  const platformFor = localRepositoryPlatform(provider, sources, bound);
+  const loosePlatformFor = localRepositoryPlatform(provider, sources, false);
   for (const source of sources) {
-    const platform = platformFor(source);
+    const bound = boundProvider || strictSources.has(source.url);
+    const platform = bound
+      ? (strictSources.get(source.url) ?? strictPlatformFor(source))
+      : loosePlatformFor(source);
     const identity = (url: string) => remoteRepository(url, platform, bound);
     const targets = remotes.flatMap((remote) => identity(remote) ?? []);
     if (!targets.length) continue;
@@ -631,6 +637,8 @@ export async function prepareLocalImport(
   input: ExternalFindings,
   options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies,
+  readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
+  parsedSources: readonly ExternalSourceRepository[] = [],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
@@ -668,29 +676,138 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  const platformFor = localRepositoryPlatform(
-    options.provider,
-    dependencies.sourceRepositories ?? [],
-    true,
-  );
-  const bound = [
-    blackDuckReportRepositories,
-    veracodeReportRepositories,
-  ].flatMap((repositories) => [
-    ...repositories(options.provider, current.findings, "local", (urls) =>
-      sameScannerRepositories(urls, platformFor),
-    ).values(),
-  ]);
-  for (const { evidence } of current.findings) {
-    const url = evidence.details?.repository?.url;
-    if (url) sources.set(url, { url });
-  }
+  const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
     options.provider,
     current.findings,
     "local",
     options.inspectorProjectMap,
   );
+  const projected =
+    options.provider === "blackduck"
+      ? []
+      : current.findings.filter((finding) =>
+          projectedBlackDuckRepositoryUrl(finding, "local"),
+        );
+  const mixed = projected.length > 0 && readerSources.length > 0;
+  const nativeSources = new Map(
+    (mixed ? current.findings : projected)
+      .filter(
+        ({ evidence }) =>
+          options.provider !== "endor" ||
+          isRecord(evidence.source_data?.["runContext"]),
+      )
+      .map(
+        (finding) =>
+          [
+            finding,
+            localFindingRepositories(options.provider, finding),
+          ] as const,
+      ),
+  );
+  const platformFor = localRepositoryPlatform(
+    options.provider,
+    options.inspectorProjectMap
+      ? []
+      : [
+          ...references,
+          ...Array.from(nativeSources.values()).flat(),
+          ...(inspector ? [inspector] : []),
+        ],
+    true,
+  );
+  const identify = (url: string) =>
+    remoteRepository(url, platformFor({ url }), true) ?? { key: url };
+  // A hint from an independent reader applies across projected rows. A native
+  // GitHub asset in one row only identifies the platform of that row's claims.
+  const operatorPlatform = localRepositoryPlatform(
+    options.provider,
+    readerSources,
+    true,
+  );
+  const sameRepositories = (urls: Iterable<string>) =>
+    sameScannerRepositories(Array.from(urls, identify));
+  const bound = blackDuckReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  );
+  for (const source of veracodeReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  ).values()) {
+    sources.set(source.url, source);
+  }
+  const strictSources = new Map<string, Provider>();
+  const known = new Set<string>(parsedSources.map(({ url }) => url));
+  for (const finding of current.findings) {
+    const { evidence, source_finding_id: id } = finding;
+    const url = evidence.details?.repository?.url;
+    if (url) sources.set(url, { url });
+    const retained = bound.get(id);
+    const native = nativeSources.get(finding) ?? [];
+    if (retained) {
+      const claims = [
+        retained.url,
+        ...(url ? [url] : []),
+        ...native.map((ref) => ref.url),
+      ];
+      const rowPlatform = (claim: string) =>
+        options.provider !== "wiz"
+          ? platformFor({ url: claim })
+          : native.some((source) => source.platform === "github")
+            ? "github"
+            : operatorPlatform({ url: claim });
+      if (
+        !sameScannerRepositories(
+          claims.map(
+            (claim) =>
+              remoteRepository(claim, rowPlatform(claim), true) ?? {
+                key: claim,
+              },
+          ),
+        )
+      )
+        throw new CodexSecurityError(
+          "The retained scanner repository does not match the original provider finding.",
+        );
+      for (const source of [retained, ...native])
+        sources.set(source.url, source);
+      for (const claim of claims) {
+        const platform = rowPlatform(claim);
+        if (!strictSources.has(claim) || platform !== "github")
+          strictSources.set(claim, platform);
+      }
+    }
+    for (const source of native) known.add(source.url);
+  }
+  if (mixed) {
+    // A caller reference with no matching row spelling can still be a Git alias.
+    const rows = [...sources.keys(), ...known].map(identify);
+    const byKey = Map.groupBy(rows, (remote) => remote.key);
+    const represented = new Set(rows.map((remote) => JSON.stringify(remote)));
+    const aliases = readerSources
+      .map(({ url }) => identify(url))
+      .filter((remote) => !represented.has(JSON.stringify(remote)));
+    for (const [key, group] of Map.groupBy(aliases, (remote) => remote.key)) {
+      const candidates = byKey.get(key);
+      if (!candidates || !sameScannerRepositories([...candidates, ...group]))
+        throw new CodexSecurityError(
+          "Reader repository does not match a source in the normalized findings.",
+        );
+    }
+  }
+  if (strictSources.size && options.provider !== "blackduck") {
+    const keys = new Set(
+      Array.from(strictSources.keys(), (url) => identify(url).key),
+    );
+    for (const source of references)
+      if (!strictSources.has(source.url) && keys.has(identify(source.url).key))
+        strictSources.set(source.url, platformFor(source));
+  }
   if (inspector) {
     const platform = inspector.platform ?? options.provider;
     const native = remoteRepository(inspector.url, platform, true);
@@ -701,11 +818,7 @@ export async function prepareLocalImport(
         );
     }
   }
-  for (const source of [
-    ...(inspector ? [inspector] : []),
-    ...bound,
-    ...(dependencies.sourceRepositories ?? []),
-  ]) {
+  for (const source of [...(inspector ? [inspector] : []), ...references]) {
     // A reader's platform must not loosen an operator-supplied Inspector map.
     if (sources.get(source.url)?.platform !== "github")
       sources.set(
@@ -713,6 +826,15 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  if (
+    options.provider === "blackduck" &&
+    current.findings.length &&
+    sources.size > 1 &&
+    !sameScannerRepositories(Array.from(sources.keys(), identify))
+  )
+    throw new CodexSecurityError(
+      "Black Duck occurrences must belong to the same project version and source repository.",
+    );
   if (dependabotSource)
     sources.set(dependabotSource, {
       url: dependabotSource,
@@ -722,6 +844,8 @@ export async function prepareLocalImport(
     repository,
     options.provider,
     [...sources.values()],
+    strictSources,
+    platformFor,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

@@ -121,10 +121,11 @@ For `prepareNormalizedExternalPublication`, pass your original normalized
 Different normalized findings prepare a new upload.
 
 Cloud checks retained and declared source repository URLs against the selected
-repository. Local imports compare them when the checkout has a comparable Git
-remote. Select the `blackduck` provider for retained Black Duck BOM
-records. Caller-authored text and opaque IDs alone cannot establish repository
-ownership.
+repository. For local SDK imports, reader-supplied repository references must
+agree with the repository on the findings. Local imports also check comparable
+Git remotes on the selected checkout. Select the `blackduck` provider for
+retained Black Duck BOM records. Caller-authored text and opaque IDs alone
+cannot establish repository ownership.
 
 Each occurrence is identified by its project version, component version, origin,
 advisory source and advisory name. Reimporting updates the occurrence when its

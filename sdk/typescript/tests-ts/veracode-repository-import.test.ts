@@ -109,3 +109,39 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
     await fixture.dispose();
   }
 });
+
+test("a mixed SDK batch recognizes the repository retained by each Veracode row", async () => {
+  await using fixture = await localFindingsFixture();
+  const projected = "https://github.com/example/project";
+  const typed = "https://github.com/example/other";
+  const findings = (
+    [
+      [`blackduck-bom:${"a".repeat(64)}`, projected],
+      ["sdk-id", typed],
+    ] as const
+  ).map(([source_finding_id, sourceRepositoryUrl]) => ({
+    source_finding_id,
+    evidence: {
+      title: "Example",
+      severity: "unknown" as const,
+      source_data: { sourceRepositoryUrl },
+    },
+  }));
+  const prepare = (url: string) =>
+    prepareNormalizedLocalImport(
+      { findings, read: 2, excluded: [] },
+      {
+        provider: "veracode",
+        sourceKey: "example",
+        repository: fixture.repository,
+      },
+      {
+        environment: fixture.environment,
+        sourceRepositories: [{ url: projected }, { url }],
+      },
+    );
+  expect((await prepare(typed)).preview.findings).toHaveLength(2);
+  await expect(prepare("https://github.com/example/third")).rejects.toThrow(
+    /Reader repository does not match/,
+  );
+});

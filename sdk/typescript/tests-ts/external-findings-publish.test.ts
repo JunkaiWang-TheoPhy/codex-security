@@ -1228,6 +1228,11 @@ const savedBlackDuckEvidence = {
   digest: "d3001de83673b0f42b1d1d42cb19ea546869d41ed99504ca213b303267bb1346",
 };
 
+const savedDependabotData = {
+  ...githubDependabotAlert(),
+  sourceRepositoryUrl: "https://github.com/example/different",
+};
+
 test.each([
   {
     ...savedBlackDuckEvidence,
@@ -1242,6 +1247,14 @@ test.each([
       "d0ba21fbe6c5927206db937694c98f69ad59e33fc390cae6eb6bd01249b5ca10.pending.json",
   },
   {
+    selected: { ...options, provider: "github" as const },
+    data: savedDependabotData,
+    requiredProvider: "blackduck",
+    filename:
+      "2dc327e13b7b9548e828b0fe3193988a26c53c9c956b364c69990abdb418c298.pending.json",
+    digest: "abe417c10599f27dc9adc599465af29f693069deaca7942f79c952871216070e",
+  },
+  {
     selected: { ...options, provider: "inspector" as const },
     data: {
       sourceRepositoryUrl: inspectorRepositoryUrl,
@@ -1254,20 +1267,30 @@ test.each([
     digest: "13b472f7b050ef94705eed1fb4487b206386130f988d3ee6f87824f02f4d79f0",
   },
 ])(
-  "resumes a saved $selected.provider request from before $requiredProvider checks",
+  "checks a saved $selected.provider request from before $requiredProvider checks",
   async ({ selected, data, requiredProvider, filename, digest }) => {
     const f = await fixture();
     const environment: NodeJS.ProcessEnv = { ...f.environment };
     // These persisted keys came from the default deployment.
     delete environment["CODEX_SECURITY_CLOUD_BASE_URL"];
     delete environment["CODEX_SECURITY_CLOUD_WEB_URL"];
+    const alert =
+      selected.provider === "github" ? savedDependabotData : undefined;
     const row = normalized();
     const finding = {
-      source_finding_id: row.source_finding_id,
-      evidence: validateExternalEvidence({
-        ...row.evidence,
-        source_data: data,
-      }),
+      source_finding_id: alert
+        ? "blackduck-bom:" + "a".repeat(64)
+        : row.source_finding_id,
+      evidence: validateExternalEvidence(
+        alert
+          ? {
+              title: "Dependabot alert",
+              severity: "high",
+              url: alert.html_url,
+              source_data: data,
+            }
+          : { ...row.evidence, source_data: data },
+      ),
     };
     const input = { read: 1, excluded: [], findings: [finding] };
     const prepare = () =>
@@ -1304,6 +1327,17 @@ test.each([
       { mode: 0o600 },
     );
 
+    if (alert) {
+      // The original publisher selected the alert's repository. Changing the
+      // catalog to match the projection must not permit replay to another repo.
+      const originalRepository = f.state.repositoryUrl;
+      f.state.repositoryUrl = alert.sourceRepositoryUrl;
+      await expect(prepare()).rejects.toThrow(
+        `belongs to "${originalRepository}"`,
+      );
+      expect(f.posts).toHaveLength(0);
+      return;
+    }
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
     expect((await retry.publish()).counts.created).toBe(1);
@@ -1311,6 +1345,38 @@ test.each([
     await expect(prepare()).rejects.toThrow(
       `requires the ${requiredProvider} provider`,
     );
+  },
+);
+
+test.each(["wiz", "inspector"] as const)(
+  "rechecks a projected Black Duck repository on a saved %s publication",
+  async (provider) => {
+    const f = await fixture();
+    const source = f.state.repositoryUrl;
+    const input = normalizeBlackDuckFindings([blackDuckBomRow()], source);
+    input.findings[0]!.evidence.source_data = { sourceRepositoryUrl: source };
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider },
+        f.deps,
+      );
+
+    f.state.loseResponse = true;
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
+    f.state.repositoryUrl = "https://github.com/example/different";
+    await expect(prepare()).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = source;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    await retry.publish();
+    expect(f.posts).toHaveLength(2);
+    expect(f.posts[1]).toBe(f.posts[0]);
   },
 );
 
@@ -1381,6 +1447,33 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     ),
   ).rejects.toThrow(/requires the blackduck provider/);
   const stripped = structuredClone(native);
+  const data = stripped.findings[0]!.evidence.source_data!;
+  delete data["row"];
+  delete data["format"];
+  const wiz = { ...selected, provider: "wiz" as const };
+  const matching = await fixture();
+  for (const sourceData of [
+    data,
+    { sourceRepositoryUrl: selected.sourceRepositoryUrl },
+  ]) {
+    stripped.findings[0]!.evidence.source_data = sourceData;
+    await expect(
+      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+    ).rejects.toThrow(/does not match the selected Cloud repository/);
+    await prepareNormalizedExternalPublication(stripped, wiz, matching.deps);
+  }
+  for (const url of [
+    "ssh://git@git.example.test/team/project.git",
+    ` ${selected.sourceRepositoryUrl}`,
+  ]) {
+    stripped.findings[0]!.evidence.source_data = { sourceRepositoryUrl: url };
+    await expect(
+      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+    ).rejects.toThrow();
+  }
+  expect(foreign.posts).toHaveLength(0);
+  stripped.findings[0]!.evidence.source_data = { upstream: data };
+  await prepareNormalizedExternalPublication(stripped, wiz, foreign.deps);
   delete stripped.findings[0]!.evidence.source_data;
   await expect(
     prepareNormalizedExternalPublication(stripped, selected, foreign.deps),

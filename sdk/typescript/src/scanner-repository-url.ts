@@ -1,4 +1,3 @@
-import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
@@ -53,10 +52,9 @@ export function declaredScannerRepositoryUrl(
 /** A native application or project version maps to one source repository per report. */
 export function repositoryScopeValidator(
   scanner: { provider: Provider; label: string; scope: string },
-  hasEvidence: (data: unknown, id: string) => boolean,
   retainedRepository: (
-    data: unknown,
-    id: string,
+    provider: Provider,
+    finding: ExternalFinding,
     target: ExternalImportTarget,
   ) => { url: string; scope?: string } | undefined,
 ) {
@@ -73,22 +71,13 @@ export function repositoryScopeValidator(
       ).size <= 1,
   ): Map<string, ExternalSourceRepository> => {
     const repositories = new Map<string, ExternalSourceRepository>();
-    if (provider !== scanner.provider) {
-      if (
-        findings.some(({ evidence, source_finding_id }) =>
-          hasEvidence(evidence.source_data, source_finding_id),
-        )
-      )
-        throw new CodexSecurityError(
-          `Retained ${scanner.label} evidence requires the ${scanner.provider} provider.`,
-        );
-      return repositories;
-    }
-    const wholeReport = scanner.provider === "blackduck";
+    const wholeReport =
+      provider === "blackduck" && scanner.provider === provider;
     const scopes = new Set<string>();
     const sources = new Set<string>();
-    for (const { source_finding_id: id, evidence } of findings) {
-      const retained = retainedRepository(evidence.source_data, id, target);
+    for (const finding of findings) {
+      const { source_finding_id: id, evidence } = finding;
+      const retained = retainedRepository(provider, finding, target);
       const declared = evidence.details?.repository?.url;
       // A Black Duck BOM binds its entire report. A Veracode application binds its native rows.
       if (wholeReport || retained?.scope) {

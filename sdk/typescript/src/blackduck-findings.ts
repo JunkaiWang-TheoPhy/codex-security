@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
+import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
@@ -25,6 +26,17 @@ const format = "blackduck-bom-6";
 const componentVersionPath = /^components\/[^/]+\/versions\/[^/]+$/u;
 const nativeId = /^blackduck-bom:[a-f0-9]{64}$/u;
 
+export function projectedBlackDuckRepositoryUrl(
+  finding: ExternalFinding,
+  target: ExternalImportTarget,
+): string | undefined {
+  if (!nativeId.test(finding.source_finding_id)) return;
+  const url = finding.evidence.source_data?.["sourceRepositoryUrl"];
+  if (typeof url === "string")
+    return declaredScannerRepositoryUrl(url, "Black Duck", target);
+  return finding.evidence.details?.repository?.url ?? undefined;
+}
+
 function hasBlackDuckEvidence(data: unknown): boolean {
   if (!isRecord(data)) return false;
   return (
@@ -39,11 +51,24 @@ function hasBlackDuckEvidence(data: unknown): boolean {
 }
 
 function retainedRepository(
-  data: unknown,
-  id: string,
+  provider: Provider,
+  finding: ExternalFinding,
   target: ExternalImportTarget,
 ): { url: string; scope?: string } | undefined {
-  const native = hasBlackDuckEvidence(data) || nativeId.test(id);
+  const {
+    source_finding_id: id,
+    evidence: { source_data: data },
+  } = finding;
+  const nativeEvidence = hasBlackDuckEvidence(data);
+  if (provider !== "blackduck") {
+    if (nativeEvidence)
+      throw new CodexSecurityError(
+        "Retained Black Duck evidence requires the blackduck provider.",
+      );
+    const url = projectedBlackDuckRepositoryUrl(finding, target);
+    return url ? { url } : undefined;
+  }
+  const native = nativeEvidence || nativeId.test(id);
   if (native && (!isRecord(data) || !isRecord(data["row"])))
     throw new Error("Expected retained Black Duck BOM occurrence evidence.");
   if (!isRecord(data) || (!native && !("sourceRepositoryUrl" in data))) return;
@@ -76,7 +101,6 @@ function retainedRepository(
 
 export const blackDuckReportRepositories = repositoryScopeValidator(
   { provider: "blackduck", label: "Black Duck", scope: "project version" },
-  hasBlackDuckEvidence,
   retainedRepository,
 );
 
