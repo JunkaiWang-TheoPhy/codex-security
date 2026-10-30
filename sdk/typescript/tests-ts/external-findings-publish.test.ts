@@ -1457,14 +1457,16 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
   const foreignUrl = "https://github.com/example/other";
   const foreign = await fixture(undefined, foreignUrl);
   finding.evidence.details!.repository!.url = foreignUrl;
-  await expect(
-    prepareNormalizedExternalPublication(
-      partial,
-      { ...selected, provider: "wiz" },
-      foreign.deps,
-    ),
-  ).rejects.toThrow(/requires the veracode provider/i);
-  finding.source_finding_id = "sdk-id";
+  for (const id of [finding.source_finding_id, "sdk-id"]) {
+    finding.source_finding_id = id;
+    await expect(
+      prepareNormalizedExternalPublication(
+        partial,
+        { ...selected, provider: "wiz" },
+        foreign.deps,
+      ),
+    ).rejects.toThrow(/requires the veracode provider/i);
+  }
   finding.evidence.details!.repository!.url = selected.sourceRepositoryUrl;
   await expect(
     prepareNormalizedExternalPublication(partial, selected, correct.deps),

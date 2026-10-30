@@ -137,11 +137,11 @@ function hasVeracodeEvidence(data: unknown, id: string): boolean {
     applicationPath.test(URL.parse(data["applicationUrl"])?.pathname ?? "");
   const repository = "sourceRepositoryUrl" in data;
   const row = hasVeracodeRow(data["row"]);
-  if (application && repository && row) return true;
-  // A native ID corroborates a partial envelope. Other providers also retain raw vendor rows.
+  // Other providers can retain a raw vendor row or choose any occurrence ID.
+  // Corroborate the native row or ID with its repository and application envelope.
   return (
-    nativeId.test(id) &&
-    ((application && repository) || (row && (application || repository)))
+    (row && (application || repository)) ||
+    (nativeId.test(id) && application && repository)
   );
 }
 
