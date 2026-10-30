@@ -26,6 +26,7 @@ to investigate records together, not instructions to merge them.
 | [Amazon Inspector Code Security ListFindings JSON](inspector.md)                                                                                                                                    | Full Inspector finding ARN                                                                                                                              | AWS account, Region and repository project |
 | [Snyk Open Source CLI JSON, plugin v1 or SARIF](snyk.md)                                                                                                                                            | CLI: manager, manifest, advisory, package/version and dependency path; plugin: supplied composite; SARIF: advisory, manifest set and project when known | Repository, branch, scan target and format |
 | [Semgrep Code CLI/CI JSON or SARIF](semgrep.md)                                                                                                                                                     | Fingerprint; otherwise rule, literal path and start/end lines and columns                                                                               | Organization, project and branch           |
+| [GitHub Dependabot repository REST alerts](github-dependabot.md)                                                                                                                                    | Host, repository and alert number                                                                                                                       | Host, repository and Dependabot family     |
 | [GitHub saved `import github` output](../../sdk/typescript/docs/cli.md#import-github-findings-locally-or-to-cloud)                                                                                  | Host, repository, alert number and hash of selected ref                                                                                                 | Host, repository and code-scanning family  |
 | [GitHub saved `import github-advisories` output](../../sdk/typescript/docs/cli.md#import-ghsa-advisories-separately)                                                                                | Host, repository **or** global scope, and GHSA ID                                                                                                       | Separate advisory stream from alerts       |
 | [Black Duck BOM-6 collection or selected rows](blackduck.md)                                                                                                                                        | Project version, component version, origin, advisory source and advisory name                                                                           | Deployment, project and version            |
@@ -92,8 +93,12 @@ before preparing a fresh submission.
   instance state. For GHSA, a repository disclosure identifies its publisher; a
   global disclosure has no source repository. Both can carry CVE aliases,
   affected ranges and patched versions. Neither proves installation or
-  applicability. Raw API pages, Dependabot and secret-scanning alerts are not
-  these saved inputs.
+  applicability. Both readers require saved collector output.
+- **GitHub Dependabot.** Use `gh api --paginate` to save native repository
+  alert pages as JSONL for the `github` reader. Each alert identifies the
+  matched package, manifest and vulnerable range. The embedded advisory supplies advisory IDs.
+  Each alert number has its own history, including when several alerts cite the
+  same GHSA. GitHub secret-scanning alerts remain outside the file reader.
 
 ## Read the right field
 

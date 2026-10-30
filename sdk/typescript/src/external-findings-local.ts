@@ -28,6 +28,7 @@ import {
 import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -602,6 +603,7 @@ export async function prepareLocalImport(
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
   validateExternalReport(current.report);
+  let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     requireIdentity(finding.source_finding_id, "Source finding id");
@@ -612,6 +614,22 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    if (options.provider !== "github") continue;
+    const native = dependabotRepository(finding);
+    if (!native) continue;
+    const claimed = finding.evidence.details?.repository?.url;
+    if (
+      claimed &&
+      cloudRepositoryUrlKey(claimed) !== cloudRepositoryUrlKey(native)
+    )
+      throw new CodexSecurityError(
+        "The normalized repository does not match the original Dependabot alert.",
+      );
+    if (dependabotSource && dependabotSource !== native)
+      throw new CodexSecurityError(
+        "Select Dependabot alerts from only one GitHub host and repository.",
+      );
+    dependabotSource = native;
   }
   const { repository, options: workbenchOptions } = await localContext(
     options.repository,
@@ -659,6 +677,11 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  if (dependabotSource)
+    sources.set(dependabotSource, {
+      url: dependabotSource,
+      platform: "github",
+    });
   await requireMatchingRepository(
     repository,
     options.provider,

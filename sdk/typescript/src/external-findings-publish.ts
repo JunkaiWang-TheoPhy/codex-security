@@ -32,6 +32,7 @@ import {
 } from "./external-findings-read.js";
 import { canonicalJson } from "./record.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import { blackDuckReportRepositories } from "./blackduck-findings.js";
@@ -780,6 +781,9 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(evidence.source_data)
           : []),
+        options.provider === "github"
+          ? dependabotRepository(finding)
+          : undefined,
       ];
       for (const url of urls) requireDestination(id, url);
     }
