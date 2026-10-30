@@ -26,13 +26,8 @@ export async function prepareLocalExternalImport(
 ) {
   const { signal } = dependencies;
   signal?.throwIfAborted();
-  const { environment } = dependencies;
-  requireExternalImports(environment);
-  const workbench = {
-    environment,
-    signal,
-    runWorkbench: dependencies.runWorkbench,
-  };
+  requireExternalImports(dependencies.environment);
+  const runWorkbench = dependencies.runWorkbench;
   const settings = snapshotImportOptions(options);
   const verifiedRepositories = snapshotSourceRepositories(
     dependencies.sourceRepositories,
@@ -72,8 +67,10 @@ export async function prepareLocalExternalImport(
         platform: "github",
       }));
   }
-  return prepareLocalImport(parsed.findings, normalizedOptions, workbench, [
-    ...verifiedRepositories,
-    ...sourceRepositories,
-  ]);
+  return prepareLocalImport(
+    parsed.findings,
+    normalizedOptions,
+    { environment: dependencies.environment, signal, runWorkbench },
+    [...verifiedRepositories, ...sourceRepositories],
+  );
 }
